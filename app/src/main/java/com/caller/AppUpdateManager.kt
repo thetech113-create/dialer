@@ -52,25 +52,40 @@ object AppUpdateManager {
 
     private data class Release(val versionCode: Long, val apkUrl: String, val sha256: String?)
 
-    fun checkForUpdate(activity: Activity) {
+    fun checkForUpdate(activity: Activity, isManual: Boolean = false) {
         deleteInstalledUpdateIfSafe(activity.applicationContext)
-        if (BuildConfig.GITHUB_RELEASE_REPOSITORY.isBlank()) {
-            Log.w(TAG, "Update checks disabled: githubReleaseRepository was not set for this build")
-            return
+        val repository = if (BuildConfig.GITHUB_RELEASE_REPOSITORY.isNotBlank()) {
+            BuildConfig.GITHUB_RELEASE_REPOSITORY.trim()
+        } else {
+            "thetech113-create/dialer"
         }
+
+        if (isManual) {
+            toast(activity, "Checking for updates...")
+        }
+
         val prefs = activity.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
-        if (System.currentTimeMillis() - prefs.getLong(KEY_LAST_CHECK, 0L) < CHECK_INTERVAL_MS) return
+        if (!isManual && System.currentTimeMillis() - prefs.getLong(KEY_LAST_CHECK, 0L) < CHECK_INTERVAL_MS) return
         if (prefs.getLong(KEY_DOWNLOAD_ID, -1L) != -1L) {
             handleCompletedDownload(activity.applicationContext, prefs.getLong(KEY_DOWNLOAD_ID, -1L))
             return
         }
         prefs.edit().putLong(KEY_LAST_CHECK, System.currentTimeMillis()).apply()
         scope.launch {
-            val result = runCatching { latestRelease() }
+            val result = runCatching { latestRelease(repository) }
             result.onSuccess { release ->
-                if (release.versionCode > installedVersionCode(activity)) enqueueDownload(activity, release)
+                val currentVer = installedVersionCode(activity)
+                if (release.versionCode > currentVer) {
+                    toast(activity, "Update available! Starting download...")
+                    enqueueDownload(activity.applicationContext, release)
+                } else if (isManual) {
+                    toast(activity, "You are using the latest version")
+                }
             }.onFailure { error ->
                 Log.w(TAG, "Update metadata check failed", error)
+                if (isManual) {
+                    toast(activity, "Unable to check for updates: ${error.localizedMessage ?: "Network error"}")
+                }
             }
         }
     }
@@ -81,9 +96,10 @@ object AppUpdateManager {
         if (downloadId == expected) handleCompletedDownload(context.applicationContext, downloadId)
     }
 
-    private fun latestRelease(): Release {
-        val repository = BuildConfig.GITHUB_RELEASE_REPOSITORY.trim()
-        require(repository.matches(Regex("[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+"))) { "Invalid GitHub repository" }
+    private fun latestRelease(repositoryOverride: String? = null): Release {
+        val repository = (repositoryOverride ?: BuildConfig.GITHUB_RELEASE_REPOSITORY).trim()
+            .ifBlank { "thetech113-create/dialer" }
+        require(repository.matches(Regex("[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+"))) { "Invalid GitHub repository: $repository" }
         val apiUrl = "https://api.github.com/repos/$repository/releases/latest"
         val release = getJson(apiUrl)
         val assets = release.optJSONArray("assets") ?: error("Release has no assets")
@@ -121,22 +137,66 @@ object AppUpdateManager {
         val directory = File(context.getExternalFilesDir(Environment.DIRECTORY_DOWNLOADS), "updates").apply { mkdirs() }
         val target = File(directory, "update-${release.versionCode}.apk")
         if (target.exists()) target.delete()
-        val request = DownloadManager.Request(Uri.parse(release.apkUrl))
-            .setTitle("Downloading app update")
-            .setDescription("Version ${release.versionCode}")
-            .setNotificationVisibility(DownloadManager.Request.VISIBILITY_VISIBLE_NOTIFY_COMPLETED)
-            .setAllowedOverMetered(true)
-            .setAllowedOverRoaming(false)
-            .setDestinationUri(Uri.fromFile(target))
-        val id = (context.getSystemService(Context.DOWNLOAD_SERVICE) as DownloadManager).enqueue(request)
-        context.getSharedPreferences(PREFS, Context.MODE_PRIVATE).edit()
-            .putLong(KEY_DOWNLOAD_ID, id)
-            .putLong(KEY_VERSION_CODE, release.versionCode)
-            .putString(KEY_FILE_PATH, target.absolutePath)
-            .putString(KEY_SHA256, release.sha256)
-            .apply()
-        toast(context, "Downloading update")
-        Log.i(TAG, "Enqueued update version ${release.versionCode}, download id=$id")
+
+        try {
+            val manager = context.getSystemService(Context.DOWNLOAD_SERVICE) as? DownloadManager
+            if (manager != null) {
+                val request = DownloadManager.Request(Uri.parse(release.apkUrl))
+                    .setTitle("Downloading app update")
+                    .setDescription("Version ${release.versionCode}")
+                    .setNotificationVisibility(DownloadManager.Request.VISIBILITY_VISIBLE_NOTIFY_COMPLETED)
+                    .setAllowedOverMetered(true)
+                    .setAllowedOverRoaming(false)
+                    .setDestinationUri(Uri.fromFile(target))
+                val id = manager.enqueue(request)
+                context.getSharedPreferences(PREFS, Context.MODE_PRIVATE).edit()
+                    .putLong(KEY_DOWNLOAD_ID, id)
+                    .putLong(KEY_VERSION_CODE, release.versionCode)
+                    .putString(KEY_FILE_PATH, target.absolutePath)
+                    .putString(KEY_SHA256, release.sha256)
+                    .apply()
+                toast(context, "Downloading update")
+                Log.i(TAG, "Enqueued update version ${release.versionCode}, download id=$id")
+                return
+            }
+        } catch (e: Exception) {
+            Log.w(TAG, "System DownloadManager unavailable or disabled, using direct HTTP download fallback", e)
+        }
+
+        // Direct in-app HTTP download fallback if system DownloadManager is unavailable/disabled
+        directDownloadInApp(context, release, target)
+    }
+
+    private fun directDownloadInApp(context: Context, release: Release, target: File) {
+        scope.launch {
+            toast(context, "Downloading update directly...")
+            val result = runCatching {
+                val request = Request.Builder()
+                    .url(release.apkUrl)
+                    .header("User-Agent", "Caller-Android-Updater")
+                    .build()
+                http.newCall(request).execute().use { response ->
+                    if (!response.isSuccessful) error("HTTP ${response.code}")
+                    val body = response.body ?: error("Empty response body")
+                    body.byteStream().use { input ->
+                        java.io.FileOutputStream(target).use { output ->
+                            input.copyTo(output)
+                        }
+                    }
+                }
+            }
+            result.onSuccess {
+                if (verifyApk(context, target, release.versionCode, release.sha256)) {
+                    withContext(Dispatchers.Main) { openInstaller(context, target) }
+                } else {
+                    if (target.exists()) target.delete()
+                    toast(context, "Downloaded update could not be verified")
+                }
+            }.onFailure { error ->
+                Log.e(TAG, "Direct download failed", error)
+                toast(context, "Download failed: ${error.localizedMessage ?: "Unknown error"}")
+            }
+        }
     }
 
     private fun handleCompletedDownload(context: Context, downloadId: Long) {

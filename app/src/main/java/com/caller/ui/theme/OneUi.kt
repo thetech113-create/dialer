@@ -246,8 +246,8 @@ fun OneUiBottomTabs(
                 Text(
                     text = label,
                     color = if (selected) palette.textPrimary else palette.textSecondary,
-                    // 14sp so five labels ("Voicemail" is the longest) fit on a narrow phone.
-                    fontSize = 14.sp,
+                    // 12sp when > 5 tabs so all labels fit comfortably on narrow phone screens.
+                    fontSize = if (tabs.size > 5) 12.sp else 14.sp,
                     fontWeight = if (selected) FontWeight.Bold else FontWeight.Normal,
                     maxLines = 1,
                     softWrap = false

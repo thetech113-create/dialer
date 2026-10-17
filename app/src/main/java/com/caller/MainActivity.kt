@@ -31,6 +31,7 @@ import android.os.PowerManager
 import android.provider.CallLog.Calls
 import android.provider.ContactsContract
 import android.provider.Settings
+import android.provider.Telephony
 import android.telecom.TelecomManager
 import android.telecom.VideoProfile
 import android.telephony.TelephonyManager
@@ -104,6 +105,8 @@ import androidx.compose.material.icons.filled.Person
 import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material.icons.filled.Search
 import androidx.compose.material.icons.filled.Send
+import androidx.compose.material.icons.filled.Info
+import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material.icons.filled.Share
 import androidx.compose.material.icons.filled.Videocam
 import androidx.compose.material.icons.outlined.Apps
@@ -114,6 +117,7 @@ import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.CircularProgressIndicator
+import androidx.compose.material3.Divider
 import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.ExperimentalMaterial3Api
@@ -124,6 +128,7 @@ import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Surface
+import androidx.compose.material3.Switch
 import androidx.compose.material3.Tab
 import androidx.compose.material3.TabRow
 import androidx.compose.material3.Text
@@ -432,6 +437,7 @@ private const val TAB_RECENTS = 1
 private const val TAB_PROFILE = 2
 private const val TAB_VOICEMAIL = 3
 private const val TAB_KEYPAD = 4
+private const val TAB_SETTINGS = 5
 private const val STATE_SELECTED_TAB_KEY = "main_selected_tab"
 private const val STATE_RECENT_SEARCH_QUERY_KEY = "main_recent_search_query"
 private const val STATE_RECENT_DIALPAD_VISIBLE_KEY = "main_recent_dialpad_visible"
@@ -1838,6 +1844,25 @@ class MainActivity : ComponentActivity() {
         }
     }
 
+    private fun requestDefaultSmsRole() {
+        try {
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+                val roleManager = getSystemService(ROLE_SERVICE) as RoleManager
+                if (roleManager.isRoleAvailable(RoleManager.ROLE_SMS)) {
+                    val intent = roleManager.createRequestRoleIntent(RoleManager.ROLE_SMS)
+                    startActivity(intent)
+                    return
+                }
+            }
+            val intent = Intent(Telephony.Sms.Intents.ACTION_CHANGE_DEFAULT)
+            intent.putExtra(Telephony.Sms.Intents.EXTRA_PACKAGE_NAME, packageName)
+            startActivity(intent)
+        } catch (e: Exception) {
+            Log.e("CMF_DIALER_DEBUG", "Failed to request SMS role: ${e.message}", e)
+            openDefaultAppsSettings()
+        }
+    }
+
     private fun openDefaultAppsSettings() {
         Toast.makeText(this, "Choose this app under \"Phone app\"", Toast.LENGTH_LONG).show()
         val intents = listOf(
@@ -2277,7 +2302,7 @@ class MainActivity : ComponentActivity() {
         )
     }
 
-    private fun openXiaomiOtherPermissionsSettings() {
+    fun openXiaomiOtherPermissionsSettings() {
         val packageUri = Uri.fromParts("package", packageName, null)
         val miuiIntent = Intent("miui.intent.action.APP_PERM_EDITOR").apply {
             component = ComponentName(
@@ -3622,7 +3647,8 @@ class MainActivity : ComponentActivity() {
                 TAB_RECENTS to "Recents",
                 TAB_CONTACTS to "Contacts",
                 TAB_PROFILE to "Profile",
-                TAB_VOICEMAIL to "Voicemail"
+                TAB_VOICEMAIL to "Voicemail",
+                TAB_SETTINGS to "Settings"
             )
 
             Box(modifier = Modifier.fillMaxWidth().weight(1f)) {
@@ -4309,6 +4335,13 @@ class MainActivity : ComponentActivity() {
                 }
                 TAB_PROFILE -> LocalProfileScreen(context = ctx)
                 TAB_VOICEMAIL -> VoicemailScreen(refreshTrigger = refreshTrigger)
+                TAB_SETTINGS -> SettingsScreen(
+                    context = ctx,
+                    activity = this@MainActivity,
+                    onRequestDefaultDialer = { requestDefaultDialerRole() },
+                    onRequestCallScreeningRole = { requestCallScreeningRoleIfNeeded() },
+                    onRequestDefaultSms = { requestDefaultSmsRole() }
+                )
             }
             }
 
@@ -7786,6 +7819,375 @@ class MainActivity : ComponentActivity() {
                         .padding(horizontal = 32.dp)
                 )
             }
+        }
+    }
+}
+
+@Composable
+fun SettingsScreen(
+    context: Context,
+    activity: Activity,
+    onRequestDefaultDialer: () -> Unit,
+    onRequestCallScreeningRole: () -> Boolean,
+    onRequestDefaultSms: () -> Unit
+) {
+    val prefs = remember(context) {
+        val safe = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.N) context.createDeviceProtectedStorageContext() else context
+        safe.getSharedPreferences("app_settings", Context.MODE_PRIVATE)
+    }
+
+    var blockUnknownNumbers by remember { mutableStateOf(prefs.getBoolean("block_unknown_numbers", false)) }
+    var spamProtectionEnabled by remember { mutableStateOf(prefs.getBoolean("spam_protection_enabled", true)) }
+    var showLogDialog by remember { mutableStateOf(false) }
+
+    val isDefaultDialer = remember(context) {
+        val telecomManager = context.getSystemService(Context.TELECOM_SERVICE) as? TelecomManager
+        telecomManager?.defaultDialerPackage == context.packageName
+    }
+
+    val isDefaultSms = remember(context) {
+        Telephony.Sms.getDefaultSmsPackage(context) == context.packageName
+    }
+
+    val isCallScreeningActive = remember(context) {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+            val rm = context.getSystemService(RoleManager::class.java)
+            rm?.isRoleHeld(RoleManager.ROLE_CALL_SCREENING) == true
+        } else false
+    }
+
+    val hasOverlayPermission = remember(context) {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
+            Settings.canDrawOverlays(context)
+        } else true
+    }
+
+    Column(
+        modifier = Modifier
+            .fillMaxSize()
+            .verticalScroll(rememberScrollState())
+            .padding(horizontal = 20.dp, vertical = 20.dp),
+        verticalArrangement = Arrangement.spacedBy(16.dp)
+    ) {
+        Text(
+            text = "Settings",
+            style = MaterialTheme.typography.headlineMedium,
+            fontWeight = FontWeight.Bold
+        )
+        Text(
+            text = "Configure app roles, permissions, spam protection & updates",
+            style = MaterialTheme.typography.bodyMedium,
+            color = MaterialTheme.colorScheme.onSurfaceVariant
+        )
+
+        // Card 1: Default App Roles
+        Card(
+            modifier = Modifier.fillMaxWidth(),
+            colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.5f)),
+            shape = RoundedCornerShape(20.dp)
+        ) {
+            Column(modifier = Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
+                Text(
+                    text = "Default App Roles",
+                    style = MaterialTheme.typography.titleMedium,
+                    fontWeight = FontWeight.Bold
+                )
+
+                SettingItemRow(
+                    title = "Default Phone App",
+                    subtitle = if (isDefaultDialer) "Caller is set as your default dialer" else "Tap to set Caller as your default dialer",
+                    badgeText = if (isDefaultDialer) "Default" else "Not Default",
+                    badgeColor = if (isDefaultDialer) Color(0xFF2E7D32) else Color(0xFFD84315),
+                    onClick = onRequestDefaultDialer
+                )
+
+                Divider(color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.5f))
+
+                SettingItemRow(
+                    title = "Spam & Call Screening",
+                    subtitle = if (isCallScreeningActive) "Active — blocking & caller identification enabled" else "Tap to enable Call Screening role",
+                    badgeText = if (isCallScreeningActive) "Active" else "Disabled",
+                    badgeColor = if (isCallScreeningActive) Color(0xFF2E7D32) else Color(0xFFD84315),
+                    onClick = { onRequestCallScreeningRole() }
+                )
+
+                Divider(color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.5f))
+
+                SettingItemRow(
+                    title = "Default Messaging App",
+                    subtitle = if (isDefaultSms) "Caller is your default SMS app" else "Tap to set Caller as your default SMS app",
+                    badgeText = if (isDefaultSms) "Default" else "Not Default",
+                    badgeColor = if (isDefaultSms) Color(0xFF2E7D32) else Color(0xFFD84315),
+                    onClick = onRequestDefaultSms
+                )
+            }
+        }
+
+        // Card 2: System Permissions & Overlays
+        Card(
+            modifier = Modifier.fillMaxWidth(),
+            colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.5f)),
+            shape = RoundedCornerShape(20.dp)
+        ) {
+            Column(modifier = Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
+                Text(
+                    text = "Display & System Permissions",
+                    style = MaterialTheme.typography.titleMedium,
+                    fontWeight = FontWeight.Bold
+                )
+
+                SettingItemRow(
+                    title = "In-Call Floating Bubble / Overlay",
+                    subtitle = if (hasOverlayPermission) "Overlay permission granted" else "Grant permission to show ongoing call bubbles",
+                    badgeText = if (hasOverlayPermission) "Granted" else "Required",
+                    badgeColor = if (hasOverlayPermission) Color(0xFF2E7D32) else Color(0xFFD84315),
+                    onClick = {
+                        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
+                            runCatching {
+                                context.startActivity(Intent(Settings.ACTION_MANAGE_OVERLAY_PERMISSION, Uri.parse("package:${context.packageName}")).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK))
+                            }
+                        }
+                    }
+                )
+
+                Divider(color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.5f))
+
+                SettingItemRow(
+                    title = "Usage Access Permission",
+                    subtitle = "Allows detecting when you are on home screen for full-screen calls",
+                    badgeText = "Configure",
+                    badgeColor = MaterialTheme.colorScheme.primary,
+                    onClick = {
+                        runCatching {
+                            context.startActivity(Intent(Settings.ACTION_USAGE_ACCESS_SETTINGS).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK))
+                        }
+                    }
+                )
+
+                Divider(color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.5f))
+
+                SettingItemRow(
+                    title = "Ignore Battery Optimizations",
+                    subtitle = "Ensure background calls and notifications are never delayed",
+                    badgeText = "Configure",
+                    badgeColor = MaterialTheme.colorScheme.primary,
+                    onClick = {
+                        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
+                            runCatching {
+                                context.startActivity(Intent(Settings.ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS, Uri.parse("package:${context.packageName}")).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK))
+                            }
+                        }
+                    }
+                )
+
+                val isXiaomi = Build.MANUFACTURER.equals("Xiaomi", ignoreCase = true) ||
+                              Build.MANUFACTURER.equals("Redmi", ignoreCase = true) ||
+                              Build.MANUFACTURER.equals("POCO", ignoreCase = true)
+                if (isXiaomi) {
+                    Divider(color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.5f))
+                    SettingItemRow(
+                        title = "MIUI / HyperOS Background Popups",
+                        subtitle = "Enable Lock screen & Background pop-up permissions on Xiaomi devices",
+                        badgeText = "MIUI Fix",
+                        badgeColor = Color(0xFFFF8F00),
+                        onClick = {
+                            if (activity is MainActivity) {
+                                activity.openXiaomiOtherPermissionsSettings()
+                            }
+                        }
+                    )
+                }
+            }
+        }
+
+        // Card 3: Spam & Filtering
+        Card(
+            modifier = Modifier.fillMaxWidth(),
+            colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.5f)),
+            shape = RoundedCornerShape(20.dp)
+        ) {
+            Column(modifier = Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
+                Text(
+                    text = "Spam & Filtering Preferences",
+                    style = MaterialTheme.typography.titleMedium,
+                    fontWeight = FontWeight.Bold
+                )
+
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Column(modifier = Modifier.weight(1f)) {
+                        Text(text = "Smart Spam Protection", fontWeight = FontWeight.SemiBold)
+                        Text(text = "Automatically detect and flag suspected spam calls and messages", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                    }
+                    Switch(
+                        checked = spamProtectionEnabled,
+                        onCheckedChange = { checked ->
+                            spamProtectionEnabled = checked
+                            prefs.edit().putBoolean("spam_protection_enabled", checked).apply()
+                        }
+                    )
+                }
+
+                Divider(color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.5f))
+
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Column(modifier = Modifier.weight(1f)) {
+                        Text(text = "Block Private & Unknown Callers", fontWeight = FontWeight.SemiBold)
+                        Text(text = "Automatically drop calls from private, hidden, or unlisted numbers", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                    }
+                    Switch(
+                        checked = blockUnknownNumbers,
+                        onCheckedChange = { checked ->
+                            blockUnknownNumbers = checked
+                            prefs.edit().putBoolean("block_unknown_numbers", checked).apply()
+                        }
+                    )
+                }
+            }
+        }
+
+        // Card 4: Software Updates & Downloader
+        Card(
+            modifier = Modifier.fillMaxWidth(),
+            colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.5f)),
+            shape = RoundedCornerShape(20.dp)
+        ) {
+            Column(modifier = Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
+                Text(
+                    text = "Software Updates",
+                    style = MaterialTheme.typography.titleMedium,
+                    fontWeight = FontWeight.Bold
+                )
+
+                Column(modifier = Modifier.fillMaxWidth()) {
+                    Text(
+                        text = "Caller v${BuildConfig.VERSION_NAME} (Build ${BuildConfig.VERSION_CODE})",
+                        fontWeight = FontWeight.SemiBold
+                    )
+                    Text(
+                        text = "Channel: GitHub Release (thetech113-create/dialer)",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                    Text(
+                        text = "Includes direct HTTP downloader fallback for devices without system DownloadManager.",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.primary,
+                        modifier = Modifier.padding(top = 2.dp)
+                    )
+                }
+
+                Button(
+                    onClick = { AppUpdateManager.checkForUpdate(activity, isManual = true) },
+                    modifier = Modifier.fillMaxWidth(),
+                    shape = RoundedCornerShape(12.dp)
+                ) {
+                    Icon(Icons.Default.Refresh, contentDescription = null, modifier = Modifier.size(18.dp))
+                    Spacer(modifier = Modifier.width(8.dp))
+                    Text("Check for Updates")
+                }
+            }
+        }
+
+        // Card 5: Diagnostics & Logs
+        Card(
+            modifier = Modifier.fillMaxWidth(),
+            colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.5f)),
+            shape = RoundedCornerShape(20.dp)
+        ) {
+            Column(modifier = Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
+                Text(
+                    text = "Diagnostics & Forensic Logs",
+                    style = MaterialTheme.typography.titleMedium,
+                    fontWeight = FontWeight.Bold
+                )
+                Text(
+                    text = "View app diagnostics, call state history and system event logs.",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+                OutlinedButton(
+                    onClick = { showLogDialog = true },
+                    modifier = Modifier.fillMaxWidth(),
+                    shape = RoundedCornerShape(12.dp)
+                ) {
+                    Icon(Icons.Default.Info, contentDescription = null, modifier = Modifier.size(18.dp))
+                    Spacer(modifier = Modifier.width(8.dp))
+                    Text("View Diagnostic Logs")
+                }
+            }
+        }
+    }
+
+    if (showLogDialog) {
+        val logDump = remember<String> { com.caller.logging.UltraForensicLogger.dumpLogHistory().takeLast(2000) }
+        AlertDialog(
+            onDismissRequest = { showLogDialog = false },
+            title = { Text("Forensic Diagnostic Logs") },
+            text = {
+                Box(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .height(300.dp)
+                        .background(Color.Black, shape = RoundedCornerShape(12.dp))
+                        .padding(12.dp)
+                        .verticalScroll(rememberScrollState())
+                ) {
+                    Text(
+                        text = if (logDump.isNotBlank()) logDump else "No log events recorded yet.",
+                        color = Color.Green,
+                        fontSize = 11.sp,
+                        fontFamily = androidx.compose.ui.text.font.FontFamily.Monospace
+                    )
+                }
+            },
+            confirmButton = {
+                TextButton(onClick = { showLogDialog = false }) {
+                    Text("Close")
+                }
+            }
+        )
+    }
+}
+
+@Composable
+private fun SettingItemRow(
+    title: String,
+    subtitle: String,
+    badgeText: String,
+    badgeColor: Color,
+    onClick: () -> Unit
+) {
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .clickable { onClick() }
+            .padding(vertical = 4.dp),
+        horizontalArrangement = Arrangement.SpaceBetween,
+        verticalAlignment = Alignment.CenterVertically
+    ) {
+        Column(modifier = Modifier.weight(1f).padding(end = 12.dp)) {
+            Text(text = title, fontWeight = FontWeight.SemiBold, style = MaterialTheme.typography.bodyLarge)
+            Text(text = subtitle, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+        }
+        Surface(
+            shape = RoundedCornerShape(100.dp),
+            color = badgeColor.copy(alpha = 0.15f)
+        ) {
+            Text(
+                text = badgeText,
+                modifier = Modifier.padding(horizontal = 10.dp, vertical = 4.dp),
+                style = MaterialTheme.typography.labelSmall,
+                color = badgeColor,
+                fontWeight = FontWeight.Bold
+            )
         }
     }
 }
