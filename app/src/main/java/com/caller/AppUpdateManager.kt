@@ -84,7 +84,12 @@ object AppUpdateManager {
             }.onFailure { error ->
                 Log.w(TAG, "Update metadata check failed", error)
                 if (isManual) {
-                    toast(activity, "Unable to check for updates: ${error.localizedMessage ?: "Network error"}")
+                    val msg = error.localizedMessage ?: "Network error"
+                    if (msg.contains("404") || msg.contains("No releases", ignoreCase = true) || msg.contains("Not Found", ignoreCase = true)) {
+                        toast(activity, "You are using the latest version")
+                    } else {
+                        toast(activity, "Unable to check for updates: $msg")
+                    }
                 }
             }
         }
@@ -128,6 +133,9 @@ object AppUpdateManager {
             .header("User-Agent", "Caller-Android-Updater")
             .build()
         http.newCall(request).execute().use { response ->
+            if (response.code == 404) {
+                error("No GitHub releases published yet")
+            }
             require(response.isSuccessful) { "GitHub returned HTTP ${response.code}" }
             return JSONObject(response.body?.string() ?: error("Empty GitHub response"))
         }
