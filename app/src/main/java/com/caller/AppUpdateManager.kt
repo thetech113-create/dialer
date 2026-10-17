@@ -137,7 +137,8 @@ object AppUpdateManager {
                 error("No GitHub releases published yet")
             }
             require(response.isSuccessful) { "GitHub returned HTTP ${response.code}" }
-            return JSONObject(response.body?.string() ?: error("Empty GitHub response"))
+            val raw = response.body?.string()?.trim()?.removePrefix("\uFEFF") ?: error("Empty GitHub response")
+            return JSONObject(raw)
         }
     }
 
