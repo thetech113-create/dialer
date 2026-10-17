@@ -176,9 +176,45 @@ object AppUpdateManager {
         directDownloadInApp(context, release, target)
     }
 
+    fun checkAndInstallPending(activity: Activity) {
+        deleteInstalledUpdateIfSafe(activity.applicationContext)
+        val file = getDownloadedUpdateFile(activity) ?: return
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O && !activity.packageManager.canRequestPackageInstalls()) return
+        openInstaller(activity, file)
+    }
+
+    fun getDownloadedUpdateFile(context: Context): File? {
+        val prefs = context.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
+        val filePath = prefs.getString(KEY_FILE_PATH, null) ?: return null
+        val file = File(filePath)
+        if (file.isFile && file.length() > 0) {
+            val expectedVer = prefs.getLong(KEY_VERSION_CODE, -1L)
+            val expectedHash = prefs.getString(KEY_SHA256, null)
+            if (verifyApk(context, file, expectedVer, expectedHash)) {
+                return file
+            }
+        }
+        return null
+    }
+
+    fun installDownloadedUpdate(context: Context) {
+        val file = getDownloadedUpdateFile(context)
+        if (file != null) {
+            openInstaller(context, file)
+        } else {
+            toast(context, "No verified update file found")
+        }
+    }
+
     private fun directDownloadInApp(context: Context, release: Release, target: File) {
         scope.launch {
             toast(context, "Downloading update directly...")
+            context.getSharedPreferences(PREFS, Context.MODE_PRIVATE).edit()
+                .putString(KEY_FILE_PATH, target.absolutePath)
+                .putLong(KEY_VERSION_CODE, release.versionCode)
+                .putString(KEY_SHA256, release.sha256)
+                .apply()
+
             val result = runCatching {
                 val request = Request.Builder()
                     .url(release.apkUrl)
@@ -196,9 +232,11 @@ object AppUpdateManager {
             }
             result.onSuccess {
                 if (verifyApk(context, target, release.versionCode, release.sha256)) {
+                    toast(context, "Download complete! Opening installer...")
                     withContext(Dispatchers.Main) { openInstaller(context, target) }
                 } else {
                     if (target.exists()) target.delete()
+                    clearDownload(context)
                     toast(context, "Downloaded update could not be verified")
                 }
             }.onFailure { error ->
@@ -232,6 +270,7 @@ object AppUpdateManager {
                 toast(context, "Downloaded update could not be verified")
                 return@launch
             }
+            toast(context, "Download complete! Opening installer...")
             withContext(Dispatchers.Main) { openInstaller(context, file) }
         }
     }
@@ -240,22 +279,36 @@ object AppUpdateManager {
         if (!file.isFile || file.length() == 0L) return false
         if (expectedSha256 != null && sha256(file) != expectedSha256.lowercase()) return false
         val packageInfo = context.packageManager.getPackageArchiveInfo(file.absolutePath, 0) ?: return false
-        if (packageInfo.packageName != context.packageName || archiveVersionCode(packageInfo) != expectedVersion) return false
+        if (packageInfo.packageName != context.packageName) return false
+        if (expectedVersion > 0 && archiveVersionCode(packageInfo) != expectedVersion) return false
         return true // The platform installer performs the authoritative signing-certificate verification.
     }
 
     private fun openInstaller(context: Context, file: File) {
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O && !context.packageManager.canRequestPackageInstalls()) {
-            toast(context, "Allow installs from this app to finish the update")
-            context.startActivity(Intent(Settings.ACTION_MANAGE_UNKNOWN_APP_SOURCES, Uri.parse("package:${context.packageName}"))
-                .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK))
-            return
+        try {
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O && !context.packageManager.canRequestPackageInstalls()) {
+                toast(context, "Allow 'Install unknown apps' permission to finish update")
+                context.getSharedPreferences(PREFS, Context.MODE_PRIVATE).edit()
+                    .putString(KEY_FILE_PATH, file.absolutePath)
+                    .apply()
+                context.startActivity(
+                    Intent(Settings.ACTION_MANAGE_UNKNOWN_APP_SOURCES, Uri.parse("package:${context.packageName}"))
+                        .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                )
+                return
+            }
+
+            val uri = FileProvider.getUriForFile(context, "${context.packageName}.update-file-provider", file)
+            val intent = Intent(Intent.ACTION_VIEW).apply {
+                setDataAndType(uri, "application/vnd.android.package-archive")
+                addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION or Intent.FLAG_GRANT_WRITE_URI_PERMISSION or Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TOP)
+            }
+            context.startActivity(intent)
+            toast(context, "Opening package installer...")
+        } catch (e: Exception) {
+            Log.e(TAG, "Failed to open installer", e)
+            toast(context, "Error opening installer: ${e.localizedMessage}")
         }
-        val uri = FileProvider.getUriForFile(context, "${context.packageName}.update-file-provider", file)
-        context.startActivity(Intent(Intent.ACTION_VIEW).apply {
-            setDataAndType(uri, "application/vnd.android.package-archive")
-            addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION or Intent.FLAG_ACTIVITY_NEW_TASK)
-        })
     }
 
     private fun deleteInstalledUpdateIfSafe(context: Context) {

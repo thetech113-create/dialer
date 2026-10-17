@@ -97,6 +97,7 @@ import androidx.compose.material.icons.filled.CallReceived
 import androidx.compose.material.icons.filled.CloudQueue
 import androidx.compose.material.icons.filled.ContentCopy
 import androidx.compose.material.icons.filled.Delete
+import androidx.compose.material.icons.filled.Download
 import androidx.compose.material.icons.filled.ExpandLess
 import androidx.compose.material.icons.filled.ExpandMore
 import androidx.compose.material.icons.filled.KeyboardArrowDown
@@ -873,6 +874,7 @@ class MainActivity : ComponentActivity() {
             isDefaultDialer = getDefaultDialerPackageSafely() == packageName
         )
         if (uiState.isDefaultDialer) maybeAskUsageAccess()
+        AppUpdateManager.checkAndInstallPending(this)
         syncContactsObserverRegistration()
         refreshPowerSaveModeState("resume")
         refreshPowerPermissionPrompts()
@@ -8082,6 +8084,20 @@ fun SettingsScreen(
                         color = MaterialTheme.colorScheme.primary,
                         modifier = Modifier.padding(top = 2.dp)
                     )
+                }
+
+                val pendingUpdate = remember { AppUpdateManager.getDownloadedUpdateFile(context) }
+                if (pendingUpdate != null) {
+                    Button(
+                        onClick = { AppUpdateManager.installDownloadedUpdate(context) },
+                        modifier = Modifier.fillMaxWidth(),
+                        shape = RoundedCornerShape(12.dp),
+                        colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF2E7D32))
+                    ) {
+                        Icon(Icons.Default.Download, contentDescription = null, modifier = Modifier.size(18.dp))
+                        Spacer(modifier = Modifier.width(8.dp))
+                        Text("Install Downloaded Update Now")
+                    }
                 }
 
                 Button(
