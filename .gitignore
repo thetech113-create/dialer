@@ -1,0 +1,24 @@
+*.iml
+.gradle
+/local.properties
+/.idea/
+.DS_Store
+/build
+/captures
+.externalNativeBuild
+.cxx
+local.properties
+
+# Logs and temporary files
+*.log
+hs_err_pid*.log
+replay_pid*.log
+classes.dex
+minimal_main.kt
+minimal_manifest.xml
+video_frames/
+tmp_video_frames/
+.kotlin/
+.vscode/
+
+

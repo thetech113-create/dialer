@@ -1,0 +1,8 @@
+<resources>
+    <string name="app_name">Phone &amp; Messages</string>
+    <string name="launcher_phone_label">Phone</string>
+    <string name="launcher_messages_label">Messages</string>
+    <string name="google_webrisk_api_key"></string>
+    <string name="accessibility_service_desc">Call Detection Service</string>
+</resources>
+

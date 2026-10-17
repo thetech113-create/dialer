@@ -1,0 +1,424 @@
+                                                                                                                                                                                    package com.caller.logging
+
+                                                                                                                                                                                    import android.content.Context
+                                                                                                                                                                                    import android.os.Build
+                                                                                                                                                                                    import android.os.Environment
+                                                                                                                                                                                    import android.util.Log
+                                                                                                                                                                                    import org.json.JSONObject
+                                                                                                                                                                                    import java.io.File
+                                                                                                                                                                                    import java.io.FileWriter
+                                                                                                                                                                                    import java.text.SimpleDateFormat
+                                                                                                                                                                                    import java.util.Date
+                                                                                                                                                                                    import java.util.Locale
+                                                                                                                                                                                    import java.util.UUID
+                                                                                                                                                                                    import java.util.concurrent.ConcurrentHashMap
+                                                                                                                                                                                    import java.util.concurrent.Executors
+                                                                                                                                                                                    import java.util.concurrent.atomic.AtomicInteger
+
+                                                                                                                                                                                    /**
+                                                                                                                                                                                    * ULTRA FORENSIC DEEPEST DEBUGGING LOGGER
+                                                                                                                                                                                    * INFINITE REGRESSION MODE • RED STRICTNESS • HIGH PRECISION
+                                                                                                                                                                                    */
+                                                                                                                                                                                    object UltraForensicLogger {
+
+                                                                                                                                                                                        enum class Level {
+                                                                                                                                                                                            INFO,
+                                                                                                                                                                                            DEBUG,
+                                                                                                                                                                                            TRACE,
+                                                                                                                                                                                            FORENSIC,
+                                                                                                                                                                                            ULTRA_FORENSIC,
+                                                                                                                                                                                            DEEPEST
+                                                                                                                                                                                        }
+
+                                                                                                                                                                                        private const val TAG = "UltraForensic"
+                                                                                                                                                                                        private var context: Context? = null
+                                                                                                                                                                                        private val dateFormat = SimpleDateFormat("yyyy-MM-dd HH:mm:ss.SSS", Locale.US)
+                                                                                                                                                                                        private var traceId = UUID.randomUUID().toString()
+                                                                                                                                                                                        private var sessionStartTime = System.currentTimeMillis()
+                                                                                                                                                                                        private var sessionFileName = "Caller_Session_${SimpleDateFormat("yyyy-MM-dd_HH-mm-ss", Locale.US).format(Date(sessionStartTime))}.txt"
+                                                                                                                                                                                        private var lastLogTime = System.currentTimeMillis()
+                                                                                                                                                                                        
+                                                                                                                                                                                        // Gap-based session detection: 5 minutes gap creates new session
+                                                                                                                                                                                        private const val SESSION_GAP_MS = 5 * 60 * 1000L // 5 minutes
+
+                                                                                                                                                                                        // 100% Non-Blocking IO guarantee. Single thread ensures chronological file writes.
+                                                                                                                                                                                        private val ioExecutor = Executors.newSingleThreadExecutor()
+
+                                                                                                                                                                                        // Spam Control: 200ms deduplication window
+                                                                                                                                                                                        private const val SPAM_WINDOW_MS = 200L
+                                                                                                                                                                                        private val recentLogs = ConcurrentHashMap<String, LogSpamTracker>()
+
+                                                                                                                                                                                        private class LogSpamTracker(
+                                                                                                                                                                                            val firstSeenMs: Long,
+                                                                                                                                                                                            val count: AtomicInteger,
+                                                                                                                                                                                            val lastJson: JSONObject
+                                                                                                                                                                                        )
+
+                                                                                                                                                                                        private var initialized = false
+
+                                                                                                                                                                                        fun init(ctx: Context) {
+                                                                                                                                                                                            if (initialized) return
+                                                                                                                                                                                            val safeContext = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.N) {
+                                                                                                                                                                                                ctx.createDeviceProtectedStorageContext() ?: ctx
+                                                                                                                                                                                            } else {
+                                                                                                                                                                                                ctx
+                                                                                                                                                                                            }
+                                                                                                                                                                                            initialized = true
+                                                                                                                                                                                            context = safeContext
+                                                                                                                                                                                            ioExecutor.submit {
+                                                                                                                                                                                                log(Level.INFO, "Lifecycle", "INIT", "Logger initialized in Deepest/Forensic Mode", isCritical = true)
+                                                                                                                                                                                            }
+                                                                                                                                                                                        }
+
+                                                                                                                                                                                        fun newTraceSession() {
+                                                                                                                                                                                            traceId = UUID.randomUUID().toString()
+                                                                                                                                                                                            log(Level.INFO, "Lifecycle", "NEW_TRACE", "Started new trace session: $traceId", isCritical = true)
+                                                                                                                                                                                        }
+
+                                                                                                                                                                                        /**
+                                                                                                                                                                                        * Creates a new session file with fresh timestamp.
+                                                                                                                                                                                        * Called automatically when gap is detected or manually.
+                                                                                                                                                                                        */
+                                                                                                                                                                                        private fun createNewSessionFile(currentMs: Long = System.currentTimeMillis()) {
+                                                                                                                                                                                            sessionStartTime = currentMs
+                                                                                                                                                                                            sessionFileName = "Caller_Session_${SimpleDateFormat("yyyy-MM-dd_HH-mm-ss", Locale.US).format(Date(sessionStartTime))}.txt"
+                                                                                                                                                                                            traceId = UUID.randomUUID().toString()
+                                                                                                                                                                                            
+                                                                                                                                                                                            ioExecutor.submit {
+                                                                                                                                                                                                log(Level.INFO, "Lifecycle", "NEW_SESSION", "Started new session file: $sessionFileName", isCritical = true)
+                                                                                                                                                                                            }
+                                                                                                                                                                                        }
+
+                                                                                                                                                                                        /**
+                                                                                                                                                                                        * Creates a new session file with fresh timestamp.
+                                                                                                                                                                                        * Call this when you want to force start logging to a new file.
+                                                                                                                                                                                        */
+                                                                                                                                                                                        fun newSessionFile() {
+                                                                                                                                                                                            createNewSessionFile()
+                                                                                                                                                                                        }
+
+                                                                                                                                                                                        /**
+                                                                                                                                                                                        * Core logging engine enforcing the mandatory structured JSON schema.
+                                                                                                                                                                                        */
+                                                                                                                                                                                        fun log(
+                                                                                                                                                                                            level: Level,
+                                                                                                                                                                                            component: String,
+                                                                                                                                                                                            event: String,
+                                                                                                                                                                                            message: String,
+                                                                                                                                                                                            objectId: String = "N/A",
+                                                                                                                                                                                            stateBefore: String = "N/A",
+                                                                                                                                                                                            stateAfter: String = "N/A",
+                                                                                                                                                                                            validation: String = "N/A",
+                                                                                                                                                                                            isCritical: Boolean = false
+                                                                                                                                                                                        ) {
+                                                                                                                                                                                            val currentMs = System.currentTimeMillis()
+                                                                                                                                                                                            
+                                                                                                                                                                                            // Check for session gap - create new session file if gap detected
+                                                                                                                                                                                            if (currentMs - lastLogTime > SESSION_GAP_MS) {
+                                                                                                                                                                                                createNewSessionFile(currentMs)
+                                                                                                                                                                                            }
+                                                                                                                                                                                            
+                                                                                                                                                                                            lastLogTime = currentMs
+                                                                                                                                                                                            
+                                                                                                                                                                                            val timestampStr = dateFormat.format(Date(currentMs))
+                                                                                                                                                                                            val threadName = Thread.currentThread().name
+
+                                                                                                                                                                                            val json = JSONObject().apply {
+                                                                                                                                                                                                put("timestamp", timestampStr)
+                                                                                                                                                                                                put("level", level.name)
+                                                                                                                                                                                                put("traceId", traceId)
+                                                                                                                                                                                                put("thread", threadName)
+                                                                                                                                                                                                put("component", component)
+                                                                                                                                                                                                put("event", event)
+                                                                                                                                                                                                put("objectId", objectId)
+                                                                                                                                                                                                put("stateBefore", stateBefore)
+                                                                                                                                                                                                put("stateAfter", stateAfter)
+                                                                                                                                                                                                put("validation", validation)
+                                                                                                                                                                                                put("message", message)
+                                                                                                                                                                                            }
+
+                                                                                                                                                                                            // EVIDENCE SAFE SPAM CONTROL
+                                                                                                                                                                                            if (!isCritical) {
+                                                                                                                                                                                                val signature = "$level|$component|$event|$message"
+                                                                                                                                                                                                val tracker = recentLogs[signature]
+
+                                                                                                                                                                                                if (tracker != null && (currentMs - tracker.firstSeenMs) <= SPAM_WINDOW_MS) {
+                                                                                                                                                                                                    val count = tracker.count.incrementAndGet()
+                                                                                                                                                                                                    // On the first duplicate, schedule an aggregation flush after the window closes
+                                                                                                                                                                                                    if (count == 2) {
+                                                                                                                                                                                                        ioExecutor.submit {
+                                                                                                                                                                                                            Thread.sleep(SPAM_WINDOW_MS + 50)
+                                                                                                                                                                                                            flushSpamTracker(signature)
+                                                                                                                                                                                                        }
+                                                                                                                                                                                                    }
+                                                                                                                                                                                                    return // Suppress immediate individual write
+                                                                                                                                                                                                } else {
+                                                                                                                                                                                                    // First occurrence or window expired -> allow through and start tracking
+                                                                                                                                                                                                    recentLogs[signature] = LogSpamTracker(currentMs, AtomicInteger(1), json)
+                                                                                                                                                                                                }
+                                                                                                                                                                                            }
+
+                                                                                                                                                                                            dispatchLog(level, json)
+                                                                                                                                                                                        }
+
+                                                                                                                                                                                        /**
+                                                                                                                                                                                        * Submits an aggregated report of deduplicated logs.
+                                                                                                                                                                                        */
+                                                                                                                                                                                        private fun flushSpamTracker(signature: String) {
+                                                                                                                                                                                            val tracker = recentLogs.remove(signature) ?: return
+                                                                                                                                                                                            val count = tracker.count.get()
+                                                                                                                                                                                            if (count > 1) {
+                                                                                                                                                                                                val aggJson = JSONObject().apply {
+                                                                                                                                                                                                    put("timestamp", dateFormat.format(Date()))
+                                                                                                                                                                                                    put("level", tracker.lastJson.optString("level"))
+                                                                                                                                                                                                    put("traceId", traceId)
+                                                                                                                                                                                                    put("thread", "logger_io_thread")
+                                                                                                                                                                                                    put("component", tracker.lastJson.optString("component"))
+                                                                                                                                                                                                    put("event", "REPEAT_EVENT")
+                                                                                                                                                                                                    put("originalEvent", tracker.lastJson.optString("event"))
+                                                                                                                                                                                                    put("repeatCount", count)
+                                                                                                                                                                                                    put("objectId", tracker.lastJson.optString("objectId"))
+                                                                                                                                                                                                    put("message", "Aggregated duplicate events: ${tracker.lastJson.optString("message")}")
+                                                                                                                                                                                                }
+                                                                                                                                                                                                dispatchLog(Level.valueOf(aggJson.getString("level")), aggJson)
+                                                                                                                                                                                            }
+                                                                                                                                                                                        }
+
+                                                                                                                                                                                        /**
+                                                                                                                                                                                        * Safely executes formatting to Logcat and disk.
+                                                                                                                                                                                        */
+                                                                                                                                                                                        private fun dispatchLog(level: Level, json: JSONObject) {
+                                                                                                                                                                                            val logStr = json.toString()
+
+                                                                                                                                                                                            when (level) {
+                                                                                                                                                                                                Level.INFO -> Log.i(TAG, logStr)
+                                                                                                                                                                                                Level.DEBUG -> Log.d(TAG, logStr)
+                                                                                                                                                                                                Level.TRACE -> Log.v(TAG, logStr)
+                                                                                                                                                                                                Level.FORENSIC -> Log.w(TAG, logStr)
+                                                                                                                                                                                                Level.ULTRA_FORENSIC, Level.DEEPEST -> Log.wtf(TAG, logStr)
+                                                                                                                                                                                            }
+
+                                                                                                                                                                                            ioExecutor.submit {
+                                                                                                                                                                                                try {
+                                                                                                                                                                                                    val ctx = context ?: return@submit
+                                                                                                                                                                                                    checkAndRotateFile()
+                                                                                                                                                                                                    val logsDir = File(ctx.filesDir, "logs").apply { mkdirs() }
+                                                                                                                                                                                                    val file = File(logsDir, sessionFileName)
+
+                                                                                                                                                                                                    FileWriter(file, true).use { writer ->
+                                                                                                                                                                                                        writer.append(logStr).append("\n")
+                                                                                                                                                                                                        writer.flush()
+                                                                                                                                                                                                    }
+                                                                                                                                                                                                } catch (e: Exception) {
+                                                                                                                                                                                                    Log.e(TAG, "Fatal IO error writing log: ${e.message}")
+                                                                                                                                                                                                }
+                                                                                                                                                                                            }
+                                                                                                                                                                                        }
+
+                                                                                                                                                                                        // =====================================================================
+                                                                                                                                                                                        // STRICT STATE TRANSITION LOGGERS
+                                                                                                                                                                                        // =====================================================================
+
+                                                                                                                                                                                        fun forensicTransition(
+                                                                                                                                                                                            component: String,
+                                                                                                                                                                                            objectId: String,
+                                                                                                                                                                                            stateBefore: String,
+                                                                                                                                                                                            stateAfter: String,
+                                                                                                                                                                                            msg: String
+                                                                                                                                                                                        ) = log(
+                                                                                                                                                                                            level = Level.FORENSIC,
+                                                                                                                                                                                            component = component,
+                                                                                                                                                                                            event = "STATE_TRANSITION",
+                                                                                                                                                                                            message = msg,
+                                                                                                                                                                                            objectId = objectId,
+                                                                                                                                                                                            stateBefore = stateBefore,
+                                                                                                                                                                                            stateAfter = stateAfter,
+                                                                                                                                                                                            validation = "PASSED",
+                                                                                                                                                                                            isCritical = true // Critical: State changes must never be deduplicated
+                                                                                                                                                                                        )
+
+                                                                                                                                                                                        fun invariantViolation(
+                                                                                                                                                                                            component: String,
+                                                                                                                                                                                            objectId: String,
+                                                                                                                                                                                            stateBefore: String,
+                                                                                                                                                                                            stateAfter: String,
+                                                                                                                                                                                            msg: String
+                                                                                                                                                                                        ) = log(
+                                                                                                                                                                                            level = Level.ULTRA_FORENSIC,
+                                                                                                                                                                                            component = component,
+                                                                                                                                                                                            event = "STATE_INVARIANT_VIOLATION",
+                                                                                                                                                                                            message = msg,
+                                                                                                                                                                                            objectId = objectId,
+                                                                                                                                                                                            stateBefore = stateBefore,
+                                                                                                                                                                                            stateAfter = stateAfter,
+                                                                                                                                                                                            validation = "FAILED",
+                                                                                                                                                                                            isCritical = true // Critical: Failures must never be deduplicated
+                                                                                                                                                                                        )
+
+                                                                                                                                                                                        // =====================================================================
+                                                                                                                                                                                        // FULLY CONTEXTUAL LOGGERS
+                                                                                                                                                                                        // =====================================================================
+
+                                                                                                                                                                                        fun info(component: String, event: String, msg: String, isCritical: Boolean = false) =
+                                                                                                                                                                                            log(Level.INFO, component, event, msg, isCritical = isCritical)
+
+                                                                                                                                                                                        fun debug(component: String, event: String, msg: String, isCritical: Boolean = false) =
+                                                                                                                                                                                            log(Level.DEBUG, component, event, msg, isCritical = isCritical)
+
+                                                                                                                                                                                        fun trace(component: String, event: String, msg: String, isCritical: Boolean = false) =
+                                                                                                                                                                                            log(Level.TRACE, component, event, msg, isCritical = isCritical)
+
+                                                                                                                                                                                        fun forensic(component: String, event: String, msg: String, isCritical: Boolean = false) =
+                                                                                                                                                                                            log(Level.FORENSIC, component, event, msg, isCritical = isCritical)
+
+                                                                                                                                                                                        fun ultra(component: String, event: String, msg: String) =
+                                                                                                                                                                                            log(Level.ULTRA_FORENSIC, component, event, msg, isCritical = true)
+
+                                                                                                                                                                                        fun deepest(component: String, event: String, msg: String, t: Throwable? = null) {
+                                                                                                                                                                                            val finalMsg = if (t != null) "$msg | Exception: ${t.message}" else msg
+                                                                                                                                                                                            log(Level.DEEPEST, component, event, finalMsg, isCritical = true)
+                                                                                                                                                                                        }
+
+                                                                                                                                                                                        // =====================================================================
+                                                                                                                                                                                        // ADVANCED DIALER FORENSIC METHODS
+                                                                                                                                                                                        // =====================================================================
+
+                                                                                                                                                                                        /**
+                                                                                                                                                                                        * Tracks complete call lifecycle with state transitions
+                                                                                                                                                                                        */
+                                                                                                                                                                                        fun callLifecycle(
+                                                                                                                                                                                            callId: String,
+                                                                                                                                                                                            phoneNumber: String,
+                                                                                                                                                                                            state: String,
+                                                                                                                                                                                            previousState: String = "UNKNOWN",
+                                                                                                                                                                                            direction: String = "UNKNOWN",
+                                                                                                                                                                                            isConference: Boolean = false
+                                                                                                                                                                                        ) = log(
+                                                                                                                                                                                            level = Level.FORENSIC,
+                                                                                                                                                                                            component = "CallLifecycle",
+                                                                                                                                                                                            event = "STATE_TRANSITION",
+                                                                                                                                                                                            message = "Call $callId: $phoneNumber $direction $previousState → $state",
+                                                                                                                                                                                            objectId = callId,
+                                                                                                                                                                                            stateBefore = previousState,
+                                                                                                                                                                                            stateAfter = state,
+                                                                                                                                                                                            validation = if (isConference) "CONFERENCE" else "SINGLE_CALL",
+                                                                                                                                                                                            isCritical = true
+                                                                                                                                                                                        )
+
+                                                                                                                                                                                        /**
+                                                                                                                                                                                        * Forensic audio routing and device tracking
+                                                                                                                                                                                        */
+                                                                                                                                                                                        fun audioRouting(
+                                                                                                                                                                                            callId: String,
+                                                                                                                                                                                            route: String,
+                                                                                                                                                                                            previousRoute: String = "UNKNOWN",
+                                                                                                                                                                                            device: String = "UNKNOWN",
+                                                                                                                                                                                            bluetoothDevice: String = "NONE"
+                                                                                                                                                                                        ) = log(
+                                                                                                                                                                                            level = Level.FORENSIC,
+                                                                                                                                                                                            component = "AudioRouting",
+                                                                                                                                                                                            event = "ROUTE_CHANGE",
+                                                                                                                                                                                            message = "Audio route $previousRoute → $route for call $callId (device: $device, bt: $bluetoothDevice)",
+                                                                                                                                                                                            objectId = callId,
+                                                                                                                                                                                            stateBefore = previousRoute,
+                                                                                                                                                                                            stateAfter = route,
+                                                                                                                                                                                            validation = device,
+                                                                                                                                                                                            isCritical = true
+                                                                                                                                                                                        )
+
+                                                                                                                                                                                        /**
+                                                                                                                                                                                        * Service lifecycle and restart detection
+                                                                                                                                                                                        */
+                                                                                                                                                                                        fun serviceLifecycle(
+                                                                                                                                                                                            serviceName: String,
+                                                                                                                                                                                            event: String,
+                                                                                                                                                                                            reason: String = "UNKNOWN",
+                                                                                                                                                                                            processId: Int = android.os.Process.myPid()
+                                                                                                                                                                                        ) = log(
+                                                                                                                                                                                            level = Level.ULTRA_FORENSIC,
+                                                                                                                                                                                            component = "ServiceLifecycle",
+                                                                                                                                                                                            event = event,
+                                                                                                                                                                                            message = "$serviceName: $event (PID: $processId, reason: $reason)",
+                                                                                                                                                                                            objectId = serviceName,
+                                                                                                                                                                                            stateBefore = "RUNNING",
+                                                                                                                                                                                            stateAfter = if (event.contains("DESTROY")) "DESTROYED" else "RUNNING",
+                                                                                                                                                                                            validation = "PID:$processId",
+                                                                                                                                                                                            isCritical = true
+                                                                                                                                                                                        )
+
+                                                                                                                                                                                        /**
+                                                                                                                                                                                        * Process restart correlation and system events
+                                                                                                                                                                                        */
+                                                                                                                                                                                        fun processEvent(
+                                                                                                                                                                                            event: String,
+                                                                                                                                                                                            reason: String = "UNKNOWN",
+                                                                                                                                                                                            memoryInfo: String = "N/A",
+                                                                                                                                                                                            uptime: Long = android.os.SystemClock.uptimeMillis()
+                                                                                                                                                                                        ) = log(
+                                                                                                                                                                                            level = Level.ULTRA_FORENSIC,
+                                                                                                                                                                                            component = "ProcessManager",
+                                                                                                                                                                                            event = event,
+                                                                                                                                                                                            message = "Process $event (uptime: ${uptime}ms, memory: $memoryInfo, reason: $reason)",
+                                                                                                                                                                                            objectId = "PID:${android.os.Process.myPid()}",
+                                                                                                                                                                                            stateBefore = "ACTIVE",
+                                                                                                                                                                                            stateAfter = if (event.contains("KILL")) "KILLED" else "ACTIVE",
+                                                                                                                                                                                            validation = "UPTIME:$uptime",
+                                                                                                                                                                                            isCritical = true
+                                                                                                                                                                                        )
+
+                                                                                                                                                                                        /**
+                                                                                                                                                                                        * Telecom system events and API calls
+                                                                                                                                                                                        */
+                                                                                                                                                                                        fun telecomEvent(
+                                                                                                                                                                                            apiCall: String,
+                                                                                                                                                                                            phoneNumber: String = "UNKNOWN",
+                                                                                                                                                                                            result: String = "SUCCESS",
+                                                                                                                                                                                            errorCode: String = "NONE",
+                                                                                                                                                                                            details: String = "N/A"
+                                                                                                                                                                                        ) = log(
+                                                                                                                                                                                            level = Level.FORENSIC,
+                                                                                                                                                                                            component = "TelecomAPI",
+                                                                                                                                                                                            event = apiCall,
+                                                                                                                                                                                            message = "$apiCall for $phoneNumber → $result (error: $errorCode, details: $details)",
+                                                                                                                                                                                            objectId = phoneNumber,
+                                                                                                                                                                                            stateBefore = "PENDING",
+                                                                                                                                                                                            stateAfter = result,
+                                                                                                                                                                                            validation = if (result == "SUCCESS") "PASSED" else "FAILED",
+                                                                                                                                                                                            isCritical = result != "SUCCESS"
+                                                                                                                                                                                        )
+
+                                                                                                                                                                                        /**
+                                                                                                                                                                                        * Automatic log rotation when file gets too large
+                                                                                                                                                                                        */
+                                                                                                                                                                                        private var currentFileSize = 0L
+                                                                                                                                                                                        private const val MAX_FILE_SIZE = 10 * 1024 * 1024L // 10MB
+
+                                                                                                                                                                                        private fun checkAndRotateFile() {
+                                                                                                                                                                                            try {
+                                                                                                                                                                                                val ctx = context ?: return
+                                                                                                                                                                                                val logsDir = File(ctx.filesDir, "logs").apply { mkdirs() }
+                                                                                                                                                                                                val file = File(logsDir, sessionFileName)
+                                                                                                                                                                                                 
+                                                                                                                                                                                                if (file.exists()) {
+                                                                                                                                                                                                    currentFileSize = file.length()
+                                                                                                                                                                                                    if (currentFileSize > MAX_FILE_SIZE) {
+                                                                                                                                                                                                        createNewSessionFile()
+                                                                                                                                                                                                        log(Level.INFO, "FileRotation", "ROTATED", "Log rotated due to size limit (${currentFileSize} bytes)", isCritical = true)
+                                                                                                                                                                                                    }
+                                                                                                                                                                                                }
+                                                                                                                                                                                            } catch (e: Exception) {
+                                                                                                                                                                                                // Silent fail - rotation is optional
+                                                                                                                                                                                            }
+                                                                                                                                                                                        }
+
+                                                                                                                                                                                        // =====================================================================
+                                                                                                                                                                                        // LEGACY COMPATIBILITY LAYER (Prevents Build Errors)
+                                                                                                                                                                                        // =====================================================================
+
+                                                                                                                                                                                        fun info(msg: String) = log(Level.INFO, "Legacy", "GENERIC_INFO", msg)
+                                                                                                                                                                                        fun debug(msg: String) = log(Level.DEBUG, "Legacy", "GENERIC_DEBUG", msg)
+                                                                                                                                                                                        fun trace(msg: String) = log(Level.TRACE, "Legacy", "GENERIC_TRACE", msg)
+                                                                                                                                                                                        fun forensic(msg: String) = log(Level.FORENSIC, "Legacy", "GENERIC_FORENSIC", msg)
+                                                                                                                                                                                        fun ultra(msg: String) = log(Level.ULTRA_FORENSIC, "Legacy", "GENERIC_ULTRA", msg, isCritical = true)
+                                                                                                                                                                                        fun deepest(msg: String) = log(Level.DEEPEST, "Legacy", "GENERIC_DEEPEST", msg, isCritical = true)
+                                                                                                                                                                                    }

@@ -1,0 +1,9 @@
+name = "caller-p2p"
+main = "src/index.js"
+compatibility_date = "2026-09-01"
+
+[[d1_databases]]
+binding = "DB"
+database_name = "caller-p2p"
+# Paste the database_id printed by `npx wrangler d1 create caller-p2p` here:
+database_id = "cce5bd7b-2e9f-4504-af0a-13c6b0137d63"

@@ -1,0 +1,25 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources xmlns:tools="http://schemas.android.com/tools">
+    
+    <style name="Theme.Caller" parent="Theme.Material3.DayNight.NoActionBar">
+        <item name="android:statusBarColor">@color/dark_app_background</item>
+        <item name="android:navigationBarColor">@color/dark_app_background</item>
+    </style>
+
+    <style name="Theme.Caller.CallScreen" parent="Theme.Caller">
+        <item name="android:windowBackground">@drawable/call_screen_window_background</item>
+        <item name="android:windowAnimationStyle">@style/AnimationCallerNoAnimation</item>
+    </style>
+
+    <style name="AnimationCallerNoAnimation">
+        <item name="android:activityOpenEnterAnimation">@anim/no_animation</item>
+        <item name="android:activityOpenExitAnimation">@anim/no_animation</item>
+        <item name="android:activityCloseEnterAnimation">@anim/no_animation</item>
+        <item name="android:activityCloseExitAnimation">@anim/no_animation</item>
+    </style>
+
+    <style name="Theme.App.Starting" parent="Theme.Caller">
+        <item name="android:windowBackground">@drawable/splash_background</item>
+    </style>
+    
+</resources>
