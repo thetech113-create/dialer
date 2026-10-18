@@ -124,6 +124,7 @@ import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
+import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
@@ -137,6 +138,7 @@ import androidx.compose.material3.TextButton
 import androidx.compose.material3.TextFieldDefaults
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.withFrameNanos
 import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.SideEffect
@@ -8084,6 +8086,56 @@ fun SettingsScreen(
                         color = MaterialTheme.colorScheme.primary,
                         modifier = Modifier.padding(top = 2.dp)
                     )
+                }
+
+                val currentDownloadState by AppUpdateManager.downloadState.collectAsState()
+                if (currentDownloadState is AppUpdateManager.DownloadState.Downloading) {
+                    val state = currentDownloadState as AppUpdateManager.DownloadState.Downloading
+                    Column(
+                        modifier = Modifier.fillMaxWidth().padding(vertical = 4.dp),
+                        verticalArrangement = Arrangement.spacedBy(6.dp)
+                    ) {
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.SpaceBetween,
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Text(
+                                text = "Downloading Update...",
+                                fontWeight = FontWeight.SemiBold,
+                                style = MaterialTheme.typography.bodyMedium
+                            )
+                            Text(
+                                text = if (state.progressPercent >= 0) "${state.progressPercent}%" else "...",
+                                fontWeight = FontWeight.Bold,
+                                color = MaterialTheme.colorScheme.primary,
+                                style = MaterialTheme.typography.bodyMedium
+                            )
+                        }
+
+                        if (state.progressPercent >= 0) {
+                            LinearProgressIndicator(
+                                progress = state.progressPercent / 100f,
+                                modifier = Modifier.fillMaxWidth().height(8.dp).clip(RoundedCornerShape(4.dp)),
+                                color = MaterialTheme.colorScheme.primary,
+                                trackColor = MaterialTheme.colorScheme.surfaceVariant
+                            )
+                        } else {
+                            LinearProgressIndicator(
+                                modifier = Modifier.fillMaxWidth().height(8.dp).clip(RoundedCornerShape(4.dp)),
+                                color = MaterialTheme.colorScheme.primary,
+                                trackColor = MaterialTheme.colorScheme.surfaceVariant
+                            )
+                        }
+
+                        val downloadedMb = String.format("%.1f", state.downloadedBytes / (1024f * 1024f))
+                        val totalMb = if (state.totalBytes > 0) String.format("%.1f MB", state.totalBytes / (1024f * 1024f)) else "MB"
+                        Text(
+                            text = "$downloadedMb MB / $totalMb",
+                            style = MaterialTheme.typography.labelSmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                    }
                 }
 
                 val pendingUpdate = remember { AppUpdateManager.getDownloadedUpdateFile(context) }

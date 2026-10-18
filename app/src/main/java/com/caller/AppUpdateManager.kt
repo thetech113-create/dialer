@@ -21,6 +21,9 @@ import androidx.core.content.FileProvider
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import okhttp3.OkHttpClient
@@ -51,6 +54,16 @@ object AppUpdateManager {
 
     private const val CHECK_INTERVAL_MS = 12 * 60 * 60 * 1000L
     private const val MANIFEST_ASSET = "update.json"
+
+    sealed class DownloadState {
+        object Idle : DownloadState()
+        data class Downloading(val progressPercent: Int, val downloadedBytes: Long, val totalBytes: Long) : DownloadState()
+        object Completed : DownloadState()
+        data class Error(val message: String) : DownloadState()
+    }
+
+    private val _downloadState = MutableStateFlow<DownloadState>(DownloadState.Idle)
+    val downloadState: StateFlow<DownloadState> = _downloadState.asStateFlow()
 
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
     private val isDownloading = AtomicBoolean(false)
@@ -284,6 +297,8 @@ object AppUpdateManager {
                 if (tempFile.exists()) tempFile.delete()
                 if (target.exists()) target.delete()
 
+                _downloadState.value = DownloadState.Downloading(0, 0L, 0L)
+
                 val request = Request.Builder()
                     .url(release.apkUrl)
                     .header("User-Agent", "Caller-Android-Updater")
@@ -292,9 +307,24 @@ object AppUpdateManager {
                 http.newCall(request).execute().use { response ->
                     if (!response.isSuccessful) error("HTTP ${response.code}")
                     val body = response.body ?: error("Empty response body")
+                    val totalBytes = body.contentLength()
+                    var downloadedBytes = 0L
+
                     body.byteStream().use { input ->
                         FileOutputStream(tempFile).use { output ->
-                            input.copyTo(output)
+                            val buffer = ByteArray(8192)
+                            var bytesRead: Int
+                            var lastEmitMs = 0L
+                            while (input.read(buffer).also { bytesRead = it } != -1) {
+                                output.write(buffer, 0, bytesRead)
+                                downloadedBytes += bytesRead
+                                val now = System.currentTimeMillis()
+                                if (now - lastEmitMs > 100 || downloadedBytes == totalBytes) {
+                                    lastEmitMs = now
+                                    val progressPercent = if (totalBytes > 0) (downloadedBytes * 100 / totalBytes).toInt().coerceIn(0, 100) else -1
+                                    _downloadState.value = DownloadState.Downloading(progressPercent, downloadedBytes, totalBytes)
+                                }
+                            }
                             output.fd.sync()
                         }
                     }
@@ -306,6 +336,7 @@ object AppUpdateManager {
                 }
 
                 if (verifyApk(context, target, release.versionCode, release.sha256)) {
+                    _downloadState.value = DownloadState.Completed
                     context.getSharedPreferences(PREFS, Context.MODE_PRIVATE).edit()
                         .putString(KEY_FILE_PATH, target.absolutePath)
                         .putLong(KEY_VERSION_CODE, release.versionCode)
@@ -326,11 +357,13 @@ object AppUpdateManager {
                 } else {
                     if (target.exists()) target.delete()
                     clearDownload(context)
+                    _downloadState.value = DownloadState.Error("Downloaded update could not be verified")
                     toast(context, "Downloaded update could not be verified")
                 }
             } catch (error: Exception) {
                 Log.e(TAG, "Direct in-app download failed", error)
                 if (tempFile.exists()) tempFile.delete()
+                _downloadState.value = DownloadState.Error(error.localizedMessage ?: "Download failed")
                 toast(context, "Download failed: ${error.localizedMessage ?: "Unknown error"}")
             } finally {
                 isDownloading.set(false)
