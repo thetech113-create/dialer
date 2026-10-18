@@ -18,7 +18,10 @@
         <item name="android:activityCloseExitAnimation">@anim/no_animation</item>
     </style>
 
-    <style name="Theme.App.Starting" parent="Theme.Caller">
+    <style name="Theme.App.Starting" parent="Theme.SplashScreen">
+        <item name="windowSplashScreenBackground">@color/dark_app_background</item>
+        <item name="windowSplashScreenAnimatedIcon">@drawable/ic_starting_splash</item>
+        <item name="postSplashScreenTheme">@style/Theme.Caller</item>
         <item name="android:windowBackground">@drawable/splash_background</item>
     </style>
     
