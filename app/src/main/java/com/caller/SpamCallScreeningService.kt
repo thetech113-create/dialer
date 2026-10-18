@@ -40,31 +40,41 @@ class SpamCallScreeningService : CallScreeningService() {
             return
         }
 
+        val safeContext = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.N) createDeviceProtectedStorageContext() else this
+        val appSettings = safeContext.getSharedPreferences("app_settings", Context.MODE_PRIVATE)
+        val isSpamProtectionEnabled = appSettings.getBoolean("spam_protection_enabled", true)
+        val isBlockUnknownEnabled = appSettings.getBoolean("block_unknown_numbers", false)
+
         val incomingNumber = callDetails.handle?.schemeSpecificPart ?: ""
         val cleanNum = incomingNumber.filter { it.isDigit() }
 
-        if (cleanNum.isEmpty()) {
-            blockCall(callDetails, rejectAndLog = false) // HIDDEN NUMBER = INSTANT KILL
-            return
-        }
-
         // --- 1. LOCAL BLACKLIST OVERRIDE ---
-        // Blocked numbers must win even if the caller is saved in contacts.
-        val safeContext = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.N) createDeviceProtectedStorageContext() else this
         val blocklistPrefs = safeContext.getSharedPreferences("local_spam_blocklist", Context.MODE_PRIVATE)
-        if (blocklistPrefs.getBoolean(cleanNum, false) || (cleanNum.length >= 10 && blocklistPrefs.getBoolean(cleanNum.takeLast(10), false))) {
+        if (cleanNum.isNotEmpty() && (blocklistPrefs.getBoolean(cleanNum, false) || (cleanNum.length >= 10 && blocklistPrefs.getBoolean(cleanNum.takeLast(10), false)))) {
             blockCall(callDetails, rejectAndLog = true)
             return
         }
 
         // --- 2. WHITELIST (Contacts Bypass) ---
-        if (isNumberInContacts(incomingNumber)) {
+        if (incomingNumber.isNotEmpty() && isNumberInContacts(incomingNumber)) {
             allowCall(callDetails)
             return
         }
 
-        // --- 3. NETWORK-LEVEL CRYPTOGRAPHIC CHECK (STIR/SHAKEN) ---
-        // If the carrier network confirms the caller ID is spoofed/faked, kill it instantly.
+        // --- 3. BLOCK UNKNOWN CALLERS IF SETTING ENABLED ---
+        if (isBlockUnknownEnabled) {
+            UltraForensicLogger.debug("SpamForensics", "BLOCKED_UNKNOWN", "Blocked unknown caller: ${maskPhoneNumber(cleanNum)}")
+            blockCall(callDetails, rejectAndLog = true)
+            return
+        }
+
+        // If smart spam protection is disabled by user in Settings, allow call
+        if (!isSpamProtectionEnabled) {
+            allowCall(callDetails)
+            return
+        }
+
+        // --- 4. NETWORK-LEVEL CRYPTOGRAPHIC CHECK (STIR/SHAKEN) ---
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
             if (callDetails.callerNumberVerificationStatus == Connection.VERIFICATION_STATUS_FAILED) {
                 UltraForensicLogger.deepest("SpamForensics", "NETWORK_KILL", "STIR/SHAKEN Verification Failed: ${maskPhoneNumber(cleanNum)}")
@@ -73,32 +83,18 @@ class SpamCallScreeningService : CallScreeningService() {
             }
         }
 
-        // --- 4. ULTRA-STRICT FORENSIC ANALYSIS ---
-        var totalSpamScore = 30f // Severe base penalty for unknown callers
+        // --- 5. FORENSIC ANALYSIS ---
         val forensicSignal = ZeroDaySpamDetector.analyzeForensicThreat(incomingNumber, this)
-        totalSpamScore += forensicSignal.finalThreatScore
 
-        // --- 5. PARANOID EXECUTION RULES ---
-        
-        // Rule A: ANY Machine or Fraud Signature = Instant Kill
-        if (forensicSignal.isMachineCadence || forensicSignal.isWangiriFraud || forensicSignal.isSpoofedEntropy || forensicSignal.threatSignatures.isNotEmpty()) {
-            UltraForensicLogger.deepest("SpamForensics", "ZERO_TOLERANCE_KILL", "Threats: ${forensicSignal.threatSignatures}")
-            blockCall(callDetails, rejectAndLog = false) // True silent drop
+        // Block Wangiri international fraud or verified severe threat
+        if (forensicSignal.isWangiriFraud || forensicSignal.finalThreatScore >= 80f) {
+            UltraForensicLogger.deepest("SpamForensics", "SPAM_KILL", "Threats: ${forensicSignal.threatSignatures} Score: ${forensicSignal.finalThreatScore}")
+            blockCall(callDetails, rejectAndLog = true)
             return
         }
 
-        // Rule B: Brutal Threshold Execution (Lowered to 50 for Infinite Strictness)
-        when {
-            totalSpamScore >= 50f -> {
-                // High Threat: Instant block
-                UltraForensicLogger.debug("SpamForensics", "BLOCKED_STRICT", "Score: $totalSpamScore")
-                blockCall(callDetails, rejectAndLog = true)
-            }
-            else -> {
-                // Suspicious but passed all aggressive checks: Allow to ring
-                allowCall(callDetails)
-            }
-        }
+        // Allow legitimate incoming calls
+        allowCall(callDetails)
     }
 
     private fun allowCall(callDetails: Call.Details) {

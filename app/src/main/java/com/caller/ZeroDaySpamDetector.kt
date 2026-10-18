@@ -22,59 +22,52 @@ object ZeroDaySpamDetector {
         val signatures = mutableListOf<String>()
         var baseThreatScore = 0f
 
-        // 1. SHANNON ENTROPY (TIGHTENED)
-        // Fraudsters often use numbers with repeated digits (e.g. 888-888-9999) or entirely sequential.
+        if (cleanNum.isEmpty()) {
+            return ForensicSpamSignal(
+                finalThreatScore = 0f,
+                isMachineCadence = false,
+                isWangiriFraud = false,
+                isSpoofedEntropy = false,
+                threatSignatures = emptyList()
+            )
+        }
+
+        // 1. SHANNON ENTROPY (Fixed range: 10 distinct digits = 3.32)
+        // Only flag extreme anomalies (e.g. 0000000000 where entropy is 0.0)
         val entropy = calculateShannonEntropy(cleanNum)
-        val isSpoofed = entropy < 1.8 || entropy > 3.0 // Much tighter bounds for human numbers
+        val isSpoofed = cleanNum.length >= 7 && (entropy < 0.5 || entropy > 3.8)
         if (isSpoofed) {
-            baseThreatScore += 50f // Fatal
+            baseThreatScore += 25f
             signatures.add("ANOMALOUS_ENTROPY_SPOOFING")
         }
 
-        // 2. WANGIRI FRAUD (EXPANDED TO ALL NON-STANDARD EXOTICS)
+        // 2. WANGIRI FRAUD (High-risk exotic toll prefixes)
         val isWangiri = detectWangiriSignature(phoneNumber)
         if (isWangiri) {
-            baseThreatScore += 100f // Fatal
+            baseThreatScore += 80f
             signatures.add("WANGIRI_FRAUD_SIGNATURE")
         }
 
-        // 3. TELECOM FORMAT STRICTNESS (MILITARIZED)
-        // Standard mobile/landline numbers are strictly 10-15 digits. Anything else is blocked if not in contacts.
-        if (cleanNum.length < 10 || cleanNum.length > 15) {
-            baseThreatScore += 100f // Fatal. Kills all 5/6 digit marketing shortcodes.
+        // 3. TELECOM FORMAT STRICTNESS (Standard numbers are 10 to 15 digits)
+        if (cleanNum.length < 3) {
+            baseThreatScore += 30f
             signatures.add("NON_STANDARD_LENGTH")
         }
 
-        // 4. ROBOCALLER CADENCE (TIGHTENED)
+        // 4. ROBOCALLER CADENCE (Requires at least 4 rapid automated calls)
         val callHistory = extractLocalCallHistory(cleanNum, context)
         val isMachine = detectMachineCadence(callHistory)
         if (isMachine) {
-            baseThreatScore += 100f // Fatal
+            baseThreatScore += 75f
             signatures.add("ROBOCALLER_MACHINE_CADENCE")
         }
 
-        // 5. VELOCITY (PARANOID LEVEL)
-        // If an unknown number calls 2 times in a span of 5 minutes, it is an aggressive spammer.
+        // 5. VELOCITY (High frequency burst: >= 5 calls within 2 minutes)
         val behaviorThreat = analyzeVelocityAndDrops(callHistory)
         baseThreatScore += behaviorThreat
 
         if (behaviorThreat > 0f) {
             signatures.add("AGGRESSIVE_VELOCITY_OR_DROPS")
-        }
-
-        // 6. NEIGHBOR SPOOFING DETECTION (Psychological Fraud)
-        // Fraudsters spoof the first 6 digits of your OWN phone number to fake local familiarity.
-        val deviceNum = getDevicePhoneNumber(context)
-        if (deviceNum.length >= 10 && cleanNum.length >= 10) {
-            // Compare the localized Area Code + Prefix (First 6 digits of the 10-digit number)
-            val userPrefix = deviceNum.takeLast(10).take(6)
-            val callerPrefix = cleanNum.takeLast(10).take(6)
-            
-            // If the prefixes match exactly, but it's not actually your own number calling itself
-            if (userPrefix == callerPrefix && cleanNum != deviceNum) {
-                baseThreatScore += 80f // FATAL THREAT
-                signatures.add("NEIGHBOR_SPOOFING_DETECTED")
-            }
         }
 
         return ForensicSpamSignal(
@@ -84,17 +77,6 @@ object ZeroDaySpamDetector {
             isSpoofedEntropy = isSpoofed,
             threatSignatures = signatures
         )
-    }
-
-    @android.annotation.SuppressLint("MissingPermission", "HardwareIds")
-    private fun getDevicePhoneNumber(context: Context): String {
-        try {
-            val telephonyManager = context.getSystemService(Context.TELEPHONY_SERVICE) as android.telephony.TelephonyManager
-            val number = telephonyManager.line1Number ?: ""
-            return number.filter { it.isDigit() }
-        } catch (e: Exception) {
-            return "" // Fails gracefully if SIM cannot be read or permission is missing
-        }
     }
 
     private fun calculateShannonEntropy(s: String): Double {
@@ -107,13 +89,12 @@ object ZeroDaySpamDetector {
     }
 
     private fun detectWangiriSignature(number: String): Boolean {
-        // High-risk toll fraud + satellite prefixes
         val highRiskPrefixes = listOf("+247", "+252", "+269", "+371", "+375", "+381", "+685", "+678", "+223", "+225", "+881", "+882")
         return highRiskPrefixes.any { number.startsWith(it) }
     }
 
     private fun detectMachineCadence(calls: List<Long>): Boolean {
-        if (calls.size < 2) return false // Lowered to 2 calls for strictness
+        if (calls.size < 4) return false
 
         val sortedCalls = calls.sorted()
         val deltas = mutableListOf<Long>()
@@ -125,15 +106,14 @@ object ZeroDaySpamDetector {
         val variance = deltas.sumOf { (it - meanDelta).pow(2) } / deltas.size
         val standardDeviation = sqrt(variance)
 
-        // Machine precision detection: If standard deviation is extremely small (< 60 seconds)
-        return standardDeviation < 60000.0 && meanDelta > 0
+        // Strict machine cadence: exact interval timing with standard deviation < 1 second (1000ms)
+        return standardDeviation < 1000.0 && meanDelta > 0
     }
 
     private fun analyzeVelocityAndDrops(calls: List<Long>): Float {
-        if (calls.size >= 2) {
+        if (calls.size >= 5) {
             val timeSpanMinutes = (calls.maxOrNull()!! - calls.minOrNull()!!) / 60000.0
-            // If they called 2 or more times within 10 minutes, treat as hostile attack
-            if (timeSpanMinutes <= 10.0) return 60f 
+            if (timeSpanMinutes <= 2.0) return 50f
         }
         return 0f
     }
@@ -148,7 +128,7 @@ object ZeroDaySpamDetector {
                 arrayOf(CallLog.Calls.DATE),
                 selection,
                 args,
-                "${CallLog.Calls.DATE} DESC LIMIT 5" // Only care about recent hostile bursts
+                "${CallLog.Calls.DATE} DESC LIMIT 5"
             )?.use { cursor ->
                 while (cursor.moveToNext()) {
                     callTimestamps.add(cursor.getLong(0))
