@@ -1,6 +1,7 @@
 package com.caller
 
 import android.app.Activity
+import android.app.Application
 import android.app.DownloadManager
 import android.content.BroadcastReceiver
 import android.content.Context
@@ -9,30 +10,33 @@ import android.content.pm.PackageInfo
 import android.content.pm.PackageManager
 import android.net.Uri
 import android.os.Build
+import android.os.Bundle
 import android.os.Environment
+import android.os.Handler
+import android.os.Looper
 import android.provider.Settings
 import android.util.Log
 import android.widget.Toast
 import androidx.core.content.FileProvider
-import okhttp3.OkHttpClient
-import okhttp3.Request
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+import okhttp3.OkHttpClient
+import okhttp3.Request
 import org.json.JSONObject
 import java.io.File
+import java.io.FileOutputStream
+import java.lang.ref.WeakReference
 import java.security.MessageDigest
 import java.util.concurrent.TimeUnit
+import java.util.concurrent.atomic.AtomicBoolean
 
 /**
- * GitHub Releases updater.
- *
+ * GitHub Releases in-app updater.
  * Each release must attach an `update.json` asset alongside its APK:
  * {"versionCode":2,"versionName":"1.0.1","apkAsset":"Caller-1.0.1.apk","sha256":"..."}
- * `sha256` is optional but strongly recommended. `apkAsset` must exactly match an asset on
- * that same release. This avoids treating a mutable tag or filename as version authority.
  */
 object AppUpdateManager {
     private const val TAG = "AppUpdateManager"
@@ -42,18 +46,84 @@ object AppUpdateManager {
     private const val KEY_VERSION_CODE = "version_code"
     private const val KEY_FILE_PATH = "file_path"
     private const val KEY_SHA256 = "sha256"
+    private const val KEY_AWAITING_INSTALL_PERMISSION = "awaiting_install_permission"
+    private const val KEY_PROMPTED_VERSION_CODE = "prompted_version_code"
+
     private const val CHECK_INTERVAL_MS = 12 * 60 * 60 * 1000L
     private const val MANIFEST_ASSET = "update.json"
+
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
+    private val isDownloading = AtomicBoolean(false)
+    private val lifecycleRegistered = AtomicBoolean(false)
+
+    @Volatile
+    private var currentActivityRef: WeakReference<Activity>? = null
+
     private val http = OkHttpClient.Builder()
         .connectTimeout(20, TimeUnit.SECONDS)
-        .readTimeout(30, TimeUnit.SECONDS)
+        .readTimeout(60, TimeUnit.SECONDS)
+        .followRedirects(true)
+        .followSslRedirects(true)
         .build()
 
     private data class Release(val versionCode: Long, val apkUrl: String, val sha256: String?)
 
+    /**
+     * Tracks whichever Activity is in the foreground (MainActivity or MessagingActivity)
+     * so the installer prompt always launches from an active foreground Activity context.
+     */
+    private fun ensureLifecycleTracking(activity: Activity) {
+        currentActivityRef = WeakReference(activity)
+        if (lifecycleRegistered.compareAndSet(false, true)) {
+            activity.application.registerActivityLifecycleCallbacks(object : Application.ActivityLifecycleCallbacks {
+                override fun onActivityCreated(a: Activity, savedInstanceState: Bundle?) {
+                    currentActivityRef = WeakReference(a)
+                }
+
+                override fun onActivityStarted(a: Activity) {
+                    currentActivityRef = WeakReference(a)
+                }
+
+                override fun onActivityResumed(a: Activity) {
+                    currentActivityRef = WeakReference(a)
+                    checkAndInstallPending(a)
+                }
+
+                override fun onActivityPaused(a: Activity) {}
+                override fun onActivityStopped(a: Activity) {}
+                override fun onActivitySaveInstanceState(a: Activity, outState: Bundle) {}
+                override fun onActivityDestroyed(a: Activity) {
+                    if (currentActivityRef?.get() === a) {
+                        currentActivityRef = null
+                    }
+                }
+            })
+        }
+    }
+
     fun checkForUpdate(activity: Activity, isManual: Boolean = false) {
-        deleteInstalledUpdateIfSafe(activity.applicationContext)
+        ensureLifecycleTracking(activity)
+        val appContext = activity.applicationContext
+        deleteInstalledUpdateIfSafe(appContext)
+
+        // 1. If a verified update APK is already downloaded on disk, prompt to install it first
+        val existingFile = getDownloadedUpdateFile(appContext)
+        if (existingFile != null) {
+            val prefs = appContext.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
+            val targetVer = prefs.getLong(KEY_VERSION_CODE, -1L)
+            val alreadyPromptedVer = prefs.getLong(KEY_PROMPTED_VERSION_CODE, -1L)
+            if (isManual || targetVer != alreadyPromptedVer) {
+                prefs.edit().putLong(KEY_PROMPTED_VERSION_CODE, targetVer).apply()
+                openInstaller(currentActivityRef?.get() ?: activity, existingFile)
+            }
+            return
+        }
+
+        if (isDownloading.get()) {
+            if (isManual) toast(appContext, "Update download is already in progress...")
+            return
+        }
+
         val repository = if (BuildConfig.GITHUB_RELEASE_REPOSITORY.isNotBlank()) {
             BuildConfig.GITHUB_RELEASE_REPOSITORY.trim()
         } else {
@@ -61,34 +131,32 @@ object AppUpdateManager {
         }
 
         if (isManual) {
-            toast(activity, "Checking for updates...")
+            toast(appContext, "Checking for updates...")
         }
 
-        val prefs = activity.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
+        val prefs = appContext.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
         if (!isManual && System.currentTimeMillis() - prefs.getLong(KEY_LAST_CHECK, 0L) < CHECK_INTERVAL_MS) return
-        if (prefs.getLong(KEY_DOWNLOAD_ID, -1L) != -1L) {
-            handleCompletedDownload(activity.applicationContext, prefs.getLong(KEY_DOWNLOAD_ID, -1L))
-            return
-        }
+
         prefs.edit().putLong(KEY_LAST_CHECK, System.currentTimeMillis()).apply()
+
         scope.launch {
             val result = runCatching { latestRelease(repository) }
             result.onSuccess { release ->
-                val currentVer = installedVersionCode(activity)
+                val currentVer = installedVersionCode(appContext)
                 if (release.versionCode > currentVer) {
-                    toast(activity, "Update available! Starting download...")
-                    enqueueDownload(activity.applicationContext, release)
+                    toast(appContext, "Update available! Downloading in app...")
+                    enqueueDownload(appContext, release)
                 } else if (isManual) {
-                    toast(activity, "You are using the latest version")
+                    toast(appContext, "You are using the latest version")
                 }
             }.onFailure { error ->
                 Log.w(TAG, "Update metadata check failed", error)
                 if (isManual) {
                     val msg = error.localizedMessage ?: "Network error"
                     if (msg.contains("404") || msg.contains("No releases", ignoreCase = true) || msg.contains("Not Found", ignoreCase = true)) {
-                        toast(activity, "You are using the latest version")
+                        toast(appContext, "You are using the latest version")
                     } else {
-                        toast(activity, "Unable to check for updates: $msg")
+                        toast(appContext, "Unable to check for updates: $msg")
                     }
                 }
             }
@@ -98,7 +166,10 @@ object AppUpdateManager {
     fun onDownloadComplete(context: Context, downloadId: Long) {
         val expected = context.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
             .getLong(KEY_DOWNLOAD_ID, -1L)
-        if (downloadId == expected) handleCompletedDownload(context.applicationContext, downloadId)
+        if (downloadId != -1L && downloadId == expected) {
+            val file = getDownloadedUpdateFile(context) ?: return
+            openInstaller(currentActivityRef?.get() ?: context, file)
+        }
     }
 
     private fun latestRelease(repositoryOverride: String? = null): Release {
@@ -142,45 +213,43 @@ object AppUpdateManager {
         }
     }
 
+    /**
+     * Downloads the APK directly inside this app process using OkHttpClient
+     * so no external DownloadManager or browser app is ever invoked.
+     */
     private fun enqueueDownload(context: Context, release: Release) {
         val directory = File(context.getExternalFilesDir(Environment.DIRECTORY_DOWNLOADS), "updates").apply { mkdirs() }
         val target = File(directory, "update-${release.versionCode}.apk")
-        if (target.exists()) target.delete()
-
-        try {
-            val manager = context.getSystemService(Context.DOWNLOAD_SERVICE) as? DownloadManager
-            if (manager != null) {
-                val request = DownloadManager.Request(Uri.parse(release.apkUrl))
-                    .setTitle("Downloading app update")
-                    .setDescription("Version ${release.versionCode}")
-                    .setNotificationVisibility(DownloadManager.Request.VISIBILITY_VISIBLE_NOTIFY_COMPLETED)
-                    .setAllowedOverMetered(true)
-                    .setAllowedOverRoaming(false)
-                    .setDestinationUri(Uri.fromFile(target))
-                val id = manager.enqueue(request)
-                context.getSharedPreferences(PREFS, Context.MODE_PRIVATE).edit()
-                    .putLong(KEY_DOWNLOAD_ID, id)
-                    .putLong(KEY_VERSION_CODE, release.versionCode)
-                    .putString(KEY_FILE_PATH, target.absolutePath)
-                    .putString(KEY_SHA256, release.sha256)
-                    .apply()
-                toast(context, "Downloading update")
-                Log.i(TAG, "Enqueued update version ${release.versionCode}, download id=$id")
-                return
-            }
-        } catch (e: Exception) {
-            Log.w(TAG, "System DownloadManager unavailable or disabled, using direct HTTP download fallback", e)
-        }
-
-        // Direct in-app HTTP download fallback if system DownloadManager is unavailable/disabled
-        directDownloadInApp(context, release, target)
+        directDownloadInApp(context.applicationContext, release, target)
     }
 
     fun checkAndInstallPending(activity: Activity) {
-        deleteInstalledUpdateIfSafe(activity.applicationContext)
-        val file = getDownloadedUpdateFile(activity) ?: return
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O && !activity.packageManager.canRequestPackageInstalls()) return
-        openInstaller(activity, file)
+        currentActivityRef = WeakReference(activity)
+        val appContext = activity.applicationContext
+        deleteInstalledUpdateIfSafe(appContext)
+
+        val prefs = appContext.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
+        val awaitingPermission = prefs.getBoolean(KEY_AWAITING_INSTALL_PERMISSION, false)
+        val file = getDownloadedUpdateFile(appContext) ?: return
+
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O && !activity.packageManager.canRequestPackageInstalls()) {
+            // Only open Settings automatically if we haven't already sent the user there
+            if (!awaitingPermission) {
+                openInstaller(activity, file)
+            }
+            return
+        }
+
+        // User just granted "Install unknown apps" and returned to the app, or download finished while backgrounded
+        val targetVer = prefs.getLong(KEY_VERSION_CODE, -1L)
+        val promptedVer = prefs.getLong(KEY_PROMPTED_VERSION_CODE, -1L)
+        if (awaitingPermission || targetVer != promptedVer) {
+            prefs.edit()
+                .putBoolean(KEY_AWAITING_INSTALL_PERMISSION, false)
+                .putLong(KEY_PROMPTED_VERSION_CODE, targetVer)
+                .apply()
+            openInstaller(activity, file)
+        }
     }
 
     fun getDownloadedUpdateFile(context: Context): File? {
@@ -190,7 +259,7 @@ object AppUpdateManager {
         if (file.isFile && file.length() > 0) {
             val expectedVer = prefs.getLong(KEY_VERSION_CODE, -1L)
             val expectedHash = prefs.getString(KEY_SHA256, null)
-            if (verifyApk(context, file, expectedVer, expectedHash)) {
+            if (expectedVer > installedVersionCode(context) && verifyApk(context, file, expectedVer, expectedHash)) {
                 return file
             }
         }
@@ -200,111 +269,144 @@ object AppUpdateManager {
     fun installDownloadedUpdate(context: Context) {
         val file = getDownloadedUpdateFile(context)
         if (file != null) {
-            openInstaller(context, file)
+            openInstaller(currentActivityRef?.get() ?: context, file)
         } else {
             toast(context, "No verified update file found")
         }
     }
 
     private fun directDownloadInApp(context: Context, release: Release, target: File) {
-        scope.launch {
-            toast(context, "Downloading update directly...")
-            context.getSharedPreferences(PREFS, Context.MODE_PRIVATE).edit()
-                .putString(KEY_FILE_PATH, target.absolutePath)
-                .putLong(KEY_VERSION_CODE, release.versionCode)
-                .putString(KEY_SHA256, release.sha256)
-                .apply()
+        if (!isDownloading.compareAndSet(false, true)) return
 
-            val result = runCatching {
+        scope.launch {
+            val tempFile = File(target.parentFile, "${target.name}.part")
+            try {
+                if (tempFile.exists()) tempFile.delete()
+                if (target.exists()) target.delete()
+
                 val request = Request.Builder()
                     .url(release.apkUrl)
                     .header("User-Agent", "Caller-Android-Updater")
                     .build()
+
                 http.newCall(request).execute().use { response ->
                     if (!response.isSuccessful) error("HTTP ${response.code}")
                     val body = response.body ?: error("Empty response body")
                     body.byteStream().use { input ->
-                        java.io.FileOutputStream(target).use { output ->
+                        FileOutputStream(tempFile).use { output ->
                             input.copyTo(output)
+                            output.fd.sync()
                         }
                     }
                 }
-            }
-            result.onSuccess {
+
+                if (!tempFile.renameTo(target)) {
+                    tempFile.copyTo(target, overwrite = true)
+                    tempFile.delete()
+                }
+
                 if (verifyApk(context, target, release.versionCode, release.sha256)) {
+                    context.getSharedPreferences(PREFS, Context.MODE_PRIVATE).edit()
+                        .putString(KEY_FILE_PATH, target.absolutePath)
+                        .putLong(KEY_VERSION_CODE, release.versionCode)
+                        .putString(KEY_SHA256, release.sha256)
+                        .remove(KEY_PROMPTED_VERSION_CODE)
+                        .apply()
+
+                    Log.i(TAG, "In-app download verified for versionCode=${release.versionCode}; launching installer")
                     toast(context, "Download complete! Opening installer...")
-                    withContext(Dispatchers.Main) { openInstaller(context, target) }
+
+                    withContext(Dispatchers.Main) {
+                        val launchContext = currentActivityRef?.get()?.takeIf { !it.isFinishing && !it.isDestroyed } ?: context
+                        context.getSharedPreferences(PREFS, Context.MODE_PRIVATE).edit()
+                            .putLong(KEY_PROMPTED_VERSION_CODE, release.versionCode)
+                            .apply()
+                        openInstaller(launchContext, target)
+                    }
                 } else {
                     if (target.exists()) target.delete()
                     clearDownload(context)
                     toast(context, "Downloaded update could not be verified")
                 }
-            }.onFailure { error ->
-                Log.e(TAG, "Direct download failed", error)
+            } catch (error: Exception) {
+                Log.e(TAG, "Direct in-app download failed", error)
+                if (tempFile.exists()) tempFile.delete()
                 toast(context, "Download failed: ${error.localizedMessage ?: "Unknown error"}")
+            } finally {
+                isDownloading.set(false)
             }
-        }
-    }
-
-    private fun handleCompletedDownload(context: Context, downloadId: Long) {
-        scope.launch {
-            val manager = context.getSystemService(Context.DOWNLOAD_SERVICE) as DownloadManager
-            val cursor = manager.query(DownloadManager.Query().setFilterById(downloadId)) ?: return@launch
-            cursor.use {
-                if (!it.moveToFirst()) return@launch clearDownload(context)
-                val status = it.getInt(it.getColumnIndexOrThrow(DownloadManager.COLUMN_STATUS))
-                if (status != DownloadManager.STATUS_SUCCESSFUL) {
-                    if (status == DownloadManager.STATUS_FAILED) {
-                        Log.w(TAG, "Update download failed: " + it.getInt(it.getColumnIndexOrThrow(DownloadManager.COLUMN_REASON)))
-                        clearDownload(context)
-                    }
-                    return@launch
-                }
-            }
-            val prefs = context.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
-            val file = File(prefs.getString(KEY_FILE_PATH, "") ?: "")
-            val expectedVersion = prefs.getLong(KEY_VERSION_CODE, -1L)
-            if (!verifyApk(context, file, expectedVersion, prefs.getString(KEY_SHA256, null))) {
-                if (file.exists()) file.delete()
-                clearDownload(context)
-                toast(context, "Downloaded update could not be verified")
-                return@launch
-            }
-            toast(context, "Download complete! Opening installer...")
-            withContext(Dispatchers.Main) { openInstaller(context, file) }
         }
     }
 
     private fun verifyApk(context: Context, file: File, expectedVersion: Long, expectedSha256: String?): Boolean {
         if (!file.isFile || file.length() == 0L) return false
         if (expectedSha256 != null && sha256(file) != expectedSha256.lowercase()) return false
-        val packageInfo = context.packageManager.getPackageArchiveInfo(file.absolutePath, 0) ?: return false
+        val packageInfo = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+            context.packageManager.getPackageArchiveInfo(file.absolutePath, PackageManager.PackageInfoFlags.of(0))
+        } else {
+            @Suppress("DEPRECATION")
+            context.packageManager.getPackageArchiveInfo(file.absolutePath, 0)
+        } ?: return false
         if (packageInfo.packageName != context.packageName) return false
         if (expectedVersion > 0 && archiveVersionCode(packageInfo) != expectedVersion) return false
-        return true // The platform installer performs the authoritative signing-certificate verification.
+        return true
     }
 
     private fun openInstaller(context: Context, file: File) {
         try {
-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O && !context.packageManager.canRequestPackageInstalls()) {
-                toast(context, "Allow 'Install unknown apps' permission to finish update")
-                context.getSharedPreferences(PREFS, Context.MODE_PRIVATE).edit()
+            val activeContext = currentActivityRef?.get()?.takeIf { !it.isFinishing && !it.isDestroyed } ?: context
+            val prefs = activeContext.applicationContext.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
+
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O && !activeContext.packageManager.canRequestPackageInstalls()) {
+                toast(activeContext, "Allow 'Install unknown apps' permission to finish update")
+                prefs.edit()
                     .putString(KEY_FILE_PATH, file.absolutePath)
+                    .putBoolean(KEY_AWAITING_INSTALL_PERMISSION, true)
                     .apply()
-                context.startActivity(
-                    Intent(Settings.ACTION_MANAGE_UNKNOWN_APP_SOURCES, Uri.parse("package:${context.packageName}"))
-                        .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
-                )
+                val permissionIntent = Intent(
+                    Settings.ACTION_MANAGE_UNKNOWN_APP_SOURCES,
+                    Uri.parse("package:${activeContext.packageName}")
+                ).apply {
+                    if (activeContext !is Activity) addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                }
+                activeContext.startActivity(permissionIntent)
                 return
             }
 
-            val uri = FileProvider.getUriForFile(context, "${context.packageName}.update-file-provider", file)
-            val intent = Intent(Intent.ACTION_VIEW).apply {
-                setDataAndType(uri, "application/vnd.android.package-archive")
-                addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION or Intent.FLAG_GRANT_WRITE_URI_PERMISSION or Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TOP)
+            prefs.edit().putBoolean(KEY_AWAITING_INSTALL_PERMISSION, false).apply()
+
+            val uri = FileProvider.getUriForFile(
+                activeContext,
+                "${activeContext.packageName}.update-file-provider",
+                file
+            )
+
+            // Use ACTION_INSTALL_PACKAGE with read-only URI permission so Android opens
+            // the official system Package Installer directly without offering third-party apps.
+            @Suppress("DEPRECATION")
+            val installIntent = Intent(Intent.ACTION_INSTALL_PACKAGE).apply {
+                data = uri
+                addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+                if (activeContext !is Activity) {
+                    addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                }
+                putExtra(Intent.EXTRA_NOT_UNKNOWN_SOURCE, true)
+                putExtra(Intent.EXTRA_INSTALLER_PACKAGE_NAME, activeContext.packageName)
             }
-            context.startActivity(intent)
-            toast(context, "Opening package installer...")
+
+            if (installIntent.resolveActivity(activeContext.packageManager) != null) {
+                activeContext.startActivity(installIntent)
+            } else {
+                val viewIntent = Intent(Intent.ACTION_VIEW).apply {
+                    setDataAndType(uri, "application/vnd.android.package-archive")
+                    addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+                    if (activeContext !is Activity) {
+                        addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                    }
+                    putExtra(Intent.EXTRA_NOT_UNKNOWN_SOURCE, true)
+                }
+                activeContext.startActivity(viewIntent)
+            }
         } catch (e: Exception) {
             Log.e(TAG, "Failed to open installer", e)
             toast(context, "Error opening installer: ${e.localizedMessage}")
@@ -321,10 +423,28 @@ object AppUpdateManager {
     }
 
     private fun clearDownload(context: Context) = context.getSharedPreferences(PREFS, Context.MODE_PRIVATE).edit()
-        .remove(KEY_DOWNLOAD_ID).remove(KEY_VERSION_CODE).remove(KEY_FILE_PATH).remove(KEY_SHA256).apply()
+        .remove(KEY_DOWNLOAD_ID)
+        .remove(KEY_VERSION_CODE)
+        .remove(KEY_FILE_PATH)
+        .remove(KEY_SHA256)
+        .remove(KEY_PROMPTED_VERSION_CODE)
+        .putBoolean(KEY_AWAITING_INSTALL_PERMISSION, false)
+        .apply()
 
-    private fun installedVersionCode(context: Context): Long = archiveVersionCode(context.packageManager.getPackageInfo(context.packageName, 0))
-    private fun archiveVersionCode(info: PackageInfo): Long = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) info.longVersionCode else @Suppress("DEPRECATION") info.versionCode.toLong()
+    private fun installedVersionCode(context: Context): Long {
+        val pInfo = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+            context.packageManager.getPackageInfo(context.packageName, PackageManager.PackageInfoFlags.of(0))
+        } else {
+            @Suppress("DEPRECATION")
+            context.packageManager.getPackageInfo(context.packageName, 0)
+        }
+        return archiveVersionCode(pInfo)
+    }
+
+    private fun archiveVersionCode(info: PackageInfo): Long =
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) info.longVersionCode
+        else @Suppress("DEPRECATION") info.versionCode.toLong()
+
     private fun sha256(file: File): String = file.inputStream().use { input ->
         val digest = MessageDigest.getInstance("SHA-256")
         val buffer = ByteArray(DEFAULT_BUFFER_SIZE)
@@ -335,7 +455,11 @@ object AppUpdateManager {
         }
         digest.digest().joinToString("") { "%02x".format(it) }
     }
-    private fun toast(context: Context, message: String) = android.os.Handler(android.os.Looper.getMainLooper()).post { Toast.makeText(context, message, Toast.LENGTH_LONG).show() }
+
+    private fun toast(context: Context, message: String) =
+        Handler(Looper.getMainLooper()).post {
+            Toast.makeText(context.applicationContext, message, Toast.LENGTH_LONG).show()
+        }
 }
 
 class UpdateDownloadReceiver : BroadcastReceiver() {
