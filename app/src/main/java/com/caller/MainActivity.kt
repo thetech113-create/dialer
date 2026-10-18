@@ -894,7 +894,11 @@ class MainActivity : ComponentActivity() {
     }
 
     override fun onCreate(savedInstanceState: Bundle?) {
-        installSplashScreen()
+        val splashScreen = installSplashScreen()
+        val splashStartMs = android.os.SystemClock.elapsedRealtime()
+        splashScreen.setKeepOnScreenCondition {
+            android.os.SystemClock.elapsedRealtime() - splashStartMs < 250L
+        }
         UltraForensicLogger.init(this)
         requestWindowFeature(Window.FEATURE_NO_TITLE)
         super.onCreate(savedInstanceState)
