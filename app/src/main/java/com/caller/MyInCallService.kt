@@ -3596,7 +3596,8 @@ class MyInCallService : InCallService() {
                 val numberSnapshot = buildP2PNumberSnapshot(rawNumber)
                 val now = System.currentTimeMillis()
                 val launchKey = "${numberSnapshot.normalized.ifBlank { rawNumber }}|$showDialpad"
-                val suppressed = launchKey.isNotBlank() && launchKey == lastUiLaunchKey && (now - lastUiLaunchAt) < 1500L
+                val isExplicitAction = reason.contains("tap") || reason.contains("answer") || reason.contains("wake") || reason.contains("user") || reason.contains("incoming") || reason.contains("bubble")
+                val suppressed = !isExplicitAction && launchKey.isNotBlank() && launchKey == lastUiLaunchKey && (now - lastUiLaunchAt) < 1500L
                 val directBootPhase = isDirectBootPhase()
                 Log.w(
                     P2P_FORENSIC_TAG,

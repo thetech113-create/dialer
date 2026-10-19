@@ -927,20 +927,6 @@ class MainActivity : ComponentActivity() {
 
         unregisterAppPhoneAccountsSafely()
 
-        val launchAction = intent?.action
-        if (
-            savedInstanceState == null &&
-            !isPhoneLauncherIntent(intent) &&
-            (
-                launchAction == Intent.ACTION_MAIN ||
-                    (launchAction.isNullOrBlank() && intent?.data == null)
-            )
-        ) {
-            launchMessagingActivity()
-            finish()
-            return
-        }
-
         MyInCallService.setCallStateListener { stateObj ->
             runOnUiThread {
                 val mergedRecentCalls = mergeLiveRecentCallGroup(
