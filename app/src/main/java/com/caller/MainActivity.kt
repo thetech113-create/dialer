@@ -342,22 +342,16 @@ private fun mergeLiveRecentCallGroup(
 
 @Composable
 private fun RecentSubtitleLine(
-    simLabel: String = "",
-    callTypeString: String = "",
-    durationText: String = "",
-    timeText: String = "",
-    phoneNumberText: String = "",
+    baseText: String,
+    simLabel: String,
     textColor: Color,
     simBadgeColor: Color,
-    simTextColor: Color,
-    isMissed: Boolean = false
+    simTextColor: Color
 ) {
     Row(
-        modifier = Modifier.fillMaxWidth(),
         verticalAlignment = Alignment.CenterVertically,
-        horizontalArrangement = Arrangement.spacedBy(4.dp)
+        horizontalArrangement = Arrangement.spacedBy(6.dp)
     ) {
-        // 1. SIM Badge (SIM 1 / SIM 2)
         if (simLabel.isNotBlank()) {
             Surface(
                 shape = RoundedCornerShape(999.dp),
@@ -372,55 +366,17 @@ private fun RecentSubtitleLine(
                     maxLines = 1
                 )
             }
-            Text(text = "·", style = MaterialTheme.typography.bodySmall, color = textColor)
+            if (baseText.isNotBlank()) {
+                Text(text = "·", style = MaterialTheme.typography.bodySmall, color = textColor)
+            }
         }
-
-        // 2. Phone Number (optional)
-        if (phoneNumberText.isNotBlank()) {
+        if (baseText.isNotBlank()) {
             Text(
-                text = phoneNumberText,
+                text = baseText,
                 style = MaterialTheme.typography.bodySmall,
                 color = textColor,
                 maxLines = 1,
                 overflow = TextOverflow.Ellipsis
-            )
-            Text(text = "·", style = MaterialTheme.typography.bodySmall, color = textColor)
-        }
-
-        // 3. Call Type (Incoming / Outgoing / Missed)
-        if (callTypeString.isNotBlank()) {
-            Text(
-                text = callTypeString,
-                style = MaterialTheme.typography.bodySmall,
-                fontWeight = FontWeight.SemiBold,
-                color = if (isMissed) Color(0xFFFF5A52) else textColor,
-                maxLines = 1
-            )
-            if (durationText.isNotBlank() || timeText.isNotBlank()) {
-                Text(text = "·", style = MaterialTheme.typography.bodySmall, color = textColor)
-            }
-        }
-
-        // 4. Duration
-        if (durationText.isNotBlank()) {
-            Text(
-                text = durationText,
-                style = MaterialTheme.typography.bodySmall,
-                color = if (isMissed) Color(0xFFFF5A52) else textColor,
-                maxLines = 1
-            )
-            if (timeText.isNotBlank()) {
-                Text(text = "·", style = MaterialTheme.typography.bodySmall, color = textColor)
-            }
-        }
-
-        // 5. Timing
-        if (timeText.isNotBlank()) {
-            Text(
-                text = timeText,
-                style = MaterialTheme.typography.bodySmall,
-                color = textColor,
-                maxLines = 1
             )
         }
     }
@@ -6176,6 +6132,11 @@ class MainActivity : ComponentActivity() {
                                             onDelete = { onDeleteRecentCall(groupedCall.phoneNumber) }
                                         )
                                         Spacer(modifier = Modifier.width(14.dp))
+                                        val subtitleText = when {
+                                            lastCall == null -> ""
+                                            lastCall.callType == CallType.MISSED -> "Missed"
+                                            else -> lastCall.formattedDuration
+                                        }
                                         Column(modifier = Modifier.weight(1f)) {
                                             Text(
                                                 text = displayName,
@@ -6184,14 +6145,11 @@ class MainActivity : ComponentActivity() {
                                                 color = recentPrimaryTextColor
                                             )
                                             RecentSubtitleLine(
+                                                baseText = subtitleText,
                                                 simLabel = lastCall?.simLabel.orEmpty(),
-                                                callTypeString = lastCall?.typeString.orEmpty(),
-                                                durationText = lastCall?.formattedDuration.orEmpty(),
-                                                timeText = lastCall?.formattedTime.orEmpty(),
                                                 textColor = recentSecondaryTextColor,
                                                 simBadgeColor = recentCardBorderColor.copy(alpha = 0.18f),
-                                                simTextColor = recentPrimaryTextColor,
-                                                isMissed = lastCall?.callType == CallType.MISSED
+                                                simTextColor = recentPrimaryTextColor
                                             )
                                         }
                                         if (lastCall != null) {
@@ -6239,10 +6197,14 @@ class MainActivity : ComponentActivity() {
                     }
                     // Saved names always show the number too; unsaved rows already show it as the title.
                     val showRowNumber = rowBucket.name != "Unknown" && titleText != formatPhoneNumberForDisplay(rowPhoneNumber)
-                    val subtitleText = remember(lastCall.formattedTime, lastCall.formattedDuration, showRowNumber, rowPhoneNumber) {
-                        val base = "${lastCall.formattedTime} - ${lastCall.formattedDuration}"
-                        // Same person on two rows (two numbers): show which number this row is.
-                        if (showRowNumber) "${formatPhoneNumberForDisplay(rowPhoneNumber)} · $base" else base
+                    val subtitleText = remember(lastCall.callType, lastCall.formattedDuration, showRowNumber, rowPhoneNumber) {
+                        val durStr = if (lastCall.callType == CallType.MISSED) "Missed" else lastCall.formattedDuration
+                        if (showRowNumber) {
+                            val num = formatPhoneNumberForDisplay(rowPhoneNumber)
+                            if (durStr.isNotBlank()) "$num · $durStr" else num
+                        } else {
+                            durStr
+                        }
                     }
                     val cardShape = RoundedCornerShape(28.dp)
                     val canExpandHistory = bucketSize > 1
@@ -6303,15 +6265,11 @@ class MainActivity : ComponentActivity() {
                                         )
                                         Spacer(modifier = Modifier.height(4.dp))
                                         RecentSubtitleLine(
+                                            baseText = subtitleText,
                                             simLabel = lastCall.simLabel,
-                                            callTypeString = lastCall.typeString,
-                                            durationText = lastCall.formattedDuration,
-                                            timeText = lastCall.formattedTime,
-                                            phoneNumberText = if (showRowNumber) formatPhoneNumberForDisplay(rowPhoneNumber) else "",
-                                            textColor = recentSecondaryTextColor,
+                                            textColor = if (lastCall.callType == CallType.MISSED) Color(0xFFFF5A52) else recentSecondaryTextColor,
                                             simBadgeColor = recentCardBorderColor.copy(alpha = 0.18f),
-                                            simTextColor = recentPrimaryTextColor,
-                                            isMissed = lastCall.callType == CallType.MISSED
+                                            simTextColor = recentPrimaryTextColor
                                         )
                                         if (showAllHistory && !showRowNumber) {
                                             Spacer(modifier = Modifier.height(4.dp))
@@ -6476,15 +6434,17 @@ class MainActivity : ComponentActivity() {
                                     style = MaterialTheme.typography.bodyLarge,
                                     fontWeight = FontWeight.SemiBold
                                 )  
+                                val subtitleText = when {
+                                    lastCall == null -> ""
+                                    lastCall.callType == CallType.MISSED -> "Missed"
+                                    else -> lastCall.formattedDuration
+                                }
                                 RecentSubtitleLine(
+                                    baseText = subtitleText,
                                     simLabel = lastCall?.simLabel.orEmpty(),
-                                    callTypeString = lastCall?.typeString.orEmpty(),
-                                    durationText = lastCall?.formattedDuration.orEmpty(),
-                                    timeText = lastCall?.formattedTime.orEmpty(),
-                                    textColor = MaterialTheme.colorScheme.onSurfaceVariant,
+                                    textColor = if (lastCall?.callType == CallType.MISSED) Color(0xFFFF5A52) else MaterialTheme.colorScheme.onSurfaceVariant,
                                     simBadgeColor = MaterialTheme.colorScheme.primary.copy(alpha = 0.12f),
-                                    simTextColor = MaterialTheme.colorScheme.primary,
-                                    isMissed = lastCall?.callType == CallType.MISSED
+                                    simTextColor = MaterialTheme.colorScheme.primary
                                 )
                             }
                             if (lastCall != null) {
@@ -6534,7 +6494,7 @@ class MainActivity : ComponentActivity() {
                     val titleText = remember(groupedCall.name, groupedCall.phoneNumber) { if (groupedCall.name == "Unknown") groupedCall.phoneNumber else groupedCall.name }
                     val callsCountText = remember(groupedCall.callHistory.size) { "${groupedCall.callHistory.size} calls" }
                     val lastCall = groupedCall.callHistory.first()
-                    val subtitleText = remember(lastCall.formattedTime, lastCall.formattedDuration) { "${lastCall.formattedTime} - ${lastCall.formattedDuration}" }
+                    val subtitleText = remember(lastCall.callType, lastCall.formattedDuration) { if (lastCall.callType == CallType.MISSED) "Missed" else lastCall.formattedDuration }
 
                     Card(modifier = Modifier.fillMaxWidth().padding(horizontal = 8.dp, vertical = 4.dp), shape = RoundedCornerShape(12.dp)) {
                         var showAllHistory by remember { mutableStateOf(false) }
@@ -6548,14 +6508,11 @@ class MainActivity : ComponentActivity() {
                                 Text(text = callsCountText, style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
                                 Spacer(modifier = Modifier.height(2.dp))
                                 RecentSubtitleLine(
+                                    baseText = subtitleText,
                                     simLabel = lastCall.simLabel,
-                                    callTypeString = lastCall.typeString,
-                                    durationText = lastCall.formattedDuration,
-                                    timeText = lastCall.formattedTime,
-                                    textColor = MaterialTheme.colorScheme.onSurfaceVariant,
+                                    textColor = if (lastCall.callType == CallType.MISSED) Color(0xFFFF5A52) else MaterialTheme.colorScheme.onSurfaceVariant,
                                     simBadgeColor = MaterialTheme.colorScheme.primary.copy(alpha = 0.12f),
-                                    simTextColor = MaterialTheme.colorScheme.primary,
-                                    isMissed = lastCall.callType == CallType.MISSED
+                                    simTextColor = MaterialTheme.colorScheme.primary
                                 )
                             }
                             Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
