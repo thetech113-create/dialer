@@ -349,32 +349,34 @@ private fun RecentSubtitleLine(
     simTextColor: Color
 ) {
     if (simLabel.isBlank()) {
-        Text(
-            text = baseText,
-            style = MaterialTheme.typography.bodySmall,
-            color = textColor
-        )
+        if (baseText.isNotBlank()) {
+            Text(
+                text = baseText,
+                style = MaterialTheme.typography.bodySmall,
+                color = textColor
+            )
+        }
         return
     }
 
     Row(
-        modifier = Modifier.fillMaxWidth(),
         verticalAlignment = Alignment.CenterVertically,
-        horizontalArrangement = Arrangement.spacedBy(8.dp)
+        horizontalArrangement = Arrangement.spacedBy(6.dp)
     ) {
-        Text(
-            text = baseText,
-            modifier = Modifier.weight(1f, fill = false),
-            style = MaterialTheme.typography.bodySmall,
-            color = textColor
-        )
+        if (baseText.isNotBlank()) {
+            Text(
+                text = baseText,
+                style = MaterialTheme.typography.bodySmall,
+                color = textColor
+            )
+        }
         Surface(
             shape = RoundedCornerShape(999.dp),
             color = simBadgeColor
         ) {
             Text(
                 text = simLabel,
-                modifier = Modifier.padding(horizontal = 8.dp, vertical = 3.dp),
+                modifier = Modifier.padding(horizontal = 7.dp, vertical = 2.dp),
                 style = MaterialTheme.typography.labelSmall,
                 fontWeight = FontWeight.Bold,
                 color = simTextColor,
@@ -6520,13 +6522,32 @@ class MainActivity : ComponentActivity() {
                             Spacer(modifier = Modifier.height(8.dp))
                             val callsToShow = groupedCall.callHistory.take(visibleLimit)
                             callsToShow.forEach { call ->
-                                Row(modifier = Modifier.fillMaxWidth().padding(vertical = 4.dp, horizontal = 16.dp), verticalAlignment = Alignment.CenterVertically) {
-                                    CallTypeIcon(callType = call.callType)
-                                    Spacer(modifier = Modifier.width(8.dp))
-                                    Text(text = call.formattedTime, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurface, modifier = Modifier.weight(1f))
-                                    Column(horizontalAlignment = Alignment.End) {
-                                        Text(text = appendRecentSimLabel(call.typeString, call.simLabel), style = MaterialTheme.typography.bodySmall, color = if (call.callType == CallType.MISSED) Color(0xFFFF5A52) else MaterialTheme.colorScheme.onSurfaceVariant)
-                                        Text(text = call.formattedDuration, style = MaterialTheme.typography.bodySmall, color = if (call.callType == CallType.MISSED) Color(0xFFFF5A52) else if (call.duration > 0) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.error)
+                                Surface(
+                                    modifier = Modifier
+                                        .fillMaxWidth()
+                                        .padding(vertical = 3.dp, horizontal = 12.dp),
+                                    shape = RoundedCornerShape(16.dp),
+                                    color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.35f)
+                                ) {
+                                    Row(
+                                        modifier = Modifier
+                                            .fillMaxWidth()
+                                            .padding(horizontal = 14.dp, vertical = 10.dp),
+                                        verticalAlignment = Alignment.CenterVertically
+                                    ) {
+                                        CallTypeIcon(callType = call.callType)
+                                        Spacer(modifier = Modifier.width(10.dp))
+                                        Column(modifier = Modifier.weight(1f)) {
+                                            val durationStr = if (call.callType == CallType.MISSED) "Missed" else call.formattedDuration
+                                            val itemText = "${call.typeString} · ${call.formattedTime} - $durationStr"
+                                            RecentSubtitleLine(
+                                                baseText = itemText,
+                                                simLabel = call.simLabel,
+                                                textColor = if (call.callType == CallType.MISSED) Color(0xFFFF5A52) else MaterialTheme.colorScheme.onSurfaceVariant,
+                                                simBadgeColor = MaterialTheme.colorScheme.primary.copy(alpha = 0.15f),
+                                                simTextColor = MaterialTheme.colorScheme.primary
+                                            )
+                                        }
                                     }
                                 }
                             }
