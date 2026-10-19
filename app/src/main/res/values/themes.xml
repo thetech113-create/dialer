@@ -18,6 +18,7 @@
         <item name="android:activityCloseExitAnimation">@anim/no_animation</item>
     </style>
 
+    <!-- Phone / Dialer Starting Splash Theme -->
     <style name="Theme.App.Starting" parent="Theme.SplashScreen">
         <item name="windowSplashScreenBackground">@color/dark_app_background</item>
         <item name="windowSplashScreenAnimatedIcon">@drawable/ic_launcher_phone_foreground</item>
@@ -27,6 +28,17 @@
         <item name="android:windowSplashScreenBackground" tools:targetApi="31">@color/dark_app_background</item>
         <item name="android:windowSplashScreenAnimatedIcon" tools:targetApi="31">@drawable/ic_launcher_phone_foreground</item>
         <!-- CRITICAL for Oppo/ColorOS: Force icon to display even on warm starts when dialer process is already running -->
+        <item name="android:windowSplashScreenBehavior" tools:targetApi="33">icon_preferred</item>
+    </style>
+
+    <!-- Messaging / Messages Starting Splash Theme -->
+    <style name="Theme.App.Starting.Messaging" parent="Theme.SplashScreen">
+        <item name="windowSplashScreenBackground">@color/dark_app_background</item>
+        <item name="windowSplashScreenAnimatedIcon">@drawable/ic_messages_launcher</item>
+        <item name="postSplashScreenTheme">@style/Theme.Caller</item>
+
+        <item name="android:windowSplashScreenBackground" tools:targetApi="31">@color/dark_app_background</item>
+        <item name="android:windowSplashScreenAnimatedIcon" tools:targetApi="31">@drawable/ic_messages_launcher</item>
         <item name="android:windowSplashScreenBehavior" tools:targetApi="33">icon_preferred</item>
     </style>
     

@@ -157,7 +157,7 @@
             android:label="@string/launcher_messages_label"
             android:launchMode="singleTask"
             android:taskAffinity=".Messaging"
-            android:theme="@style/Theme.App.Starting"
+            android:theme="@style/Theme.App.Starting.Messaging"
             android:configChanges="orientation|screenSize|keyboardHidden|uiMode">
 
             <!-- Messaging app intent filters -->
@@ -206,7 +206,7 @@
             android:icon="@drawable/ic_messages_launcher"
             android:label="@string/launcher_messages_label"
             android:targetActivity=".MessagingActivity"
-            android:theme="@style/Theme.App.Starting">
+            android:theme="@style/Theme.App.Starting.Messaging">
             <intent-filter>
                 <action android:name="android.intent.action.MAIN" />
                 <category android:name="android.intent.category.LAUNCHER" />
