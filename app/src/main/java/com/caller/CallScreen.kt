@@ -1054,9 +1054,9 @@ private fun ModernCallingScreenLayout(
                 .background(
                     Brush.verticalGradient(
                         colors = listOf(
-                            Color(0xFF0E122B),
-                            Color(0xFF231A43),
-                            Color(0xFF6A7EA8)
+                            Color(0xFF080B11),
+                            Color(0xFF10141E),
+                            Color(0xFF0A0D14)
                         )
                     )
                 )
@@ -1072,7 +1072,7 @@ private fun ModernCallingScreenLayout(
                         .background(
                             Brush.radialGradient(
                                 colors = listOf(
-                                    Color.White.copy(alpha = 0.18f),
+                                    Color(0xFF1E293B).copy(alpha = 0.35f),
                                     Color.Transparent
                                 )
                             )
@@ -1253,7 +1253,7 @@ private fun ModernCallingScreenLayout(
                         Card(
                             modifier = Modifier.fillMaxWidth(),
                             shape = RoundedCornerShape(32.dp),
-                            colors = CardDefaults.cardColors(containerColor = Color(0xB8161420))
+                            colors = CardDefaults.cardColors(containerColor = Color(0xFF161B26))
                         ) {
                             Column(
                                 modifier = Modifier
@@ -1512,7 +1512,7 @@ private fun CallLaunchPlaceholder(seedState: CallState) {
     BoxWithConstraints(
         modifier = Modifier
             .fillMaxSize()
-            .background(Brush.verticalGradient(colors = listOf(Color(0xFF1A1A2E), Color(0xFF16213E), Color(0xFF0F3460)))),
+            .background(Brush.verticalGradient(colors = listOf(Color(0xFF080B11), Color(0xFF10141E), Color(0xFF0A0D14)))),
         contentAlignment = Alignment.Center
     ) {
         val isCompactCallSurface = maxWidth < 390.dp || maxHeight < 820.dp
@@ -1599,26 +1599,10 @@ class CallActivity : ComponentActivity() {
         }
         isFinishingCallUi = true
         MyInCallService.appWasOnScreenAtCallStart = false
-        val locked = (getSystemService(KEYGUARD_SERVICE) as? KeyguardManager)?.isKeyguardLocked == true
-        Log.w(CALL_UI_FORENSIC_TAG, "call_ui_finish reason=$reason locked=$locked")
-        if (!locked) {
-            try {
-                startActivity(Intent(this, MainActivity::class.java).apply {
-                    action = "OPEN_RECENTS"
-                    addFlags(
-                        Intent.FLAG_ACTIVITY_NEW_TASK or
-                        Intent.FLAG_ACTIVITY_SINGLE_TOP or
-                        Intent.FLAG_ACTIVITY_CLEAR_TOP or
-                        Intent.FLAG_ACTIVITY_REORDER_TO_FRONT
-                    )
-                })
-                @Suppress("DEPRECATION")
-                overridePendingTransition(0, 0)
-            } catch (e: Exception) {
-                Log.e(CALL_UI_FORENSIC_TAG, "call_ui_finish open_main_failed error=${e.message}")
-            }
+        Log.w(CALL_UI_FORENSIC_TAG, "call_ui_finish reason=$reason finishAndRemoveTask")
+        if (!isFinishing && !isDestroyed) {
+            finishAndRemoveTask()
         }
-        if (!isFinishing && !isDestroyed) finishAndRemoveTask()
     }
 
     private fun openInAppMainUi(reason: String) {
