@@ -784,9 +784,10 @@ private fun ConversationMessageBubble(
             color = bubbleColor
         ) {
             Column(modifier = Modifier.padding(horizontal = 14.dp, vertical = 10.dp)) {
-                Text(
+                LinkifiedSmsText(
                     text = message.body,
-                    color = bubbleTextColor,
+                    textColor = bubbleTextColor,
+                    linkColor = if (message.isOutgoing) Color(0xFF93C5FD) else Color(0xFF2563EB),
                     style = MaterialTheme.typography.bodyLarge
                 )
                 Spacer(modifier = Modifier.height(4.dp))
