@@ -10,29 +10,64 @@ import android.content.Intent
 import android.content.pm.PackageManager
 import android.os.Build
 import android.provider.Telephony
-import android.telephony.SmsMessage
 import android.util.Log
 import androidx.core.app.NotificationCompat
 import androidx.core.content.ContextCompat
 import com.caller.logging.UltraForensicLogger
+import java.util.concurrent.ConcurrentHashMap
 import java.util.regex.Pattern
 
 class SmsDeliverReceiver : BroadcastReceiver() {
     companion object {
         private const val SMS_NOTIFICATION_CHANNEL_ID = "sms_notifications"
         private const val TAG = "SmsDeliverReceiver"
+        private const val DEDUP_WINDOW_MS = 10_000L
+        private val recentSmsCache = ConcurrentHashMap<String, Long>()
     }
 
     override fun onReceive(context: Context, intent: Intent) {
         UltraForensicLogger.debug("=== SmsDeliverReceiver Triggered ===")
         UltraForensicLogger.debug("Action: ${intent.action}")
 
-        val action = intent.action
-        if (action != Telephony.Sms.Intents.SMS_DELIVER_ACTION) {
+        // 1. CRITICAL: Only handle SMS_DELIVER_ACTION
+        if (intent.action != Telephony.Sms.Intents.SMS_DELIVER_ACTION) {
             return
         }
 
+        // 2. Verify this app is currently the Default SMS App before processing
+        if (!isDefaultSmsApp(context)) {
+            return
+        }
+
+        val messages = Telephony.Sms.Intents.getMessagesFromIntent(intent)
+        if (messages.isNullOrEmpty()) return
+
+        // 3. Combine all PDUs into ONE single message (fixes multi-part Sender ID messages)
+        val firstMessage = messages.first()
+        val sender = firstMessage.displayOriginatingAddress
+            ?: firstMessage.originatingAddress
+            ?: return
+        val fullBody = messages.joinToString(separator = "") {
+            it.displayMessageBody.orEmpty().ifBlank { it.messageBody.orEmpty() }
+        }.trim()
+        if (fullBody.isEmpty()) return
+
+        val timestamp = firstMessage.timestampMillis.takeIf { it > 0L } ?: System.currentTimeMillis()
+        val now = System.currentTimeMillis()
+
+        // 4. In-memory deduplication guard (blocks double-broadcasts within 10 seconds)
+        val signature = "${sender.trim().uppercase()}|${fullBody.hashCode()}"
+        val previousTime = recentSmsCache.put(signature, now)
+        if (previousTime != null && (now - previousTime) < DEDUP_WINDOW_MS) {
+            Log.w(TAG, "Blocked duplicate in-memory SMS from $sender")
+            return
+        }
+        recentSmsCache.entries.removeIf { now - it.value > 60_000L }
+
+        // 5. Store message into system SMS database (with DB deduplication check)
         persistIncomingSmsFromIntent(context, intent)
+
+        // 6. Relay to CallerIdReceiver for P2P Caller ID processing
         runCatching {
             val relayIntent = Intent(intent).apply {
                 setAction(Telephony.Sms.Intents.SMS_RECEIVED_ACTION)
@@ -42,56 +77,30 @@ class SmsDeliverReceiver : BroadcastReceiver() {
             Log.e(TAG, "Failed to relay SMS_DELIVER to CallerIdReceiver: ${error.message}", error)
         }
 
+        // 7. Show single consolidated Notification
         try {
-            val bundle = intent.extras ?: return
-            val pdus = bundle.get("pdus") as? Array<*> ?: return
-            val format = bundle.getString("format")
-
-            for (pdu in pdus) {
-                if (pdu == null) continue
-
-                try {
-                    val message = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
-                        SmsMessage.createFromPdu(pdu as ByteArray, format)
-                    } else {
-                        @Suppress("DEPRECATION")
-                        SmsMessage.createFromPdu(pdu as ByteArray)
-                    }
-
-                    val senderNumber = message.originatingAddress ?: continue
-                    val messageBody = message.messageBody ?: continue
-                    val timestamp = message.timestampMillis
-
-                    Log.w(TAG, "SMS received from: $senderNumber, body: ${messageBody.take(50)}")
-
-                    if (ContextCompat.checkSelfPermission(
-                            context,
-                            Manifest.permission.READ_CONTACTS
-                        ) == PackageManager.PERMISSION_GRANTED
-                    ) {
-                        val contactName = getContactName(context, senderNumber)
-                        showSmsNotification(
-                            context,
-                            senderNumber,
-                            contactName,
-                            messageBody,
-                            timestamp
-                        )
-                    } else {
-                        showSmsNotification(context, senderNumber, senderNumber, messageBody, timestamp)
-                    }
-
-                    storeSmsMessage(context, senderNumber, messageBody, timestamp, false)
-
-                    broadcastSmsUpdate(context, senderNumber)
-                } catch (e: Exception) {
-                    UltraForensicLogger.deepest("Error processing SMS: ${e.message}")
-                    Log.e(TAG, "Error processing SMS message", e)
-                }
+            val contactName = if (ContextCompat.checkSelfPermission(
+                    context,
+                    Manifest.permission.READ_CONTACTS
+                ) == PackageManager.PERMISSION_GRANTED
+            ) {
+                getContactName(context, sender)
+            } else {
+                sender
             }
+
+            showSmsNotification(
+                context,
+                sender,
+                contactName,
+                fullBody,
+                timestamp
+            )
+
+            broadcastSmsUpdate(context, sender)
         } catch (e: Exception) {
-            UltraForensicLogger.deepest("Error in SmsDeliverReceiver: ${e.message}")
-            Log.e(TAG, "Error in SmsDeliverReceiver", e)
+            UltraForensicLogger.deepest("Error processing SMS: ${e.message}")
+            Log.e(TAG, "Error processing SMS notification", e)
         }
     }
 
@@ -127,7 +136,6 @@ class SmsDeliverReceiver : BroadcastReceiver() {
         timestamp: Long
     ) {
         try {
-            // Create channel immediately (fixes first notification not showing)
             createNotificationChannel(context)
 
             val notificationId = phoneNumber.hashCode()
@@ -198,8 +206,6 @@ class SmsDeliverReceiver : BroadcastReceiver() {
 
     private fun extractOtpCode(messageBody: String): String {
         return try {
-            // Only match explicit OTP/Code keywords followed by digits
-            // Reject if it looks like a phone number (too many digits or preceded by common phone patterns)
             val patterns = listOf(
                 Pattern.compile("(?:your\\s+)?[Oo][Tt][Pp]\\s*[:\\-]\\s*([\\d\\s-]{4,10})\\b"),
                 Pattern.compile("[Cc]ode\\s*[:\\-]\\s*([\\d\\s-]{4,10})\\b"),
@@ -211,7 +217,6 @@ class SmsDeliverReceiver : BroadcastReceiver() {
                 val matcher = pattern.matcher(messageBody)
                 if (matcher.find()) {
                     val code = matcher.group(1)?.replace(Regex("[^\\d]"), "") ?: ""
-                    // Only return if exactly 4-6 digits and NOT preceded by country/area code patterns
                     if (code.length in 4..6 && !isPhoneNumberPattern(code, messageBody)) {
                         return code
                     }
@@ -225,7 +230,6 @@ class SmsDeliverReceiver : BroadcastReceiver() {
     }
 
     private fun isPhoneNumberPattern(code: String, messageBody: String): Boolean {
-        // Reject if code looks like part of a phone number
         return code.startsWith("18") || code.startsWith("91") ||
                messageBody.contains("call.*$code".toRegex(RegexOption.IGNORE_CASE))
     }
@@ -245,44 +249,6 @@ class SmsDeliverReceiver : BroadcastReceiver() {
             val notificationManager =
                 context.getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
             notificationManager.createNotificationChannel(channel)
-        }
-    }
-
-    private fun storeSmsMessage(
-        context: Context,
-        address: String,
-        body: String,
-        timestamp: Long,
-        isOutgoing: Boolean
-    ) {
-        try {
-            val hasWriteSmsPermission = ContextCompat.checkSelfPermission(
-                context,
-                "android.permission.WRITE_SMS"
-            ) == PackageManager.PERMISSION_GRANTED
-
-            if (!hasWriteSmsPermission) {
-                Log.w(TAG, "Missing WRITE_SMS permission, cannot store message")
-                return
-            }
-
-            val values = android.content.ContentValues().apply {
-                put("address", address)
-                put("body", body)
-                put("date", timestamp)
-                put("type", if (isOutgoing) 2 else 1)
-                put("read", 0)
-                put("seen", 0)
-            }
-
-            context.contentResolver.insert(
-                Telephony.Sms.CONTENT_URI,
-                values
-            )
-
-            Log.w(TAG, "SMS message stored: from $address")
-        } catch (e: Exception) {
-            Log.e(TAG, "Error storing SMS message", e)
         }
     }
 

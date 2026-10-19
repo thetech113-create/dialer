@@ -329,7 +329,33 @@ private fun persistSentSms(context: Context, recipient: String, body: String) {
     }
 }
 
+fun isAlreadyInSystemSmsDb(
+    context: Context,
+    sender: String,
+    body: String,
+    nowMs: Long
+): Boolean {
+    return try {
+        val cutoff = nowMs - 10_000L
+        context.contentResolver.query(
+            Telephony.Sms.Inbox.CONTENT_URI,
+            arrayOf(Telephony.Sms._ID),
+            "${Telephony.Sms.ADDRESS} = ? AND ${Telephony.Sms.BODY} = ? AND ${Telephony.Sms.DATE} > ?",
+            arrayOf(sender, body, cutoff.toString()),
+            null
+        )?.use { cursor ->
+            cursor.moveToFirst()
+        } ?: false
+    } catch (e: Exception) {
+        false
+    }
+}
+
 private fun persistInboxSms(context: Context, sender: String, body: String, timestamp: Long) {
+    if (isAlreadyInSystemSmsDb(context, sender, body, timestamp)) {
+        android.util.Log.w("SmsMessaging", "Blocked duplicate DB SMS from $sender")
+        return
+    }
     val values = ContentValues().apply {
         put(SMS_COLUMN_ADDRESS, sender)
         put(SMS_COLUMN_BODY, body)
