@@ -57,9 +57,9 @@ enum class P2PTransportMode {
 
 fun isNumberVideoCallCapable(phoneNumber: String): Boolean {
     val digits = phoneNumber.filter { it.isDigit() }
-    if (digits.isEmpty()) return true
+    if (digits.isEmpty()) return false
 
-    // Shortcodes, emergency numbers, and carrier service numbers (length < 7) do not support ViLTE video calls
+    // Shortcodes, emergency numbers, and carrier service numbers (length < 7 e.g. 198, 121, 1901, 100, 112)
     if (digits.length < 7) {
         return false
     }
@@ -75,7 +75,14 @@ fun isNumberVideoCallCapable(phoneNumber: String): Boolean {
         digits.startsWith("855") ||
         digits.startsWith("844") ||
         digits.startsWith("833") ||
-        digits.startsWith("155")
+        digits.startsWith("155") ||
+        digits.startsWith("198") ||
+        digits.startsWith("121") ||
+        digits.startsWith("1901") ||
+        digits.startsWith("1902") ||
+        digits.startsWith("1950") ||
+        digits.startsWith("1947") ||
+        digits.endsWith("198")
     ) {
         return false
     }

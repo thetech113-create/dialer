@@ -5712,23 +5712,26 @@ class MainActivity : ComponentActivity() {
                                             }
                                         }
 
-                                        Surface(
-                                            modifier = Modifier
-                                                .size(52.dp)
-                                                .clip(CircleShape)
-                                                .clickable {
-                                                    onVideoCallAction()
-                                                },
-                                            shape = CircleShape,
-                                            color = MaterialTheme.colorScheme.tertiaryContainer
-                                        ) {
-                                            Box(contentAlignment = Alignment.Center) {
-                                                Icon(
-                                                    imageVector = Icons.Default.Videocam,
-                                                    contentDescription = "Video call",
-                                                    tint = MaterialTheme.colorScheme.onTertiaryContainer,
-                                                    modifier = Modifier.size(24.dp)
-                                                )
+                                        val isVideoCapable = isNumberVideoCallCapable(phoneNumber)
+                                        if (isVideoCapable) {
+                                            Surface(
+                                                modifier = Modifier
+                                                    .size(52.dp)
+                                                    .clip(CircleShape)
+                                                    .clickable {
+                                                        onVideoCallAction()
+                                                    },
+                                                shape = CircleShape,
+                                                color = MaterialTheme.colorScheme.tertiaryContainer
+                                            ) {
+                                                Box(contentAlignment = Alignment.Center) {
+                                                    Icon(
+                                                        imageVector = Icons.Default.Videocam,
+                                                        contentDescription = "Video call",
+                                                        tint = MaterialTheme.colorScheme.onTertiaryContainer,
+                                                        modifier = Modifier.size(24.dp)
+                                                    )
+                                                }
                                             }
                                         }
                                     }
@@ -5898,7 +5901,7 @@ class MainActivity : ComponentActivity() {
                     )
                 }
             }
-            if (isVideo) {
+            if (isVideo && !isTollFree) {
                 Icon(
                     imageVector = Icons.Default.Videocam,
                     contentDescription = "Video Call",

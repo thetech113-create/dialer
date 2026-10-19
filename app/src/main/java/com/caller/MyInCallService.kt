@@ -3568,6 +3568,9 @@ class MyInCallService : InCallService() {
                 putExtra(CALL_UI_EXTRA_CONTACT_NAME_HINT, contactNameHint)
                 putExtra(CALL_UI_EXTRA_SIM_LABEL, lastCallUiSnapshot?.simLabel.orEmpty())
                 putExtra(CALL_UI_EXTRA_IS_CONFERENCE_HINT, isConferenceHint)
+                val isVideo = lastCallUiSnapshot?.isVideoCall == true ||
+                    (getLiveCalls().firstOrNull()?.details?.videoState?.let { VideoProfile.isVideo(it) } == true)
+                putExtra("EXTRA_IS_VIDEO_CALL", isVideo)
                 return this
             }
 
