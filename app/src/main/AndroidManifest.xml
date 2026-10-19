@@ -153,7 +153,7 @@
             android:name=".MessagingActivity"
             android:directBootAware="true"
             android:exported="true"
-            android:icon="@drawable/ic_contacts_launcher"
+            android:icon="@drawable/ic_messages_launcher"
             android:label="@string/launcher_messages_label"
             android:launchMode="singleTask"
             android:taskAffinity=".Messaging"
@@ -203,9 +203,10 @@
             android:name=".MessagingLauncherAlias"
             android:enabled="true"
             android:exported="true"
-            android:icon="@mipmap/ic_launcher"
+            android:icon="@drawable/ic_messages_launcher"
             android:label="@string/launcher_messages_label"
-            android:targetActivity=".MessagingActivity">
+            android:targetActivity=".MessagingActivity"
+            android:theme="@style/Theme.App.Starting">
             <intent-filter>
                 <action android:name="android.intent.action.MAIN" />
                 <category android:name="android.intent.category.LAUNCHER" />
