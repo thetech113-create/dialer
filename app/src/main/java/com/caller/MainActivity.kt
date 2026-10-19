@@ -358,11 +358,13 @@ private fun RecentSubtitleLine(
     }
 
     Row(
+        modifier = Modifier.fillMaxWidth(),
         verticalAlignment = Alignment.CenterVertically,
         horizontalArrangement = Arrangement.spacedBy(8.dp)
     ) {
         Text(
             text = baseText,
+            modifier = Modifier.weight(1f, fill = false),
             style = MaterialTheme.typography.bodySmall,
             color = textColor
         )
@@ -376,7 +378,7 @@ private fun RecentSubtitleLine(
                 style = MaterialTheme.typography.labelSmall,
                 fontWeight = FontWeight.Bold,
                 color = simTextColor,
-                maxLines = 1
+                softWrap = false
             )
         }
     }
