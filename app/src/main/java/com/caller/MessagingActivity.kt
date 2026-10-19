@@ -22,6 +22,7 @@ import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.setValue
 import androidx.core.content.ContextCompat
+import androidx.core.splashscreen.SplashScreen.Companion.installSplashScreen
 import androidx.lifecycle.lifecycleScope
 import com.caller.ui.theme.CallerTheme
 import kotlinx.coroutines.Dispatchers
@@ -91,6 +92,11 @@ class MessagingActivity : ComponentActivity() {
     }
 
     override fun onCreate(savedInstanceState: Bundle?) {
+        val splashScreen = installSplashScreen()
+        val splashStartMs = android.os.SystemClock.elapsedRealtime()
+        splashScreen.setKeepOnScreenCondition {
+            android.os.SystemClock.elapsedRealtime() - splashStartMs < 250L
+        }
         super.onCreate(savedInstanceState)
         SmsMonitoringService.startService(this)
         syncMessagingState()
@@ -284,8 +290,9 @@ class MessagingActivity : ComponentActivity() {
                 null,
                 null
             )?.use { cursor ->
+                val colIdx = cursor.getColumnIndex(Telephony.Threads._ID)
                 while (cursor.moveToNext()) {
-                    val threadId = cursor.getString(cursor.getColumnIndex(Telephony.Threads._ID))
+                    val threadId = if (colIdx >= 0) cursor.getString(colIdx) else ""
                     val threadNumber = getNumberForThreadId(threadId)
 
                     if (threadNumber.isNotBlank()) {
@@ -319,7 +326,8 @@ class MessagingActivity : ComponentActivity() {
                 "${Telephony.Sms.DATE} DESC LIMIT 1"
             )?.use { cursor ->
                 if (cursor.moveToFirst()) {
-                    cursor.getString(cursor.getColumnIndex(Telephony.Sms.ADDRESS))
+                    val addrIdx = cursor.getColumnIndex(Telephony.Sms.ADDRESS)
+                    if (addrIdx >= 0) cursor.getString(addrIdx) else ""
                 } else {
                     ""
                 }
@@ -334,12 +342,12 @@ class MessagingActivity : ComponentActivity() {
         if (smsThreadsReceiverRegistered) return
 
         val filter = IntentFilter(SMS_THREADS_UPDATED_ACTION)
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
-            registerReceiver(smsThreadsUpdatedReceiver, filter, RECEIVER_NOT_EXPORTED)
-        } else {
-            @Suppress("DEPRECATION")
-            registerReceiver(smsThreadsUpdatedReceiver, filter)
-        }
+        ContextCompat.registerReceiver(
+            this,
+            smsThreadsUpdatedReceiver,
+            filter,
+            ContextCompat.RECEIVER_NOT_EXPORTED
+        )
         smsThreadsReceiverRegistered = true
     }
 
