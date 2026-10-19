@@ -27,7 +27,12 @@ import kotlin.math.abs
 object CallBubbleOverlay {
     private const val TAG = "CallBubbleOverlay"
     private var view: View? = null
+    private var nameView: TextView? = null
+    private var timerView: TextView? = null
+    private var activeConnectedAtMillis: Long = 0L
     private val handler = android.os.Handler(android.os.Looper.getMainLooper())
+
+    fun isShowing(): Boolean = view != null
 
     /** "0:07", "12:34", "1:02:03". */
     private fun formatElapsed(ms: Long): String {
@@ -58,6 +63,45 @@ object CallBubbleOverlay {
             Log.w(TAG, "skip: overlay permission not granted")
             return
         }
+
+        val isConnected = connectedAtMillis > 0L
+        val fallbackStatus = when {
+            statusText?.equals("RINGING", ignoreCase = true) == true -> "Ringing..."
+            statusText?.equals("ACTIVE", ignoreCase = true) == true -> ""
+            statusText?.equals("DIALING", ignoreCase = true) == true -> "Dialing..."
+            statusText?.equals("CONNECTING", ignoreCase = true) == true -> "Connecting..."
+            statusText.orEmpty().isNotBlank() -> statusText
+            else -> "Dialing..."
+        }
+
+        val startElapsed = if (isConnected) {
+            SystemClock.elapsedRealtime() - (System.currentTimeMillis() - connectedAtMillis).coerceAtLeast(0L)
+        } else 0L
+
+        // If overlay is already attached and visible, update views in-place without removing or resetting drag position!
+        val currentView = view
+        val currentNameView = nameView
+        val currentTimerView = timerView
+        if (currentView != null && currentNameView != null && currentTimerView != null) {
+            currentNameView.text = title
+            handler.removeCallbacksAndMessages(null)
+            if (isConnected) {
+                activeConnectedAtMillis = connectedAtMillis
+                val ticker = object : Runnable {
+                    override fun run() {
+                        if (view == null) return
+                        val currentElapsed = SystemClock.elapsedRealtime() - startElapsed
+                        currentTimerView.text = formatElapsed(currentElapsed)
+                        handler.postDelayed(this, 1000L)
+                    }
+                }
+                handler.post(ticker)
+            } else {
+                currentTimerView.text = fallbackStatus
+            }
+            return
+        }
+
         hide(context)
         val appContext = context.applicationContext
         val wm = appContext.getSystemService(Context.WINDOW_SERVICE) as WindowManager
@@ -82,20 +126,6 @@ object CallBubbleOverlay {
             maxWidth = dp(150)
         }
 
-        val isConnected = connectedAtMillis > 0L
-        val fallbackStatus = when {
-            statusText?.equals("RINGING", ignoreCase = true) == true -> "Ringing..."
-            statusText?.equals("ACTIVE", ignoreCase = true) == true -> ""
-            statusText?.equals("DIALING", ignoreCase = true) == true -> "Dialing..."
-            statusText?.equals("CONNECTING", ignoreCase = true) == true -> "Connecting..."
-            statusText.orEmpty().isNotBlank() -> statusText
-            else -> "Dialing..."
-        }
-
-        val startElapsed = if (isConnected) {
-            SystemClock.elapsedRealtime() - (System.currentTimeMillis() - connectedAtMillis).coerceAtLeast(0L)
-        } else 0L
-
         val timer = TextView(appContext).apply {
             setTextColor(Color.parseColor("#7CE38B"))
             setTextSize(TypedValue.COMPLEX_UNIT_SP, 14f)
@@ -103,11 +133,16 @@ object CallBubbleOverlay {
             text = if (isConnected) formatElapsed(SystemClock.elapsedRealtime() - startElapsed) else fallbackStatus
         }
 
+        activeConnectedAtMillis = connectedAtMillis
+        nameView = name
+        timerView = timer
+
         val ticker = object : Runnable {
             override fun run() {
                 if (view == null) return
-                if (connectedAtMillis > 0L) {
-                    timer.text = formatElapsed(SystemClock.elapsedRealtime() - startElapsed)
+                if (activeConnectedAtMillis > 0L) {
+                    val currentStartElapsed = SystemClock.elapsedRealtime() - (System.currentTimeMillis() - activeConnectedAtMillis).coerceAtLeast(0L)
+                    timer.text = formatElapsed(SystemClock.elapsedRealtime() - currentStartElapsed)
                     handler.postDelayed(this, 1000L)
                 } else {
                     timer.text = fallbackStatus
@@ -118,7 +153,7 @@ object CallBubbleOverlay {
         if (isConnected) {
             handler.post(ticker)
         }
-        // Red round Hang up button with the call-end icon.
+
         val hangUp = android.widget.ImageView(appContext).apply {
             setImageResource(R.drawable.ic_call_end_white)
             contentDescription = "Hang up"
@@ -154,7 +189,6 @@ object CallBubbleOverlay {
             y = dp(48)
         }
 
-        // Tap opens the call screen; vertical drag moves the pill out of the way.
         var downY = 0f
         var startY = 0
         var dragged = false
@@ -195,6 +229,9 @@ object CallBubbleOverlay {
         handler.removeCallbacksAndMessages(null)
         val current = view ?: return
         view = null
+        nameView = null
+        timerView = null
+        activeConnectedAtMillis = 0L
         runCatching {
             (context.applicationContext.getSystemService(Context.WINDOW_SERVICE) as WindowManager).removeView(current)
         }

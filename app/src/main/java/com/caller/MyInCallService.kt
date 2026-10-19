@@ -2329,6 +2329,9 @@ class MyInCallService : InCallService() {
 
                 callStateListener?.invoke(currentState)
                 callUIListener?.invoke(lastTerminalUiSnapshot ?: currentState)
+                if (CallBubbleOverlay.isShowing()) {
+                    showCallBubbleIfNeeded()
+                }
             }
 
             @SuppressLint("FullScreenIntentPolicy")
