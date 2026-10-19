@@ -5779,17 +5779,29 @@ class MainActivity : ComponentActivity() {
                                                         isTollFree = call.isTollFree
                                                     )
                                                     Column {
-                                                        Text(
-                                                            text = if (call.isBlocked) "Blocked" else call.typeString,
-                                                            style = MaterialTheme.typography.bodyMedium,
-                                                            fontWeight = FontWeight.Bold
-                                                        )
-                                                        if (call.simLabel.isNotBlank()) {
+                                                        Row(
+                                                            verticalAlignment = Alignment.CenterVertically,
+                                                            horizontalArrangement = Arrangement.spacedBy(6.dp)
+                                                        ) {
                                                             Text(
-                                                                text = call.simLabel,
-                                                                style = MaterialTheme.typography.bodySmall,
-                                                                color = panelSecondaryText
+                                                                text = if (call.isBlocked) "Blocked" else call.typeString,
+                                                                style = MaterialTheme.typography.bodyMedium,
+                                                                fontWeight = FontWeight.Bold
                                                             )
+                                                            if (call.simLabel.isNotBlank()) {
+                                                                Surface(
+                                                                    shape = RoundedCornerShape(999.dp),
+                                                                    color = MaterialTheme.colorScheme.primary.copy(alpha = 0.15f)
+                                                                ) {
+                                                                    Text(
+                                                                        text = call.simLabel,
+                                                                        modifier = Modifier.padding(horizontal = 8.dp, vertical = 2.dp),
+                                                                        style = MaterialTheme.typography.labelSmall,
+                                                                        fontWeight = FontWeight.Bold,
+                                                                        color = MaterialTheme.colorScheme.primary
+                                                                    )
+                                                                }
+                                                            }
                                                         }
                                                         Text(
                                                             text = call.formattedDuration,
@@ -6520,13 +6532,59 @@ class MainActivity : ComponentActivity() {
                             Spacer(modifier = Modifier.height(8.dp))
                             val callsToShow = groupedCall.callHistory.take(visibleLimit)
                             callsToShow.forEach { call ->
-                                Row(modifier = Modifier.fillMaxWidth().padding(vertical = 4.dp, horizontal = 16.dp), verticalAlignment = Alignment.CenterVertically) {
-                                    CallTypeIcon(callType = call.callType)
-                                    Spacer(modifier = Modifier.width(8.dp))
-                                    Text(text = call.formattedTime, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurface, modifier = Modifier.weight(1f))
-                                    Column(horizontalAlignment = Alignment.End) {
-                                        Text(text = appendRecentSimLabel(call.typeString, call.simLabel), style = MaterialTheme.typography.bodySmall, color = if (call.callType == CallType.MISSED) Color(0xFFFF5A52) else MaterialTheme.colorScheme.onSurfaceVariant)
-                                        Text(text = call.formattedDuration, style = MaterialTheme.typography.bodySmall, color = if (call.callType == CallType.MISSED) Color(0xFFFF5A52) else if (call.duration > 0) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.error)
+                                Surface(
+                                    modifier = Modifier
+                                        .fillMaxWidth()
+                                        .padding(vertical = 3.dp, horizontal = 12.dp),
+                                    shape = RoundedCornerShape(16.dp),
+                                    color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.35f)
+                                ) {
+                                    Row(
+                                        modifier = Modifier
+                                            .fillMaxWidth()
+                                            .padding(horizontal = 14.dp, vertical = 10.dp),
+                                        verticalAlignment = Alignment.CenterVertically
+                                    ) {
+                                        CallTypeIcon(callType = call.callType)
+                                        Spacer(modifier = Modifier.width(10.dp))
+                                        Column(modifier = Modifier.weight(1f)) {
+                                            Row(
+                                                verticalAlignment = Alignment.CenterVertically,
+                                                horizontalArrangement = Arrangement.spacedBy(6.dp)
+                                            ) {
+                                                Text(
+                                                    text = call.typeString,
+                                                    style = MaterialTheme.typography.bodyMedium,
+                                                    fontWeight = FontWeight.SemiBold,
+                                                    color = if (call.callType == CallType.MISSED) Color(0xFFFF5A52) else MaterialTheme.colorScheme.onSurface
+                                                )
+                                                if (call.simLabel.isNotBlank()) {
+                                                    Surface(
+                                                        shape = RoundedCornerShape(999.dp),
+                                                        color = MaterialTheme.colorScheme.primary.copy(alpha = 0.15f)
+                                                    ) {
+                                                        Text(
+                                                            text = call.simLabel,
+                                                            modifier = Modifier.padding(horizontal = 8.dp, vertical = 2.dp),
+                                                            style = MaterialTheme.typography.labelSmall,
+                                                            fontWeight = FontWeight.Bold,
+                                                            color = MaterialTheme.colorScheme.primary
+                                                        )
+                                                    }
+                                                }
+                                            }
+                                            Spacer(modifier = Modifier.height(2.dp))
+                                            Text(
+                                                text = call.formattedDuration,
+                                                style = MaterialTheme.typography.bodySmall,
+                                                color = if (call.callType == CallType.MISSED) Color(0xFFFF5A52) else MaterialTheme.colorScheme.onSurfaceVariant
+                                            )
+                                        }
+                                        Text(
+                                            text = call.formattedTime,
+                                            style = MaterialTheme.typography.bodyMedium,
+                                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                                        )
                                     }
                                 }
                             }
