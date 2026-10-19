@@ -2790,7 +2790,16 @@ class MyInCallService : InCallService() {
                         return
                     }
 
-                    getSafeCalls().firstOrNull { it.state == Call.STATE_RINGING }?.answer(VideoProfile.STATE_AUDIO_ONLY)
+                    val ringingCall = getSafeCalls().firstOrNull { it.state == Call.STATE_RINGING }
+                    if (ringingCall != null) {
+                        val videoState = ringingCall.details?.videoState ?: VideoProfile.STATE_AUDIO_ONLY
+                        val answerVideoState = if (VideoProfile.isVideo(videoState)) {
+                            VideoProfile.STATE_BIDIRECTIONAL
+                        } else {
+                            VideoProfile.STATE_AUDIO_ONLY
+                        }
+                        ringingCall.answer(answerVideoState)
+                    }
                     bgHandler.postDelayed({ syncCalls() }, 300)
                 } catch (e: SecurityException) {
                     UltraForensicLogger.deepest("SecurityException when answering call: ${e.message}")

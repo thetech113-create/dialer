@@ -521,7 +521,16 @@ fun TelecomVideoCallView(
                 Log.w(CALL_UI_FORENSIC_TAG, "telecom_video_peer_dimensions w=$width h=$height")
             }
             override fun onCameraCapabilitiesChanged(cameraCapabilities: VideoProfile.CameraCapabilities?) {}
-            override fun onSessionModifyRequestReceived(videoProfile: VideoProfile?) {}
+            override fun onSessionModifyRequestReceived(videoProfile: VideoProfile?) {
+                if (videoProfile != null && VideoProfile.isVideo(videoProfile.videoState)) {
+                    val responseProfile = VideoProfile(
+                        VideoProfile.STATE_BIDIRECTIONAL,
+                        videoProfile.quality
+                    )
+                    videoCall?.sendSessionModifyResponse(responseProfile)
+                    Log.w(CALL_UI_FORENSIC_TAG, "telecom_video_session_modify_accepted state=${videoProfile.videoState}")
+                }
+            }
             override fun onSessionModifyResponseReceived(status: Int, requestedProfile: VideoProfile?, responseProfile: VideoProfile?) {}
             override fun onCallSessionEvent(event: Int) {}
             override fun onCallDataUsageChanged(dataUsage: Long) {}
@@ -832,6 +841,36 @@ private fun ModernCallingScreenLayout(
         callState.primaryState == "HOLDING" ||
         callState.primaryState == "CONFERENCE" ||
         (callState.callStartTime > 0L && !callState.isTerminal)
+
+    // Latch that keeps video UI alive across the DIALING -> ACTIVE modem handshake gap
+    var wasVideoCallDuringDialing by remember(callState.primaryCallId) { mutableStateOf(false) }
+    var keepVideoAliveOnConnect by remember(callState.primaryCallId) { mutableStateOf(false) }
+
+    LaunchedEffect(callState.isVideoCall, callState.isDialing, callState.isRinging) {
+        if (callState.isVideoCall && (callState.isDialing || callState.isRinging)) {
+            wasVideoCallDuringDialing = true
+            keepVideoAliveOnConnect = true
+        }
+    }
+
+    LaunchedEffect(isConnectedState, wasVideoCallDuringDialing, callState.isVideoCall) {
+        if (isConnectedState && wasVideoCallDuringDialing && !callState.isVideoCall) {
+            runCatching {
+                MyInCallService.getInstance()?.getPrimaryVideoCall()?.sendSessionModifyRequest(
+                    VideoProfile(VideoProfile.STATE_BIDIRECTIONAL)
+                )
+            }
+            kotlinx.coroutines.delay(4000L)
+            if (!callState.isVideoCall) {
+                keepVideoAliveOnConnect = false
+            }
+        }
+    }
+
+    val effectiveIsVideoCall = callState.isVideoCall || (keepVideoAliveOnConnect && !callState.isTerminal)
+    val callState = remember(callState, effectiveIsVideoCall) {
+        if (callState.isVideoCall == effectiveIsVideoCall) callState else callState.copy(isVideoCall = effectiveIsVideoCall)
+    }
 
     val durationText = formatElapsedDuration(displayedDurationMs)
     val secondaryDurationText = elapsedDurationFrom(

@@ -3408,7 +3408,7 @@ class MainActivity : ComponentActivity() {
         selectedSim: DualSimFixes.SimCallOption,
         isVideoCall: Boolean = false
     ) {
-        val extras = DualSimFixes.buildCallExtras(selectedSim)
+        val extras = DualSimFixes.buildCallExtras(selectedSim, isVideoCall)
         if (isVideoCall) {
             extras.putInt(TelecomManager.EXTRA_START_CALL_WITH_VIDEO_STATE, VideoProfile.STATE_BIDIRECTIONAL)
         }

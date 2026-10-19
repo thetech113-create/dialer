@@ -277,9 +277,12 @@ object DualSimFixes {
             )
         }.getOrDefault(CallLogSimLabelLookup())
     }
-    fun buildCallExtras(option: SimCallOption): Bundle {
+    fun buildCallExtras(option: SimCallOption, isVideo: Boolean = false): Bundle {
         return Bundle().apply {
-            putInt(TelecomManager.EXTRA_START_CALL_WITH_VIDEO_STATE, VideoProfile.STATE_AUDIO_ONLY)
+            putInt(
+                TelecomManager.EXTRA_START_CALL_WITH_VIDEO_STATE,
+                if (isVideo) VideoProfile.STATE_BIDIRECTIONAL else VideoProfile.STATE_AUDIO_ONLY
+            )
             putParcelable(TelecomManager.EXTRA_PHONE_ACCOUNT_HANDLE, option.phoneAccountHandle)
             putInt(SubscriptionManager.EXTRA_SUBSCRIPTION_INDEX, option.subscriptionId)
         }
