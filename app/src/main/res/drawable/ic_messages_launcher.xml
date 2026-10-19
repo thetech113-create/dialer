@@ -6,6 +6,12 @@
     android:viewportWidth="256"
     android:viewportHeight="256">
 
+    <!-- Dark/Black background layer (replaces launcher white background) -->
+    <path
+        android:fillColor="#0A1117"
+        android:pathData="M0,0h256v256h-256z" />
+
+    <!-- Blue gradient circle -->
     <path
         android:pathData="M128,128m-60,0a60,60 0,1 1,120 0a60,60 0,1 1,-120 0">
         <aapt:attr name="android:fillColor">
@@ -21,6 +27,7 @@
         </aapt:attr>
     </path>
 
+    <!-- Message bubble icon inside circle -->
     <path
         android:fillColor="#0A1117"
         android:pathData="M106,98 H150 Q162,98 162,110 V134 Q162,146 150,146 H122 L104,162 V146 H106 Q94,146 94,134 V110 Q94,98 106,98 Z" />
