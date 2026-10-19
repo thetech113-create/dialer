@@ -8,6 +8,7 @@ import android.content.Context
 import android.content.Intent
 import android.content.IntentFilter
 import android.content.pm.PackageManager
+import android.net.Uri
 import android.os.Build
 import android.os.Bundle
 import android.provider.ContactsContract
@@ -47,12 +48,20 @@ class MessagingActivity : ComponentActivity() {
         }
     }
 
+    private var smsRoleRequestLaunchedAtMs = -1L
+    private val SMS_ROLE_SILENT_DENY_THRESHOLD_MS = 700L
+
     private val smsRoleRequestLauncher = registerForActivityResult(
         ActivityResultContracts.StartActivityForResult()
     ) { result ->
-        val userGrantedRole = result.resultCode == Activity.RESULT_OK
-        val isNowDefault = userGrantedRole || isDefaultSmsApp(this)
+        val isNowDefault = isDefaultSmsApp(this)
+        val elapsedMs = android.os.SystemClock.elapsedRealtime() - smsRoleRequestLaunchedAtMs
         isDefaultSmsRoleHeld = isNowDefault
+
+        if (!isNowDefault && elapsedMs in 0L..SMS_ROLE_SILENT_DENY_THRESHOLD_MS) {
+            openDefaultAppsSettings()
+            return@registerForActivityResult
+        }
 
         if (isNowDefault) {
             showToast("Set as default messaging app")
@@ -162,6 +171,23 @@ class MessagingActivity : ComponentActivity() {
         isDefaultSmsRoleHeld = isDefaultSmsApp(this)
     }
 
+    private fun openDefaultAppsSettings() {
+        try {
+            val intent = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.N) {
+                Intent(android.provider.Settings.ACTION_MANAGE_DEFAULT_APPS_SETTINGS)
+            } else {
+                Intent(android.provider.Settings.ACTION_APPLICATION_DETAILS_SETTINGS).apply {
+                    data = Uri.fromParts("package", packageName, null)
+                }
+            }
+            startActivity(intent)
+        } catch (_: Exception) {
+            try {
+                startActivity(Intent(android.provider.Settings.ACTION_SETTINGS))
+            } catch (_: Exception) {}
+        }
+    }
+
     private fun requestDefaultSmsRole() {
         try {
             if (isDefaultSmsApp(this)) {
@@ -171,20 +197,25 @@ class MessagingActivity : ComponentActivity() {
                 return
             }
 
-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
-                val roleManager = getSystemService(ROLE_SERVICE) as RoleManager
-                if (roleManager.isRoleAvailable(RoleManager.ROLE_SMS)) {
-                    smsRoleRequestLauncher.launch(roleManager.createRequestRoleIntent(RoleManager.ROLE_SMS))
-                    return
-                }
-            }
+            smsRoleRequestLaunchedAtMs = android.os.SystemClock.elapsedRealtime()
 
-            val intent = Intent(Telephony.Sms.Intents.ACTION_CHANGE_DEFAULT).apply {
-                putExtra(Telephony.Sms.Intents.EXTRA_PACKAGE_NAME, packageName)
+            val intent = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+                val roleManager = getSystemService(RoleManager::class.java)
+                if (roleManager != null && roleManager.isRoleAvailable(RoleManager.ROLE_SMS)) {
+                    roleManager.createRequestRoleIntent(RoleManager.ROLE_SMS)
+                } else {
+                    Intent(Telephony.Sms.Intents.ACTION_CHANGE_DEFAULT).apply {
+                        putExtra(Telephony.Sms.Intents.EXTRA_PACKAGE_NAME, packageName)
+                    }
+                }
+            } else {
+                Intent(Telephony.Sms.Intents.ACTION_CHANGE_DEFAULT).apply {
+                    putExtra(Telephony.Sms.Intents.EXTRA_PACKAGE_NAME, packageName)
+                }
             }
             smsRoleRequestLauncher.launch(intent)
         } catch (_: Exception) {
-            showToast("Unable to request default messaging role")
+            openDefaultAppsSettings()
         }
     }
 
