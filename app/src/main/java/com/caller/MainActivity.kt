@@ -342,42 +342,84 @@ private fun mergeLiveRecentCallGroup(
 
 @Composable
 private fun RecentSubtitleLine(
-    baseText: String,
-    simLabel: String,
+    simLabel: String = "",
+    callTypeString: String = "",
+    durationText: String = "",
+    timeText: String = "",
+    phoneNumberText: String = "",
     textColor: Color,
     simBadgeColor: Color,
-    simTextColor: Color
+    simTextColor: Color,
+    isMissed: Boolean = false
 ) {
-    if (simLabel.isBlank()) {
-        Text(
-            text = baseText,
-            style = MaterialTheme.typography.bodySmall,
-            color = textColor
-        )
-        return
-    }
-
     Row(
         modifier = Modifier.fillMaxWidth(),
         verticalAlignment = Alignment.CenterVertically,
-        horizontalArrangement = Arrangement.spacedBy(8.dp)
+        horizontalArrangement = Arrangement.spacedBy(4.dp)
     ) {
-        Text(
-            text = baseText,
-            modifier = Modifier.weight(1f),
-            style = MaterialTheme.typography.bodySmall,
-            color = textColor
-        )
-        Surface(
-            shape = RoundedCornerShape(999.dp),
-            color = simBadgeColor
-        ) {
+        // 1. SIM Badge (SIM 1 / SIM 2)
+        if (simLabel.isNotBlank()) {
+            Surface(
+                shape = RoundedCornerShape(999.dp),
+                color = simBadgeColor
+            ) {
+                Text(
+                    text = simLabel,
+                    modifier = Modifier.padding(horizontal = 7.dp, vertical = 2.dp),
+                    style = MaterialTheme.typography.labelSmall,
+                    fontWeight = FontWeight.Bold,
+                    color = simTextColor,
+                    maxLines = 1
+                )
+            }
+            Text(text = "·", style = MaterialTheme.typography.bodySmall, color = textColor)
+        }
+
+        // 2. Phone Number (optional)
+        if (phoneNumberText.isNotBlank()) {
             Text(
-                text = simLabel,
-                modifier = Modifier.padding(horizontal = 8.dp, vertical = 3.dp),
-                style = MaterialTheme.typography.labelSmall,
-                fontWeight = FontWeight.Bold,
-                color = simTextColor,
+                text = phoneNumberText,
+                style = MaterialTheme.typography.bodySmall,
+                color = textColor,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis
+            )
+            Text(text = "·", style = MaterialTheme.typography.bodySmall, color = textColor)
+        }
+
+        // 3. Call Type (Incoming / Outgoing / Missed)
+        if (callTypeString.isNotBlank()) {
+            Text(
+                text = callTypeString,
+                style = MaterialTheme.typography.bodySmall,
+                fontWeight = FontWeight.SemiBold,
+                color = if (isMissed) Color(0xFFFF5A52) else textColor,
+                maxLines = 1
+            )
+            if (durationText.isNotBlank() || timeText.isNotBlank()) {
+                Text(text = "·", style = MaterialTheme.typography.bodySmall, color = textColor)
+            }
+        }
+
+        // 4. Duration
+        if (durationText.isNotBlank()) {
+            Text(
+                text = durationText,
+                style = MaterialTheme.typography.bodySmall,
+                color = if (isMissed) Color(0xFFFF5A52) else textColor,
+                maxLines = 1
+            )
+            if (timeText.isNotBlank()) {
+                Text(text = "·", style = MaterialTheme.typography.bodySmall, color = textColor)
+            }
+        }
+
+        // 5. Timing
+        if (timeText.isNotBlank()) {
+            Text(
+                text = timeText,
+                style = MaterialTheme.typography.bodySmall,
+                color = textColor,
                 maxLines = 1
             )
         }
@@ -6142,11 +6184,14 @@ class MainActivity : ComponentActivity() {
                                                 color = recentPrimaryTextColor
                                             )
                                             RecentSubtitleLine(
-                                                baseText = subtitleText,
                                                 simLabel = lastCall?.simLabel.orEmpty(),
+                                                callTypeString = lastCall?.typeString.orEmpty(),
+                                                durationText = lastCall?.formattedDuration.orEmpty(),
+                                                timeText = lastCall?.formattedTime.orEmpty(),
                                                 textColor = recentSecondaryTextColor,
                                                 simBadgeColor = recentCardBorderColor.copy(alpha = 0.18f),
-                                                simTextColor = recentPrimaryTextColor
+                                                simTextColor = recentPrimaryTextColor,
+                                                isMissed = lastCall?.callType == CallType.MISSED
                                             )
                                         }
                                         if (lastCall != null) {
@@ -6258,11 +6303,15 @@ class MainActivity : ComponentActivity() {
                                         )
                                         Spacer(modifier = Modifier.height(4.dp))
                                         RecentSubtitleLine(
-                                            baseText = subtitleText,
                                             simLabel = lastCall.simLabel,
+                                            callTypeString = lastCall.typeString,
+                                            durationText = lastCall.formattedDuration,
+                                            timeText = lastCall.formattedTime,
+                                            phoneNumberText = if (showRowNumber) formatPhoneNumberForDisplay(rowPhoneNumber) else "",
                                             textColor = recentSecondaryTextColor,
                                             simBadgeColor = recentCardBorderColor.copy(alpha = 0.18f),
-                                            simTextColor = recentPrimaryTextColor
+                                            simTextColor = recentPrimaryTextColor,
+                                            isMissed = lastCall.callType == CallType.MISSED
                                         )
                                         if (showAllHistory && !showRowNumber) {
                                             Spacer(modifier = Modifier.height(4.dp))
@@ -6428,11 +6477,14 @@ class MainActivity : ComponentActivity() {
                                     fontWeight = FontWeight.SemiBold
                                 )  
                                 RecentSubtitleLine(
-                                    baseText = subtitleText,
                                     simLabel = lastCall?.simLabel.orEmpty(),
+                                    callTypeString = lastCall?.typeString.orEmpty(),
+                                    durationText = lastCall?.formattedDuration.orEmpty(),
+                                    timeText = lastCall?.formattedTime.orEmpty(),
                                     textColor = MaterialTheme.colorScheme.onSurfaceVariant,
                                     simBadgeColor = MaterialTheme.colorScheme.primary.copy(alpha = 0.12f),
-                                    simTextColor = MaterialTheme.colorScheme.primary
+                                    simTextColor = MaterialTheme.colorScheme.primary,
+                                    isMissed = lastCall?.callType == CallType.MISSED
                                 )
                             }
                             if (lastCall != null) {
@@ -6496,11 +6548,14 @@ class MainActivity : ComponentActivity() {
                                 Text(text = callsCountText, style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
                                 Spacer(modifier = Modifier.height(2.dp))
                                 RecentSubtitleLine(
-                                    baseText = subtitleText,
                                     simLabel = lastCall.simLabel,
+                                    callTypeString = lastCall.typeString,
+                                    durationText = lastCall.formattedDuration,
+                                    timeText = lastCall.formattedTime,
                                     textColor = MaterialTheme.colorScheme.onSurfaceVariant,
                                     simBadgeColor = MaterialTheme.colorScheme.primary.copy(alpha = 0.12f),
-                                    simTextColor = MaterialTheme.colorScheme.primary
+                                    simTextColor = MaterialTheme.colorScheme.primary,
+                                    isMissed = lastCall.callType == CallType.MISSED
                                 )
                             }
                             Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
