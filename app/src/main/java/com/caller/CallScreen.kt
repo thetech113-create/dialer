@@ -1310,7 +1310,7 @@ private fun ModernCallingScreenLayout(
                         Card(
                             modifier = Modifier.fillMaxWidth(),
                             shape = RoundedCornerShape(32.dp),
-                            colors = CardDefaults.cardColors(containerColor = Color(0xFF161B26))
+                            colors = CardDefaults.cardColors(containerColor = cardBgColor)
                         ) {
                             Column(
                                 modifier = Modifier
@@ -1325,7 +1325,7 @@ private fun ModernCallingScreenLayout(
                                     ) {
                                         Text(
                                             text = if (dtmfInput.isBlank()) "Keypad" else dtmfInput,
-                                            color = Color.White,
+                                            color = mainCallTextColor,
                                             style = MaterialTheme.typography.headlineSmall,
                                             modifier = Modifier.weight(1f)
                                         )
@@ -1336,7 +1336,7 @@ private fun ModernCallingScreenLayout(
                                             Icon(
                                                 imageVector = Icons.Outlined.Backspace,
                                                 contentDescription = "Delete digit",
-                                                tint = if (dtmfInput.isNotEmpty()) Color.White else Color.White.copy(alpha = 0.28f)
+                                                tint = if (dtmfInput.isNotEmpty()) mainCallTextColor else mainCallTextColor.copy(alpha = 0.28f)
                                             )
                                         }
                                     }
@@ -1363,8 +1363,8 @@ private fun ModernCallingScreenLayout(
                                                         .height(60.dp),
                                                     shape = RoundedCornerShape(20.dp),
                                                     colors = ButtonDefaults.buttonColors(
-                                                        containerColor = Color.White.copy(alpha = 0.08f),
-                                                        contentColor = Color.White
+                                                        containerColor = if (isDarkCallTheme) Color.White.copy(alpha = 0.08f) else Color(0xFFF1F5F9),
+                                                        contentColor = mainCallTextColor
                                                     )
                                                 ) {
                                                     Text(
