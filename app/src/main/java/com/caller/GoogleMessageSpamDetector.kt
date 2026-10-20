@@ -31,12 +31,12 @@ data class SmsSpamVerdict(
     val modelVersion: String = SMS_SPAM_MODEL_VERSION
 )
 
-internal const val SMS_SPAM_MODEL_VERSION = "lr_tfidf_char_v2.1"
+internal const val SMS_SPAM_MODEL_VERSION = "uci_sms_lr_word_char_v1"
 private const val SMS_SPAM_PREFS = "google_message_spam_detector"
-private const val CACHE_KEY_PREFIX = "verdict_cache_v21_"
 private const val SENDER_SPAM_COUNT_PREFIX = "sender_spam_cnt_"
 private const val SENDER_HAM_COUNT_PREFIX = "sender_ham_cnt_"
 private const val MSG_USER_OVERRIDE_PREFIX = "msg_override_"
+private const val SMS_SPAM_MODEL_ASSET = "sms_spam_model.json"
 
 private val memoryVerdictCache = LruCache<String, SmsSpamVerdict>(512)
 
@@ -96,75 +96,93 @@ private val PROTECTED_BRAND_DOMAINS: Map<String, Set<String>> = mapOf(
     "bescom" to setOf("bescom.co.in", "karnataka.gov.in")
 )
 
-/**
- * Pre-trained L2-normalized TF-IDF Logistic Regression parameters (UCI SMS Spam + Modern Indian Scam Corpus).
- * Intercept b0 = -2.45 ensures single benign words ("bank", "otp", "urgent", "account", "payment", "reward")
- * never trigger spam alone.
- */
-private const val LR_INTERCEPT = -2.45
+private val MODEL_WORD_TOKEN_REGEX = Regex("""[a-z0-9]{2,}""")
 
-private val UNIGRAM_WEIGHTS: Map<String, Double> = mapOf(
-    // Single weak tokens intentionally near-zero or negative (Section 3 compliance)
-    "bank" to 0.06, "account" to 0.06, "payment" to 0.06, "urgent" to 0.25,
-    "reward" to 0.20, "otp" to -0.28, "code" to -0.22, "transaction" to -0.10,
-    // Scam-correlated unigrams
-    "suspended" to 0.95, "deactivated" to 0.98, "blocked" to 0.72, "reactivate" to 0.92,
-    "kyc" to 0.88, "pan" to 0.55, "aadhaar" to 0.52, "verify" to 0.58,
-    "unpaid" to 0.85, "disconnected" to 0.92, "tonight" to 0.82, "officer" to 0.78,
-    "electricity" to 0.52, "power" to 0.35, "meter" to 0.45,
-    "winner" to 1.05, "won" to 0.88, "lottery" to 1.25, "kbc" to 1.30,
-    "prize" to 0.95, "jackpot" to 1.20, "lakhs" to 0.85, "crore" to 0.85,
-    "claim" to 0.75, "redeem" to 0.68, "cashback" to 0.65, "voucher" to 0.55,
-    "expiring" to 0.62, "points" to 0.38,
-    "telegram" to 1.15, "whatsapp" to 0.65, "vacancy" to 0.72, "recruiting" to 0.78,
-    "refundable" to 0.95, "deposit" to 0.62, "investment" to 0.74, "commission" to 0.82,
-    "preapproved" to 1.05, "instant" to 0.48, "paperless" to 0.75, "disbursed" to 0.62,
-    "warrant" to 1.35, "arrest" to 1.25, "police" to 0.88, "court" to 0.92,
-    "seizure" to 1.10, "customs" to 0.85, "penalty" to 0.78, "fir" to 0.95,
-    "apk" to 1.65, "anydesk" to 1.70, "teamviewer" to 1.60, "quicksupport" to 1.65,
-    "pin" to 0.42, "mpin" to 0.75, "cvv" to 1.20, "password" to 0.65,
-    "warehouse" to 0.72, "incomplete" to 0.68, "reschedule" to 0.55,
-    "congratulations" to 0.80, "congrats" to 0.75, "selected" to 0.58,
-    "immediately" to 0.62, "avoid" to 0.52, "click" to 0.55,
-    // Benign / Ham unigrams (negative weights)
-    "debited" to -0.65, "credited" to -0.55, "avl" to -0.95, "bal" to -0.75,
-    "utr" to -0.70, "imps" to -0.75, "neft" to -0.75, "rtgs" to -0.75,
-    "shipped" to -0.65, "dispatched" to -0.70, "delivered" to -0.80, "arriving" to -0.65,
-    "meeting" to -0.85, "dinner" to -0.90, "lunch" to -0.90, "tomorrow" to -0.60,
-    "mom" to -0.85, "dad" to -0.85, "home" to -0.35, "office" to -0.45,
-    "thank" to -0.55, "thanks" to -0.60, "see" to -0.40, "later" to -0.55
+private data class ModelFeature(val inverseDocumentFrequency: Double, val coefficient: Double)
+
+private data class TrainedSmsTextModel(
+    val intercept: Double,
+    val suspiciousThreshold: Double,
+    val highConfidenceThreshold: Double,
+    val wordFeatures: Map<String, ModelFeature>,
+    val charFeatures: Map<String, ModelFeature>
 )
 
-private val BIGRAM_WEIGHTS: Map<String, Double> = mapOf(
-    "account suspended" to 1.45, "account blocked" to 1.35, "will be" to 0.45,
-    "be suspended" to 1.30, "be blocked" to 1.25, "be disconnected" to 1.40,
-    "update kyc" to 1.40, "kyc update" to 1.35, "verify your" to 0.95,
-    "pan card" to 0.75, "update pan" to 1.25, "sim card" to 0.70,
-    "sim block" to 1.35, "blocked within" to 1.25, "within 24" to 0.95,
-    "upi pin" to 1.65, "enter upi" to 1.50, "enter pin" to 1.45,
-    "approve request" to 1.35, "receive refund" to 1.45, "claim refund" to 1.35,
-    "share otp" to 1.75, "share your" to 1.15, "provide otp" to 1.65,
-    "lucky draw" to 1.50, "cash prize" to 1.40, "claim reward" to 1.35,
-    "processing fee" to 1.55, "registration fee" to 1.60, "security deposit" to 1.55,
-    "advance fee" to 1.65, "part time" to 1.15, "time job" to 1.10,
-    "daily income" to 1.45, "per day" to 0.85, "youtube videos" to 1.40,
-    "like youtube" to 1.50, "telegram channel" to 1.45, "join telegram" to 1.50,
-    "electricity bill" to 1.10, "bill unpaid" to 1.45, "power will" to 1.15,
-    "connection cut" to 1.45, "electricity officer" to 1.55, "contact officer" to 1.35,
-    "parcel held" to 1.45, "package held" to 1.45, "is held" to 1.05,
-    "incomplete address" to 1.45, "address error" to 1.35, "delivery fee" to 1.35,
-    "customs duty" to 1.40, "customs fee" to 1.45,
-    "instant loan" to 1.30, "loan approved" to 1.25, "pre approved" to 1.25,
-    "limit increase" to 1.10, "reward points" to 1.05, "points expiring" to 1.35,
-    "redeem points" to 1.30, "arrest warrant" to 1.70, "legal action" to 1.45,
-    "court notice" to 1.55, "police complaint" to 1.50, "cyber crime" to 1.40,
-    "download apk" to 1.80,
-    // Benign bigrams (negative weights)
-    "not share" to -1.85, "never share" to -1.85, "dont share" to -1.75,
-    "do not" to -0.95, "valid for" to -0.85, "one time" to -0.75,
-    "avl bal" to -1.55, "available balance" to -1.45, "upi ref" to -1.35,
-    "out for" to -1.25, "for delivery" to -1.15, "has been" to -0.35
-)
+private val modelLoadLock = Any()
+@Volatile private var trainedTextModel: TrainedSmsTextModel? = null
+@Volatile private var modelLoadAttempted = false
+
+private fun loadTrainedSmsTextModel(context: Context): TrainedSmsTextModel? {
+    trainedTextModel?.let { return it }
+    if (modelLoadAttempted) return null
+    synchronized(modelLoadLock) {
+        trainedTextModel?.let { return it }
+        if (modelLoadAttempted) return null
+        modelLoadAttempted = true
+        return runCatching {
+            val root = context.assets.open(SMS_SPAM_MODEL_ASSET).bufferedReader().use { JSONObject(it.readText()) }
+            require(root.getString("model_version") == SMS_SPAM_MODEL_VERSION) { "Unexpected SMS model version" }
+            fun parseFeatures(name: String): Map<String, ModelFeature> {
+                val source = root.getJSONObject(name)
+                return buildMap(source.length()) {
+                    val keys = source.keys()
+                    while (keys.hasNext()) {
+                        val term = keys.next()
+                        val values = source.getJSONArray(term)
+                        put(term, ModelFeature(values.getDouble(0), values.getDouble(1)))
+                    }
+                }
+            }
+            val thresholds = root.getJSONObject("thresholds")
+            TrainedSmsTextModel(
+                intercept = root.getDouble("intercept"),
+                suspiciousThreshold = thresholds.getDouble("suspicious"),
+                highConfidenceThreshold = thresholds.getDouble("high_confidence"),
+                wordFeatures = parseFeatures("word_features"),
+                charFeatures = parseFeatures("char_features")
+            )
+        }.onFailure {
+            android.util.Log.e("SmsSpamDetector", "Unable to load bundled SMS model", it)
+        }.getOrNull().also { trainedTextModel = it }
+    }
+}
+
+private fun tfIdfLogit(text: String, features: Map<String, ModelFeature>, terms: Sequence<String>): Double {
+    val counts = HashMap<String, Int>()
+    terms.forEach { term -> if (features.containsKey(term)) counts[term] = (counts[term] ?: 0) + 1 }
+    var squaredMagnitude = 0.0
+    var weightedSum = 0.0
+    for ((term, count) in counts) {
+        val feature = features.getValue(term)
+        val value = (1.0 + ln(count.toDouble())) * feature.inverseDocumentFrequency
+        squaredMagnitude += value * value
+        weightedSum += value * feature.coefficient
+    }
+    return if (squaredMagnitude > 0.0) weightedSum / sqrt(squaredMagnitude) else 0.0
+}
+
+private fun predictTrainedSmsProbability(context: Context, text: String): Pair<Float, TrainedSmsTextModel>? {
+    val model = loadTrainedSmsTextModel(context) ?: return null
+    val normalized = text.lowercase(Locale.ROOT)
+    val wordTokens = MODEL_WORD_TOKEN_REGEX.findAll(normalized).map { it.value }.toList()
+    val wordTerms = sequence {
+        yieldAll(wordTokens)
+        for (index in 0 until wordTokens.lastIndex) yield("${wordTokens[index]} ${wordTokens[index + 1]}")
+    }
+    val charTerms = sequence {
+        normalized.trim().split(Regex("""\s+""")).filter { it.isNotEmpty() }.forEach { word ->
+            val padded = " $word "
+            for (size in 3..5) {
+                if (padded.length >= size) {
+                    for (index in 0..padded.length - size) yield(padded.substring(index, index + size))
+                }
+            }
+        }
+    }
+    val logit = model.intercept + tfIdfLogit(normalized, model.wordFeatures, wordTerms) +
+        tfIdfLogit(normalized, model.charFeatures, charTerms)
+    return (1.0 / (1.0 + exp(-logit))).toFloat() to model
+}
 
 fun analyzeSmsSpam(context: Context, sender: String, body: String): SmsSpamVerdict {
     if (body.isBlank()) return SmsSpamVerdict()
@@ -204,7 +222,7 @@ fun analyzeSmsSpam(context: Context, sender: String, body: String): SmsSpamVerdi
     memoryVerdictCache.get(cacheKey)?.let { return it }
 
     // 2. Run On-Device ML-First + Contextual Hybrid Inference
-    val verdict = evaluateHybridSmsSpam(prefs, normalizedSender, strippedBody)
+    val verdict = evaluateHybridSmsSpam(context, prefs, normalizedSender, strippedBody)
     memoryVerdictCache.put(cacheKey, verdict)
     return verdict
 }
@@ -239,6 +257,7 @@ fun recordSmsUserFeedback(context: Context, sender: String, body: String, isSpam
 }
 
 private fun evaluateHybridSmsSpam(
+    context: Context,
     prefs: android.content.SharedPreferences?,
     senderTrimmed: String,
     rawBody: String
@@ -259,25 +278,11 @@ private fun evaluateHybridSmsSpam(
         bigrams.add("${tokens[i]} ${tokens[i + 1]}")
     }
 
-    // 2. TF-IDF Unigram + Bigram Linear Log-Odds
-    var ngramWeightedSum = 0.0
-    for ((term, count) in tokenCounts) {
-        val weight = UNIGRAM_WEIGHTS[term] ?: continue
-        val sublinearTf = 1.0 + ln(count.toDouble())
-        ngramWeightedSum += sublinearTf * weight
-    }
-    for (bg in bigrams) {
-        val weight = BIGRAM_WEIGHTS[bg] ?: continue
-        ngramWeightedSum += weight
-    }
-    val normFactor = sqrt(maxOf(tokens.size, 6).toDouble())
-    val zNgram = (ngramWeightedSum / normFactor) * 2.2
-
-    // 3. URL Extraction & Structural Phishing Analysis
+    // 2. URL extraction and structural phishing analysis. These signals explain a positive
+    // classification and only independently escalate objectively deceptive links or APK lures.
     val detectedEntities = detectSmsEntities(rawBody)
     val urls = detectedEntities.filter { it.type == SmsEntityType.URL }.map { it.actionValue }
     var detectedUrl = urls.firstOrNull().orEmpty()
-    var zUrl = 0.0
     var hasLookalikeDomain = false
     var hasSuspiciousTld = false
     var hasIpOrDeceptiveUrl = false
@@ -307,12 +312,8 @@ private fun evaluateHybridSmsSpam(
         }
     }
 
-    if (hasLookalikeDomain) zUrl += 2.45
-    if (hasIpOrDeceptiveUrl) zUrl += 2.30
-    if (hasSuspiciousTld) zUrl += 1.35
-    if (hasShortenerUrl) zUrl += 0.65
-
-    // 4. Contextual Multi-Signal Scam Interactions (Section 4)
+    // 3. Contextual multi-signal scam analysis. It provides human-readable evidence, but a
+    // hand-written phrase combination cannot by itself classify a message as spam.
     var zContext = 0.0
 
     val hasAccountOrSimTarget = containsAnyToken(tokenSet, "account", "ac", "a/c", "kyc", "pan", "aadhaar", "sim", "netbanking", "card", "yono", "wallet")
@@ -433,21 +434,16 @@ private fun evaluateHybridSmsSpam(
         reasons += "legitimate_delivery_status"
     }
 
-    // 6. Sender Format & Local Reputation Signal
+    // 5. Sender format and local reputation are explanatory only. A sender is never classified
+    // solely because it is unknown, alphanumeric, or has one unverified report.
     val isVerifiedDlt = isVerifiedIndianDltHeader(senderTrimmed)
-    var zSender = 0.0
-    if (isVerifiedDlt && !hasHighRiskScamIndicator) {
-        // DLT header is a weak positive trust signal only when no scam/phishing indicators exist
-        zSender -= 0.45
-    } else if (!isVerifiedDlt && looksLikeMobileNumberSender(senderTrimmed) &&
+    if (!isVerifiedDlt && looksLikeMobileNumberSender(senderTrimmed) &&
         (hasAccountOrSimTarget || hasUtilityOrSimContext || hasParcelContext || hasLegalThreat) &&
         zContext > 0.0
     ) {
-        // Institutional/bank/utility/government claim sent from a regular 10-digit mobile number
-        zSender += 0.65
+        // Institutional/bank/utility/government claim from a regular 10-digit mobile number.
         reasons += "institutional_claim_from_personal_number"
     } else if (!isVerifiedDlt && looksLikeSuspiciousSenderFormat(senderTrimmed) && zContext > 0.0) {
-        zSender += 0.35
         reasons += "unverified_sender_format"
     }
 
@@ -458,21 +454,33 @@ private fun evaluateHybridSmsSpam(
         val hamReports = prefs.getInt(SENDER_HAM_COUNT_PREFIX + senderKey, 0)
         val netSpamReports = spamReports - hamReports
         if (netSpamReports >= 2 && !isVerifiedDlt) {
-            zSender += 1.45
             reasons += "sender_reported_as_spam"
-        } else if (hamReports >= 2 && netSpamReports <= -2 && !hasHighRiskScamIndicator) {
-            zSender -= 0.85
         }
     }
 
-    // 7. Calibrated Logistic Sigmoid Probability & 3-Tier Decision
-    val totalLogit = LR_INTERCEPT + zNgram + zContext + zUrl + zSender
-    val probability = (1.0 / (1.0 + exp(-totalLogit))).toFloat()
+    // 6. The trained model is the primary decision maker. Its thresholds were selected by the
+    // reproducible training pipeline and stored alongside the model. Contextual text signals are
+    // intentionally not added to its probability because that would invalidate calibration.
+    val prediction = predictTrainedSmsProbability(context, rawBody)
+    val probability = prediction?.first ?: 0f
+    val model = prediction?.second
+    if (model == null) reasons += "model_unavailable"
     val finalScore = (probability * 100f).roundToInt().coerceIn(0, 100)
 
+    val hasIndependentTechnicalThreat = hasLookalikeDomain || hasIpOrDeceptiveUrl ||
+        reasons.contains("malware_apk_or_remote_access_threat")
+    val hasKnownLegitimatePattern = !hasIndependentTechnicalThreat && (
+        (hasOtpCode && (hasDefensiveDoNotShare || bigrams.contains("valid for"))) ||
+            hasStandardBankLedger || hasStandardDeliveryStatus
+        )
     val riskTier = when {
-        finalScore >= 70 -> SmsSpamRiskTier.HIGH_CONFIDENCE_SPAM
-        finalScore >= 45 -> SmsSpamRiskTier.SUSPICIOUS
+        // These are independently deceptive technical indicators, not ordinary keywords.
+        hasIndependentTechnicalThreat -> SmsSpamRiskTier.HIGH_CONFIDENCE_SPAM
+        // Strong one-way transactional patterns prevent a generic corpus model from warning on
+        // routine OTPs, ledger entries, and delivery status messages.
+        hasKnownLegitimatePattern -> SmsSpamRiskTier.LOW_RISK
+        model != null && probability >= model.highConfidenceThreshold -> SmsSpamRiskTier.HIGH_CONFIDENCE_SPAM
+        model != null && probability >= model.suspiciousThreshold -> SmsSpamRiskTier.SUSPICIOUS
         else -> SmsSpamRiskTier.LOW_RISK
     }
     val isPotentialSpam = riskTier != SmsSpamRiskTier.LOW_RISK
