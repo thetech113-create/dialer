@@ -17,6 +17,8 @@ import android.content.Context
 import android.content.Intent
 import android.content.IntentFilter
 import android.content.SharedPreferences
+import android.app.AppOpsManager
+import android.app.usage.UsageStatsManager
 import android.content.pm.PackageManager
 import android.content.res.Configuration
 import android.database.ContentObserver
@@ -28,6 +30,7 @@ import android.os.Bundle
 import android.os.Handler
 import android.os.Looper
 import android.os.PowerManager
+import android.os.Process
 import android.provider.CallLog.Calls
 import android.provider.ContactsContract
 import android.provider.Settings
@@ -8212,30 +8215,66 @@ fun SettingsScreen(
     }
 
     if (showLogDialog) {
-        val logDump = remember<String> { com.caller.logging.UltraForensicLogger.dumpLogHistory().takeLast(2000) }
+        var currentLogDump by remember {
+            mutableStateOf(com.caller.logging.UltraForensicLogger.dumpLogHistory().takeLast(4000))
+        }
         AlertDialog(
             onDismissRequest = { showLogDialog = false },
-            title = { Text("Forensic Diagnostic Logs") },
-            text = {
-                Box(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .height(300.dp)
-                        .background(Color.Black, shape = RoundedCornerShape(12.dp))
-                        .padding(12.dp)
-                        .verticalScroll(rememberScrollState())
+            title = {
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically
                 ) {
-                    Text(
-                        text = if (logDump.isNotBlank()) logDump else "No log events recorded yet.",
-                        color = Color.Green,
-                        fontSize = 11.sp,
-                        fontFamily = androidx.compose.ui.text.font.FontFamily.Monospace
-                    )
+                    Text("Forensic Diagnostic Logs", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold)
+                    IconButton(onClick = {
+                        currentLogDump = com.caller.logging.UltraForensicLogger.dumpLogHistory().takeLast(4000)
+                    }) {
+                        Icon(Icons.Default.Refresh, contentDescription = "Refresh logs")
+                    }
+                }
+            },
+            text = {
+                Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                    Box(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .height(320.dp)
+                            .background(Color(0xFF0A0D14), shape = RoundedCornerShape(12.dp))
+                            .padding(12.dp)
+                            .verticalScroll(rememberScrollState())
+                    ) {
+                        Text(
+                            text = if (currentLogDump.isNotBlank()) currentLogDump else "No forensic log events recorded yet.",
+                            color = Color(0xFF10B981),
+                            fontSize = 11.sp,
+                            fontFamily = androidx.compose.ui.text.font.FontFamily.Monospace
+                        )
+                    }
                 }
             },
             confirmButton = {
-                TextButton(onClick = { showLogDialog = false }) {
-                    Text("Close")
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        TextButton(onClick = {
+                            com.caller.logging.UltraForensicLogger.shareLogHistory(context)
+                        }) {
+                            Text("Share Logs")
+                        }
+                        TextButton(onClick = {
+                            com.caller.logging.UltraForensicLogger.clearLogs()
+                            currentLogDump = "Logs cleared successfully."
+                        }) {
+                            Text("Clear Logs", color = MaterialTheme.colorScheme.error)
+                        }
+                        TextButton(onClick = { showLogDialog = false }) {
+                            Text("Close")
+                        }
+                    }
                 }
             }
         )

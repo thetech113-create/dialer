@@ -434,4 +434,26 @@
                                                                                                                                                                                                 "Error reading logs: ${e.message}"
                                                                                                                                                                                             }
                                                                                                                                                                                         }
+
+                                                                                                                                                                                        fun clearLogs() {
+                                                                                                                                                                                            try {
+                                                                                                                                                                                                val ctx = context ?: return
+                                                                                                                                                                                                val logsDir = File(ctx.filesDir, "logs")
+                                                                                                                                                                                                if (logsDir.exists()) {
+                                                                                                                                                                                                    logsDir.listFiles()?.forEach { it.delete() }
+                                                                                                                                                                                                }
+                                                                                                                                                                                            } catch (_: Exception) {}
+                                                                                                                                                                                        }
+
+                                                                                                                                                                                        fun shareLogHistory(ctx: Context) {
+                                                                                                                                                                                            try {
+                                                                                                                                                                                                val dump = dumpLogHistory()
+                                                                                                                                                                                                val intent = android.content.Intent(android.content.Intent.ACTION_SEND).apply {
+                                                                                                                                                                                                    type = "text/plain"
+                                                                                                                                                                                                    putExtra(android.content.Intent.EXTRA_SUBJECT, "Caller Diagnostic Logs")
+                                                                                                                                                                                                    putExtra(android.content.Intent.EXTRA_TEXT, dump)
+                                                                                                                                                                                                }
+                                                                                                                                                                                                ctx.startActivity(android.content.Intent.createChooser(intent, "Share Diagnostic Logs").addFlags(android.content.Intent.FLAG_ACTIVITY_NEW_TASK))
+                                                                                                                                                                                            } catch (_: Exception) {}
+                                                                                                                                                                                        }
                                                                                                                                                                                     }
