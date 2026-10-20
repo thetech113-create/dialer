@@ -142,6 +142,7 @@ import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.material3.TextFieldDefaults
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.withFrameNanos
@@ -1897,7 +1898,7 @@ class MainActivity : ComponentActivity() {
         } catch (e: Exception) {}
     }
 
-    private fun isCallScreeningRoleHeld(): Boolean {
+    fun isCallScreeningRoleHeld(): Boolean {
         if (Build.VERSION.SDK_INT < Build.VERSION_CODES.Q) {
             return true
         }
@@ -7864,26 +7865,45 @@ fun SettingsScreen(
     var spamProtectionEnabled by remember { mutableStateOf(prefs.getBoolean("spam_protection_enabled", true)) }
     var showLogDialog by remember { mutableStateOf(false) }
 
-    val isDefaultDialer = remember(context) {
+    val lifecycleOwner = androidx.compose.ui.platform.LocalLifecycleOwner.current
+
+    var isDefaultDialerState by remember {
         val telecomManager = context.getSystemService(Context.TELECOM_SERVICE) as? TelecomManager
-        telecomManager?.defaultDialerPackage == context.packageName
+        mutableStateOf(telecomManager?.defaultDialerPackage == context.packageName)
+    }
+    var isDefaultSmsState by remember { mutableStateOf(isDefaultSmsAppGranted(context)) }
+    var isCallScreeningState by remember { mutableStateOf(if (activity is MainActivity) activity.isCallScreeningRoleHeld() else false) }
+    var hasOverlayState by remember { mutableStateOf(if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) Settings.canDrawOverlays(context) else true) }
+    var isUsageState by remember { mutableStateOf(isUsageAccessGranted(context)) }
+    var isBatteryState by remember { mutableStateOf(isBatteryOptimizationIgnored(context)) }
+
+    val refreshAllSettingsStatuses = {
+        val telecomManager = context.getSystemService(Context.TELECOM_SERVICE) as? TelecomManager
+        isDefaultDialerState = telecomManager?.defaultDialerPackage == context.packageName
+        isDefaultSmsState = isDefaultSmsAppGranted(context)
+        isCallScreeningState = if (activity is MainActivity) activity.isCallScreeningRoleHeld() else false
+        hasOverlayState = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) Settings.canDrawOverlays(context) else true
+        isUsageState = isUsageAccessGranted(context)
+        isBatteryState = isBatteryOptimizationIgnored(context)
     }
 
-    val isDefaultSms = remember(context) {
-        Telephony.Sms.getDefaultSmsPackage(context) == context.packageName
+    LaunchedEffect(Unit) {
+        refreshAllSettingsStatuses()
     }
 
-    val isCallScreeningActive = remember(context) {
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
-            val rm = context.getSystemService(RoleManager::class.java)
-            rm?.isRoleHeld(RoleManager.ROLE_CALL_SCREENING) == true
-        } else false
-    }
-
-    val hasOverlayPermission = remember(context) {
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
-            Settings.canDrawOverlays(context)
-        } else true
+    DisposableEffect(lifecycleOwner) {
+        val observer = androidx.lifecycle.LifecycleEventObserver { _, event ->
+            if (event == androidx.lifecycle.Lifecycle.Event.ON_RESUME) {
+                refreshAllSettingsStatuses()
+                Handler(Looper.getMainLooper()).postDelayed({
+                    refreshAllSettingsStatuses()
+                }, 250L)
+            }
+        }
+        lifecycleOwner.lifecycle.addObserver(observer)
+        onDispose {
+            lifecycleOwner.lifecycle.removeObserver(observer)
+        }
     }
 
     Column(
@@ -7919,9 +7939,9 @@ fun SettingsScreen(
 
                 SettingItemRow(
                     title = "Default Phone App",
-                    subtitle = if (isDefaultDialer) "Caller is set as your default dialer" else "Tap to set Caller as your default dialer",
-                    badgeText = if (isDefaultDialer) "Default" else "Not Default",
-                    badgeColor = if (isDefaultDialer) Color(0xFF2E7D32) else Color(0xFFD84315),
+                    subtitle = if (isDefaultDialerState) "Caller is set as your default dialer" else "Tap to set Caller as your default dialer",
+                    badgeText = if (isDefaultDialerState) "Default" else "Not Default",
+                    badgeColor = if (isDefaultDialerState) Color(0xFF2E7D32) else Color(0xFFD84315),
                     onClick = onRequestDefaultDialer
                 )
 
@@ -7929,9 +7949,9 @@ fun SettingsScreen(
 
                 SettingItemRow(
                     title = "Spam & Call Screening",
-                    subtitle = if (isCallScreeningActive) "Active — blocking & caller identification enabled" else "Tap to enable Call Screening role",
-                    badgeText = if (isCallScreeningActive) "Active" else "Disabled",
-                    badgeColor = if (isCallScreeningActive) Color(0xFF2E7D32) else Color(0xFFD84315),
+                    subtitle = if (isCallScreeningState) "Active — blocking & caller identification enabled" else "Tap to enable Call Screening role",
+                    badgeText = if (isCallScreeningState) "Active" else "Disabled",
+                    badgeColor = if (isCallScreeningState) Color(0xFF2E7D32) else Color(0xFFD84315),
                     onClick = { onRequestCallScreeningRole() }
                 )
 
@@ -7939,9 +7959,9 @@ fun SettingsScreen(
 
                 SettingItemRow(
                     title = "Default Messaging App",
-                    subtitle = if (isDefaultSms) "Caller is your default SMS app" else "Tap to set Caller as your default SMS app",
-                    badgeText = if (isDefaultSms) "Default" else "Not Default",
-                    badgeColor = if (isDefaultSms) Color(0xFF2E7D32) else Color(0xFFD84315),
+                    subtitle = if (isDefaultSmsState) "Caller is set as your default SMS app" else "Tap to set Caller as your default SMS app",
+                    badgeText = if (isDefaultSmsState) "Default" else "Not Default",
+                    badgeColor = if (isDefaultSmsState) Color(0xFF2E7D32) else Color(0xFFD84315),
                     onClick = onRequestDefaultSms
                 )
             }
@@ -7962,9 +7982,9 @@ fun SettingsScreen(
 
                 SettingItemRow(
                     title = "In-Call Floating Bubble / Overlay",
-                    subtitle = if (hasOverlayPermission) "Overlay permission granted" else "Grant permission to show ongoing call bubbles",
-                    badgeText = if (hasOverlayPermission) "Granted" else "Required",
-                    badgeColor = if (hasOverlayPermission) Color(0xFF2E7D32) else Color(0xFFD84315),
+                    subtitle = if (hasOverlayState) "Overlay permission granted" else "Grant permission to show ongoing call bubbles",
+                    badgeText = if (hasOverlayState) "Granted" else "Required",
+                    badgeColor = if (hasOverlayState) Color(0xFF2E7D32) else Color(0xFFD84315),
                     onClick = {
                         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
                             runCatching {
@@ -7978,9 +7998,9 @@ fun SettingsScreen(
 
                 SettingItemRow(
                     title = "Usage Access Permission",
-                    subtitle = "Allows detecting when you are on home screen for full-screen calls",
-                    badgeText = "Configure",
-                    badgeColor = MaterialTheme.colorScheme.primary,
+                    subtitle = if (isUsageState) "Usage access permission granted" else "Allows detecting when you are on home screen for full-screen calls",
+                    badgeText = if (isUsageState) "Granted" else "Configure",
+                    badgeColor = if (isUsageState) Color(0xFF2E7D32) else MaterialTheme.colorScheme.primary,
                     onClick = {
                         runCatching {
                             context.startActivity(Intent(Settings.ACTION_USAGE_ACCESS_SETTINGS).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK))
@@ -7992,9 +8012,9 @@ fun SettingsScreen(
 
                 SettingItemRow(
                     title = "Ignore Battery Optimizations",
-                    subtitle = "Ensure background calls and notifications are never delayed",
-                    badgeText = "Configure",
-                    badgeColor = MaterialTheme.colorScheme.primary,
+                    subtitle = if (isBatteryState) "Unrestricted background battery usage active" else "Ensure background calls and notifications are never delayed",
+                    badgeText = if (isBatteryState) "Active" else "Configure",
+                    badgeColor = if (isBatteryState) Color(0xFF2E7D32) else MaterialTheme.colorScheme.primary,
                     onClick = {
                         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
                             runCatching {
