@@ -69,14 +69,15 @@ private val SMS_SHORTENER_HOSTS = setOf(
     "bit.ly", "tinyurl.com", "goo.gl", "t.co", "is.gd", "cutt.ly", "rb.gy", "shorturl.at"
 )
 
-// Brand tokens to Official Registrable Domains for Lookalike/Impersonation URL Detection
+// Brand tokens to independently verified official DNS suffixes.  This list is consulted only
+// after URI host parsing; it never trusts a sender ID or a brand word in the SMS body.
 private val PROTECTED_BRAND_DOMAINS: Map<String, Set<String>> = mapOf(
     "sbi" to setOf("sbi.co.in", "onlinesbi.sbi", "sbicard.com", "yonosbi.com"),
     "yono" to setOf("sbi.co.in", "onlinesbi.sbi", "yonosbi.com"),
     "hdfc" to setOf("hdfcbank.com", "hdfc.com"),
     "icici" to setOf("icicibank.com", "icicidirect.com"),
     "axis" to setOf("axisbank.com"),
-    "kotak" to setOf("kotak.com", "kotakbank.com"),
+    "kotak" to setOf("kotak.com", "kotakbank.com", "kotak.bank.in"),
     "pnb" to setOf("pnbindia.in", "netpnb.com"),
     "canara" to setOf("canarabank.com", "canarabank.in"),
     "bob" to setOf("bankofbaroda.in", "bankofbaroda.com"),
@@ -500,7 +501,7 @@ private fun evaluateHybridSmsSpam(
     )
 }
 
-private data class UrlSignalAnalysis(
+internal data class UrlSignalAnalysis(
     val host: String,
     val isLookalikeBrand: Boolean,
     val isSuspiciousTld: Boolean,
@@ -508,7 +509,10 @@ private data class UrlSignalAnalysis(
     val isShortener: Boolean
 )
 
-private fun analyzeUrlStructure(rawUrl: String, messageTokens: Set<String>): UrlSignalAnalysis {
+private fun isOfficialDomainOrSubdomain(host: String, officialDomains: Set<String>): Boolean =
+    officialDomains.any { domain -> host == domain || host.endsWith(".$domain") }
+
+internal fun analyzeUrlStructure(rawUrl: String, messageTokens: Set<String>): UrlSignalAnalysis {
     val normalized = if (rawUrl.startsWith("http://", true) || rawUrl.startsWith("https://", true)) {
         rawUrl
     } else {
@@ -516,18 +520,11 @@ private fun analyzeUrlStructure(rawUrl: String, messageTokens: Set<String>): Url
     }
 
     val hasAtSymbolInAuthority = normalized.substringAfter("://").substringBefore('/').contains('@')
+    // Use URI.host rather than substring matching.  If parsing cannot establish a hostname, the
+    // link is unverified—not a confirmed lookalike or a reason to label the entire SMS as a scam.
     val host = runCatching {
         URI(normalized).host?.lowercase(Locale.ROOT)?.removePrefix("www.").orEmpty()
     }.getOrDefault("")
-        .ifBlank {
-            normalized.substringAfter("://")
-                .substringBefore('/')
-                .substringBefore('?')
-                .substringBefore('#')
-                .substringBefore(':')
-                .lowercase(Locale.ROOT)
-                .removePrefix("www.")
-        }
 
     if (host.isBlank()) {
         return UrlSignalAnalysis("", false, false, hasAtSymbolInAuthority, false)
@@ -539,20 +536,12 @@ private fun analyzeUrlStructure(rawUrl: String, messageTokens: Set<String>): Url
     val isShortener = host in SMS_SHORTENER_HOSTS
     val isIpOrPunycode = IPV4_HOST_REGEX.matches(host) || host.contains("xn--") || hasAtSymbolInAuthority
 
-    // Registrable domain approximation (e.g., sbi.co.in or hdfcbank.com)
-    val registrableDomain = when {
-        labels.size >= 3 && labels[labels.size - 2] in setOf("co", "gov", "org", "ac", "net", "res", "nic") ->
-            "${labels[labels.size - 3]}.${labels[labels.size - 2]}.$tld"
-        labels.size >= 2 -> "${labels[labels.size - 2]}.$tld"
-        else -> host
-    }
-
     var isLookalikeBrand = false
     for ((brand, officialDomains) in PROTECTED_BRAND_DOMAINS) {
         val brandInHost = host.contains(brand)
         val brandInMessage = brand in messageTokens
         if ((brandInHost || (brandInMessage && (isSuspiciousTld || host.contains("kyc") || host.contains("verify") || host.contains("update") || host.contains("claim")))) &&
-            registrableDomain !in officialDomains &&
+            !isOfficialDomainOrSubdomain(host, officialDomains) &&
             !isShortener
         ) {
             isLookalikeBrand = true
