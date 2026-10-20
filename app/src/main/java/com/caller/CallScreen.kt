@@ -195,6 +195,7 @@ data class CallState(
     val bluetoothDeviceName: String? = null,
     val simLabel: String = "",
     val isVideoCall: Boolean = false,
+    val isWifiCall: Boolean = false,
     val stateSnapshotTimeMillis: Long = 0L,
     val primaryTalkDurationMillis: Long = 0L,
     val primaryTalkTimerRunning: Boolean = false,
@@ -365,6 +366,7 @@ private data class CallActionTileSpec(
 @Composable
 private fun CallStatusChip(
     text: String,
+    isWifiCall: Boolean = false,
     modifier: Modifier = Modifier
 ) {
     Row(
@@ -383,7 +385,7 @@ private fun CallStatusChip(
             contentAlignment = Alignment.Center
         ) {
             Text(
-                text = "HD",
+                text = if (isWifiCall) "VoWiFi" else "HD",
                 color = Color(0xFF11152A),
                 fontSize = 12.sp,
                 fontWeight = FontWeight.ExtraBold
@@ -1139,7 +1141,7 @@ private fun ModernCallingScreenLayout(
                         modifier = Modifier.weight(1f).height(48.dp),
                         contentAlignment = Alignment.Center
                     ) {
-                        CallStatusChip(text = statusChipText)
+                        CallStatusChip(text = statusChipText, isWifiCall = callState.isWifiCall)
                     }
                 }
 
@@ -1462,6 +1464,7 @@ private fun UnifiedCallState.toCallUiState(): CallState {
         bluetoothDeviceName = bluetoothDeviceName,
         simLabel = simLabel,
         isVideoCall = isVideoCall,
+        isWifiCall = isWifiCall,
         stateSnapshotTimeMillis = stateSnapshotTimeMillis,
         primaryTalkDurationMillis = primaryTalkDurationMillis,
         primaryTalkTimerRunning = primaryTalkTimerRunning,
