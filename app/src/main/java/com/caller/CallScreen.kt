@@ -369,10 +369,16 @@ private fun CallStatusChip(
     isWifiCall: Boolean = false,
     modifier: Modifier = Modifier
 ) {
+    val isDark = androidx.compose.foundation.isSystemInDarkTheme()
+    val chipBg = if (isDark) Color.White.copy(alpha = 0.12f) else Color(0xFFE2E8F0)
+    val textColor = if (isDark) Color.White else Color(0xFF0F172A)
+    val hdTagBg = if (isDark) Color.White else Color(0xFF0F172A)
+    val hdTagText = if (isDark) Color(0xFF11152A) else Color.White
+
     Row(
         modifier = modifier
             .clip(RoundedCornerShape(24.dp))
-            .background(Color.White.copy(alpha = 0.12f))
+            .background(chipBg)
             .padding(horizontal = 12.dp, vertical = 8.dp),
         verticalAlignment = Alignment.CenterVertically,
         horizontalArrangement = Arrangement.spacedBy(8.dp)
@@ -380,20 +386,20 @@ private fun CallStatusChip(
         Box(
             modifier = Modifier
                 .clip(RoundedCornerShape(11.dp))
-                .background(Color.White)
+                .background(hdTagBg)
                 .padding(horizontal = 8.dp, vertical = 4.dp),
             contentAlignment = Alignment.Center
         ) {
             Text(
                 text = if (isWifiCall) "VoWiFi" else "HD",
-                color = Color(0xFF11152A),
+                color = hdTagText,
                 fontSize = 12.sp,
                 fontWeight = FontWeight.ExtraBold
             )
         }
         Text(
             text = text,
-            color = Color.White,
+            color = textColor,
             fontSize = 19.sp,
             fontWeight = FontWeight.Bold
         )
@@ -405,18 +411,21 @@ private fun CallActionTile(
     spec: CallActionTileSpec,
     modifier: Modifier = Modifier
 ) {
+    val isDark = androidx.compose.foundation.isSystemInDarkTheme()
     val accentColor = spec.accentColor
+    val baseTextColor = if (isDark) Color.White else Color(0xFF0F172A)
+
     val iconBubbleColor = when {
-        !spec.enabled -> Color.White.copy(alpha = 0.08f)
+        !spec.enabled -> if (isDark) Color.White.copy(alpha = 0.08f) else Color(0xFFE2E8F0)
         spec.active && accentColor != null -> accentColor.copy(alpha = 0.24f)
-        spec.active -> Color.White.copy(alpha = 0.24f)
+        spec.active -> if (isDark) Color.White.copy(alpha = 0.28f) else Color(0xFFCBD5E1)
         accentColor != null -> accentColor.copy(alpha = 0.14f)
-        else -> Color.White.copy(alpha = 0.14f)
+        else -> if (isDark) Color.White.copy(alpha = 0.14f) else Color(0xFFF1F5F9)
     }
     val contentColor = when {
-        !spec.enabled -> Color.White.copy(alpha = 0.35f)
+        !spec.enabled -> if (isDark) Color.White.copy(alpha = 0.35f) else Color(0xFF94A3B8)
         accentColor != null -> accentColor
-        else -> Color.White
+        else -> baseTextColor
     }
 
     Column(
@@ -1089,11 +1098,16 @@ private fun ModernCallingScreenLayout(
             )
         }
 
-        val bgColors = listOf(Color(0xFF080B11), Color(0xFF10141E), Color(0xFF0A0D14))
-        val mainCallTextColor = Color(0xFFE2E8F0)
-        val supportingCallTextColor = Color.White.copy(alpha = supportingTextAlpha)
-        val topBarBgColor = Color.Black.copy(alpha = 0.14f)
-        val cardBgColor = Color.Black.copy(alpha = 0.22f)
+        val isDarkCallTheme = androidx.compose.foundation.isSystemInDarkTheme()
+        val bgColors = if (isDarkCallTheme) {
+            listOf(Color(0xFF080B11), Color(0xFF10141E), Color(0xFF0A0D14))
+        } else {
+            listOf(Color(0xFFF8FAFC), Color(0xFFEDF2F7), Color(0xFFF1F5F9))
+        }
+        val mainCallTextColor = if (isDarkCallTheme) Color(0xFFE2E8F0) else Color(0xFF0F172A)
+        val supportingCallTextColor = if (isDarkCallTheme) Color.White.copy(alpha = supportingTextAlpha) else Color(0xFF334155)
+        val topBarBgColor = if (isDarkCallTheme) Color.Black.copy(alpha = 0.14f) else Color(0xFFE2E8F0)
+        val cardBgColor = if (isDarkCallTheme) Color(0xFF161B26) else Color(0xFFFFFFFF)
 
         Box(
             modifier = Modifier
@@ -1115,7 +1129,7 @@ private fun ModernCallingScreenLayout(
                         .background(
                             Brush.radialGradient(
                                 colors = listOf(
-                                    Color(0xFF1E293B).copy(alpha = 0.35f),
+                                    if (isDarkCallTheme) Color(0xFF1E293B).copy(alpha = 0.35f) else Color(0xFFCBD5E1).copy(alpha = 0.35f),
                                     Color.Transparent
                                 )
                             )
