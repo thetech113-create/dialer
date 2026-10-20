@@ -2,7 +2,6 @@ package com.caller
 
 import android.annotation.SuppressLint
 import android.content.Context
-import android.graphics.Color
 import android.graphics.PixelFormat
 import android.graphics.drawable.GradientDrawable
 import android.os.Build
@@ -27,6 +26,7 @@ import kotlin.math.abs
 object CallBubbleOverlay {
     private const val TAG = "CallBubbleOverlay"
     private var view: View? = null
+    private var pillContainer: LinearLayout? = null
     private var nameView: TextView? = null
     private var timerView: TextView? = null
     private var activeConnectedAtMillis: Long = 0L
@@ -46,6 +46,13 @@ object CallBubbleOverlay {
     fun canShow(context: Context): Boolean =
         Build.VERSION.SDK_INT < Build.VERSION_CODES.M || Settings.canDrawOverlays(context)
 
+    private fun syncThemeFromUnifiedSystem(context: Context) {
+        val palette = UnifiedUiSystem.palette(context)
+        pillContainer?.background = UnifiedUiSystem.createPillBackground(context, palette)
+        nameView?.setTextColor(palette.textPrimaryArgb)
+        timerView?.setTextColor(palette.timerAccentArgb)
+    }
+
     /**
      * @param connectedAtMillis wall-clock time the call connected (0 = dialing / ringing).
      * @param statusText optional status label when dialing/ringing (e.g. "Dialing...", "Ringing...").
@@ -63,6 +70,9 @@ object CallBubbleOverlay {
             Log.w(TAG, "skip: overlay permission not granted")
             return
         }
+
+        val appContext = context.applicationContext
+        val palette = UnifiedUiSystem.palette(appContext)
 
         val isConnected = connectedAtMillis > 0L
         val fallbackStatus = when {
@@ -83,6 +93,7 @@ object CallBubbleOverlay {
         val currentNameView = nameView
         val currentTimerView = timerView
         if (currentView != null && currentNameView != null && currentTimerView != null) {
+            syncThemeFromUnifiedSystem(appContext)
             currentNameView.text = title
             handler.removeCallbacksAndMessages(null)
             if (isConnected) {
@@ -103,23 +114,21 @@ object CallBubbleOverlay {
         }
 
         hide(context)
-        val appContext = context.applicationContext
         val wm = appContext.getSystemService(Context.WINDOW_SERVICE) as WindowManager
-        fun dp(v: Int) = TypedValue.applyDimension(TypedValue.COMPLEX_UNIT_DIP, v.toFloat(), appContext.resources.displayMetrics).toInt()
+        fun dp(v: Int) = UnifiedUiSystem.dp(appContext, v)
 
         val pill = LinearLayout(appContext).apply {
             orientation = LinearLayout.HORIZONTAL
             gravity = Gravity.CENTER_VERTICAL
             setPadding(dp(16), dp(8), dp(8), dp(8))
-            background = GradientDrawable().apply {
-                cornerRadius = dp(28).toFloat()
-                setColor(Color.parseColor("#E6202124"))
-            }
+            background = UnifiedUiSystem.createPillBackground(appContext, palette)
             elevation = dp(6).toFloat()
         }
+        pillContainer = pill
+
         val name = TextView(appContext).apply {
             text = title
-            setTextColor(Color.WHITE)
+            setTextColor(palette.textPrimaryArgb)
             setTextSize(TypedValue.COMPLEX_UNIT_SP, 15f)
             maxLines = 1
             ellipsize = android.text.TextUtils.TruncateAt.END
@@ -127,7 +136,7 @@ object CallBubbleOverlay {
         }
 
         val timer = TextView(appContext).apply {
-            setTextColor(Color.parseColor("#7CE38B"))
+            setTextColor(palette.timerAccentArgb)
             setTextSize(TypedValue.COMPLEX_UNIT_SP, 14f)
             setPadding(dp(10), 0, dp(12), 0)
             text = if (isConnected) formatElapsed(SystemClock.elapsedRealtime() - startElapsed) else fallbackStatus
@@ -161,7 +170,7 @@ object CallBubbleOverlay {
             setPadding(dp(9), dp(9), dp(9), dp(9))
             background = GradientDrawable().apply {
                 shape = GradientDrawable.OVAL
-                setColor(Color.parseColor("#E5484D"))
+                setColor(palette.hangUpRedArgb)
             }
             layoutParams = LinearLayout.LayoutParams(dp(42), dp(42))
             setOnClickListener {
@@ -182,11 +191,11 @@ object CallBubbleOverlay {
                 @Suppress("DEPRECATION")
                 WindowManager.LayoutParams.TYPE_PHONE
             },
-            WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or WindowManager.LayoutParams.FLAG_LAYOUT_NO_LIMITS,
+            WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or WindowManager.LayoutParams.FLAG_LAYOUT_IN_SCREEN,
             PixelFormat.TRANSLUCENT
         ).apply {
             gravity = Gravity.TOP or Gravity.CENTER_HORIZONTAL
-            y = dp(48)
+            y = UnifiedUiSystem.getBubbleDefaultTopYPx(appContext, wm)
         }
 
         var downY = 0f
@@ -201,7 +210,12 @@ object CallBubbleOverlay {
                     val dy = event.rawY - downY
                     if (abs(dy) > dp(6)) dragged = true
                     if (dragged) {
-                        params.y = (startY + dy.toInt()).coerceAtLeast(0)
+                        params.y = UnifiedUiSystem.clampBubbleYPx(
+                            appContext,
+                            wm,
+                            startY + dy.toInt(),
+                            v.height.coerceAtLeast(dp(58))
+                        )
                         runCatching { wm.updateViewLayout(v, params) }
                     }
                     true
@@ -229,6 +243,7 @@ object CallBubbleOverlay {
         handler.removeCallbacksAndMessages(null)
         val current = view ?: return
         view = null
+        pillContainer = null
         nameView = null
         timerView = null
         activeConnectedAtMillis = 0L

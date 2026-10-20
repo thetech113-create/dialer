@@ -411,21 +411,20 @@ private fun CallActionTile(
     spec: CallActionTileSpec,
     modifier: Modifier = Modifier
 ) {
-    val isDark = androidx.compose.foundation.isSystemInDarkTheme()
+    val palette = UnifiedUiSystem.rememberPalette()
     val accentColor = spec.accentColor
-    val baseTextColor = if (isDark) Color.White else Color(0xFF0F172A)
 
     val iconBubbleColor = when {
-        !spec.enabled -> if (isDark) Color.White.copy(alpha = 0.08f) else Color(0xFFE2E8F0)
+        !spec.enabled -> palette.tileDisabledBg
         spec.active && accentColor != null -> accentColor.copy(alpha = 0.24f)
-        spec.active -> if (isDark) Color.White.copy(alpha = 0.28f) else Color(0xFFCBD5E1)
+        spec.active -> palette.tileActiveBg
         accentColor != null -> accentColor.copy(alpha = 0.14f)
-        else -> if (isDark) Color.White.copy(alpha = 0.14f) else Color(0xFFF1F5F9)
+        else -> palette.tileIdleBg
     }
     val contentColor = when {
-        !spec.enabled -> if (isDark) Color.White.copy(alpha = 0.35f) else Color(0xFF94A3B8)
+        !spec.enabled -> palette.tileDisabledText
         accentColor != null -> accentColor
-        else -> baseTextColor
+        else -> palette.textPrimary
     }
 
     Column(
@@ -1098,25 +1097,13 @@ private fun ModernCallingScreenLayout(
             )
         }
 
-        val isDarkCallTheme = androidx.compose.foundation.isSystemInDarkTheme()
-        val bgColors = if (isDarkCallTheme) {
-            listOf(Color(0xFF080B11), Color(0xFF10141E), Color(0xFF0A0D14))
-        } else {
-            listOf(Color(0xFFF8FAFC), Color(0xFFEDF2F7), Color(0xFFF1F5F9))
-        }
-        val mainCallTextColor = if (isDarkCallTheme) Color(0xFFE2E8F0) else Color(0xFF0F172A)
-        val supportingCallTextColor = if (isDarkCallTheme) Color.White.copy(alpha = supportingTextAlpha) else Color(0xFF334155)
-        val topBarBgColor = if (isDarkCallTheme) Color.Black.copy(alpha = 0.14f) else Color(0xFFE2E8F0)
-        val cardBgColor = if (isDarkCallTheme) Color(0xFF161B26) else Color(0xFFFFFFFF)
+        val palette = UnifiedUiSystem.rememberPalette()
 
         Box(
             modifier = Modifier
                 .fillMaxSize()
-                .background(
-                    Brush.verticalGradient(
-                        colors = bgColors
-                    )
-                )
+                .background(palette.screenBackgroundBrush)
+                .then(with(UnifiedUiSystem) { Modifier.safeNotificationShadePadding() })
         ) {
             if (callState.isVideoCall) {
                 TelecomVideoCallView(modifier = Modifier.fillMaxSize())
@@ -1129,7 +1116,7 @@ private fun ModernCallingScreenLayout(
                         .background(
                             Brush.radialGradient(
                                 colors = listOf(
-                                    if (isDarkCallTheme) Color(0xFF1E293B).copy(alpha = 0.35f) else Color(0xFFCBD5E1).copy(alpha = 0.35f),
+                                    palette.radialGlowColor,
                                     Color.Transparent
                                 )
                             )
@@ -1147,7 +1134,7 @@ private fun ModernCallingScreenLayout(
                     modifier = Modifier
                         .fillMaxWidth()
                         .clip(RoundedCornerShape(30.dp))
-                        .background(topBarBgColor)
+                        .background(palette.tileIdleBg)
                         .padding(horizontal = 6.dp, vertical = 6.dp),
                     verticalAlignment = Alignment.CenterVertically
                 ) {
@@ -1165,7 +1152,7 @@ private fun ModernCallingScreenLayout(
                             .fillMaxWidth()
                             .padding(top = sectionSpacing),
                         shape = RoundedCornerShape(24.dp),
-                        colors = CardDefaults.cardColors(containerColor = cardBgColor)
+                        colors = CardDefaults.cardColors(containerColor = palette.cardSurface)
                     ) {
                         Row(
                             modifier = Modifier.padding(horizontal = 16.dp, vertical = 14.dp),
@@ -1175,7 +1162,7 @@ private fun ModernCallingScreenLayout(
                             Column(modifier = Modifier.weight(1f)) {
                                 Text(
                                     text = secondaryCallBannerTitle(callState),
-                                    color = mainCallTextColor,
+                                    color = palette.textPrimary,
                                     fontWeight = FontWeight.Bold,
                                     fontSize = 15.sp
                                 )
@@ -1186,14 +1173,14 @@ private fun ModernCallingScreenLayout(
                                     } else {
                                         callState.secondaryContactName ?: callState.secondaryPhoneNumber ?: ""
                                     },
-                                    color = supportingCallTextColor,
+                                    color = palette.textSecondary,
                                     fontSize = 13.sp
                                 )
                                 if (secondaryDurationText.isNotBlank() && callState.totalTopLevelCalls <= 2) {
                                     Spacer(modifier = Modifier.height(2.dp))
                                     Text(
                                         text = "Talk time: $secondaryDurationText",
-                                        color = supportingCallTextColor,
+                                        color = palette.textSecondary,
                                         fontSize = 12.sp
                                     )
                                 }
@@ -1212,8 +1199,8 @@ private fun ModernCallingScreenLayout(
                                 },
                                 shape = RoundedCornerShape(14.dp),
                                 colors = ButtonDefaults.buttonColors(
-                                    containerColor = if (callState.secondaryState == "RINGING") Color(0xFF47B96C) else Color.White.copy(alpha = 0.12f),
-                                    contentColor = Color.White
+                                    containerColor = if (callState.secondaryState == "RINGING") Color(0xFF47B96C) else palette.tileIdleBg,
+                                    contentColor = palette.textPrimary
                                 )
                             ) {
                                 Text(secondaryCallActionText(callState.secondaryState))
@@ -1232,7 +1219,7 @@ private fun ModernCallingScreenLayout(
                 ) {
                     Text(
                         text = mainText,
-                        color = if (callState.isSpam) Color(0xFFFF897D) else mainCallTextColor,
+                        color = if (callState.isSpam) Color(0xFFFF897D) else palette.textPrimary,
                         fontSize = heroFontSize,
                         fontWeight = FontWeight.ExtraBold,
                         textAlign = TextAlign.Center,
@@ -1244,7 +1231,7 @@ private fun ModernCallingScreenLayout(
                         Spacer(modifier = Modifier.height(10.dp))
                         Text(
                             text = supportingText,
-                            color = supportingCallTextColor,
+                            color = palette.textSecondary,
                             fontSize = supportingFontSize,
                             fontWeight = supportingTextWeight,
                             textAlign = TextAlign.Center
@@ -1310,7 +1297,7 @@ private fun ModernCallingScreenLayout(
                         Card(
                             modifier = Modifier.fillMaxWidth(),
                             shape = RoundedCornerShape(32.dp),
-                            colors = CardDefaults.cardColors(containerColor = cardBgColor)
+                            colors = CardDefaults.cardColors(containerColor = palette.cardSurface)
                         ) {
                             Column(
                                 modifier = Modifier
@@ -1325,7 +1312,7 @@ private fun ModernCallingScreenLayout(
                                     ) {
                                         Text(
                                             text = if (dtmfInput.isBlank()) "Keypad" else dtmfInput,
-                                            color = mainCallTextColor,
+                                            color = palette.textPrimary,
                                             style = MaterialTheme.typography.headlineSmall,
                                             modifier = Modifier.weight(1f)
                                         )
@@ -1336,7 +1323,7 @@ private fun ModernCallingScreenLayout(
                                             Icon(
                                                 imageVector = Icons.Outlined.Backspace,
                                                 contentDescription = "Delete digit",
-                                                tint = if (dtmfInput.isNotEmpty()) mainCallTextColor else mainCallTextColor.copy(alpha = 0.28f)
+                                                tint = if (dtmfInput.isNotEmpty()) palette.textPrimary else palette.textPrimary.copy(alpha = 0.28f)
                                             )
                                         }
                                     }
@@ -1363,8 +1350,8 @@ private fun ModernCallingScreenLayout(
                                                         .height(60.dp),
                                                     shape = RoundedCornerShape(20.dp),
                                                     colors = ButtonDefaults.buttonColors(
-                                                        containerColor = if (isDarkCallTheme) Color.White.copy(alpha = 0.08f) else Color(0xFFF1F5F9),
-                                                        contentColor = mainCallTextColor
+                                                        containerColor = palette.tileIdleBg,
+                                                        contentColor = palette.textPrimary
                                                     )
                                                 ) {
                                                     Text(
