@@ -1801,8 +1801,8 @@ class CallActivity : ComponentActivity() {
             android.view.WindowManager.LayoutParams.FLAG_LAYOUT_NO_LIMITS
         )
 
-        window.statusBarColor = android.graphics.Color.parseColor("#1A1A2E")
-        window.navigationBarColor = android.graphics.Color.parseColor("#1A1A2E")
+        window.statusBarColor = android.graphics.Color.TRANSPARENT
+        window.navigationBarColor = android.graphics.Color.TRANSPARENT
         // CRITICAL FIX: Allow call screen on lock screen properly
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O_MR1) {
             setShowWhenLocked(true)
