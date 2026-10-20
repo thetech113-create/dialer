@@ -367,10 +367,16 @@ private fun CallStatusChip(
     text: String,
     modifier: Modifier = Modifier
 ) {
+    val isDark = androidx.compose.foundation.isSystemInDarkTheme()
+    val chipBg = if (isDark) Color.White.copy(alpha = 0.12f) else Color(0xFFE2E8F0)
+    val textColor = if (isDark) Color.White else Color(0xFF0F172A)
+    val hdTagBg = if (isDark) Color.White else Color(0xFF0F172A)
+    val hdTagText = if (isDark) Color(0xFF11152A) else Color.White
+
     Row(
         modifier = modifier
             .clip(RoundedCornerShape(24.dp))
-            .background(Color.White.copy(alpha = 0.12f))
+            .background(chipBg)
             .padding(horizontal = 12.dp, vertical = 8.dp),
         verticalAlignment = Alignment.CenterVertically,
         horizontalArrangement = Arrangement.spacedBy(8.dp)
@@ -378,20 +384,20 @@ private fun CallStatusChip(
         Box(
             modifier = Modifier
                 .clip(RoundedCornerShape(11.dp))
-                .background(Color.White)
+                .background(hdTagBg)
                 .padding(horizontal = 8.dp, vertical = 4.dp),
             contentAlignment = Alignment.Center
         ) {
             Text(
                 text = "HD",
-                color = Color(0xFF11152A),
+                color = hdTagText,
                 fontSize = 12.sp,
                 fontWeight = FontWeight.ExtraBold
             )
         }
         Text(
             text = text,
-            color = Color.White,
+            color = textColor,
             fontSize = 19.sp,
             fontWeight = FontWeight.Bold
         )
@@ -1087,16 +1093,23 @@ private fun ModernCallingScreenLayout(
             )
         }
 
+        val isDarkCallTheme = androidx.compose.foundation.isSystemInDarkTheme()
+        val bgColors = if (isDarkCallTheme) {
+            listOf(Color(0xFF080B11), Color(0xFF10141E), Color(0xFF0A0D14))
+        } else {
+            listOf(Color(0xFFF8FAFC), Color(0xFFEDF2F7), Color(0xFFF1F5F9))
+        }
+        val mainCallTextColor = if (isDarkCallTheme) Color(0xFFE2E8F0) else Color(0xFF0F172A)
+        val supportingCallTextColor = if (isDarkCallTheme) Color.White.copy(alpha = supportingTextAlpha) else Color(0xFF334155)
+        val topBarBgColor = if (isDarkCallTheme) Color.Black.copy(alpha = 0.14f) else Color(0xFFE2E8F0)
+        val cardBgColor = if (isDarkCallTheme) Color(0xFF161B26) else Color(0xFFFFFFFF)
+
         Box(
             modifier = Modifier
                 .fillMaxSize()
                 .background(
                     Brush.verticalGradient(
-                        colors = listOf(
-                            Color(0xFF080B11),
-                            Color(0xFF10141E),
-                            Color(0xFF0A0D14)
-                        )
+                        colors = bgColors
                     )
                 )
         ) {
@@ -1111,7 +1124,7 @@ private fun ModernCallingScreenLayout(
                         .background(
                             Brush.radialGradient(
                                 colors = listOf(
-                                    Color(0xFF1E293B).copy(alpha = 0.35f),
+                                    if (isDarkCallTheme) Color(0xFF1E293B).copy(alpha = 0.35f) else Color(0xFFCBD5E1).copy(alpha = 0.35f),
                                     Color.Transparent
                                 )
                             )
@@ -1129,7 +1142,7 @@ private fun ModernCallingScreenLayout(
                     modifier = Modifier
                         .fillMaxWidth()
                         .clip(RoundedCornerShape(30.dp))
-                        .background(Color.Black.copy(alpha = 0.14f))
+                        .background(topBarBgColor)
                         .padding(horizontal = 6.dp, vertical = 6.dp),
                     verticalAlignment = Alignment.CenterVertically
                 ) {
@@ -1147,7 +1160,7 @@ private fun ModernCallingScreenLayout(
                             .fillMaxWidth()
                             .padding(top = sectionSpacing),
                         shape = RoundedCornerShape(24.dp),
-                        colors = CardDefaults.cardColors(containerColor = Color.Black.copy(alpha = 0.22f))
+                        colors = CardDefaults.cardColors(containerColor = if (isDarkCallTheme) Color.Black.copy(alpha = 0.22f) else Color(0xFFE2E8F0))
                     ) {
                         Row(
                             modifier = Modifier.padding(horizontal = 16.dp, vertical = 14.dp),
@@ -1157,7 +1170,7 @@ private fun ModernCallingScreenLayout(
                             Column(modifier = Modifier.weight(1f)) {
                                 Text(
                                     text = secondaryCallBannerTitle(callState),
-                                    color = Color.White,
+                                    color = mainCallTextColor,
                                     fontWeight = FontWeight.Bold,
                                     fontSize = 15.sp
                                 )
@@ -1168,14 +1181,14 @@ private fun ModernCallingScreenLayout(
                                     } else {
                                         callState.secondaryContactName ?: callState.secondaryPhoneNumber ?: ""
                                     },
-                                    color = Color.White.copy(alpha = 0.76f),
+                                    color = supportingCallTextColor,
                                     fontSize = 13.sp
                                 )
                                 if (secondaryDurationText.isNotBlank() && callState.totalTopLevelCalls <= 2) {
                                     Spacer(modifier = Modifier.height(2.dp))
                                     Text(
                                         text = "Talk time: $secondaryDurationText",
-                                        color = Color.White.copy(alpha = 0.64f),
+                                        color = supportingCallTextColor,
                                         fontSize = 12.sp
                                     )
                                 }
@@ -1214,7 +1227,7 @@ private fun ModernCallingScreenLayout(
                 ) {
                     Text(
                         text = mainText,
-                        color = if (callState.isSpam) Color(0xFFFF897D) else Color(0xFFD0D0D0),
+                        color = if (callState.isSpam) Color(0xFFFF897D) else mainCallTextColor,
                         fontSize = heroFontSize,
                         fontWeight = FontWeight.ExtraBold,
                         textAlign = TextAlign.Center,
@@ -1226,7 +1239,7 @@ private fun ModernCallingScreenLayout(
                         Spacer(modifier = Modifier.height(10.dp))
                         Text(
                             text = supportingText,
-                            color = Color.White.copy(alpha = supportingTextAlpha),
+                            color = supportingCallTextColor,
                             fontSize = supportingFontSize,
                             fontWeight = supportingTextWeight,
                             textAlign = TextAlign.Center
