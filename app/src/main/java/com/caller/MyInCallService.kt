@@ -2053,7 +2053,13 @@ class MyInCallService : InCallService() {
                 }
             }
 
-            fun showCallBubbleIfNeeded() {
+            /**
+             * Shows the compact in-call surface after the full call UI has been dismissed, or while an
+             * incoming call is presented over another app.  The latter must never promote itself to a
+             * full-screen activity when Xiaomi/Redmi denies an overlay: HyperOS may otherwise surface
+             * the activity above the app the user is using.
+             */
+            fun showCallBubbleIfNeeded(launchFullScreenWhenOverlayUnavailable: Boolean = true) {
                 val liveCalls = getLiveCalls()
                 val snapshot = lastCallUiSnapshot ?: getCurrentCallStateFromSync()
                 val hasCall = snapshot.isInCall || liveCalls.isNotEmpty() || hasActiveCall()
@@ -2085,14 +2091,19 @@ class MyInCallService : InCallService() {
                         onHangUp = { disconnectCall() }
                     )
                 } else {
-                    Log.w(P2P_FORENSIC_TAG, "call_bubble_skip reason=overlay_permission_missing fallback=launch_ui")
-                    launchCallUI(
-                        reason = "call_bubble_fallback",
-                        rawNumber = number,
-                        initialStateHint = snapshot.primaryState.ifBlank { "ACTIVE" },
-                        initialNameHint = title,
-                        isConferenceHint = snapshot.isConference
+                    Log.w(
+                        P2P_FORENSIC_TAG,
+                        "call_bubble_skip reason=overlay_permission_missing fallbackFullScreen=$launchFullScreenWhenOverlayUnavailable"
                     )
+                    if (launchFullScreenWhenOverlayUnavailable) {
+                        launchCallUI(
+                            reason = "call_bubble_fallback",
+                            rawNumber = number,
+                            initialStateHint = snapshot.primaryState.ifBlank { "ACTIVE" },
+                            initialNameHint = title,
+                            isConferenceHint = snapshot.isConference
+                        )
+                    }
                 }
             }
 
@@ -3351,6 +3362,11 @@ class MyInCallService : InCallService() {
                         P2P_FORENSIC_TAG,
                         "incoming_fullscreen_execution source=MyInCallService.showIncomingCallNotification action=withhold reason=${incomingDecision.policy.reason} notificationSurface=notification_with_answer_decline ringtoneOwner=MyInCallService"
                     )
+                    // When another app is in front, keep it in front.  In particular, Redmi 13C
+                    // (MIUI/HyperOS) can turn a normal incoming-call surface into a full-screen
+                    // activity.  Give the user the compact overlay instead, while retaining the
+                    // CallStyle notification as the permission-denied fallback.
+                    showCallBubbleIfNeeded(launchFullScreenWhenOverlayUnavailable = false)
                 }
 
                 builder.setPublicVersion(builder.build())
