@@ -1608,6 +1608,12 @@ class MyInCallService : InCallService() {
                 phoneNumber: String = "",
                 surface: String = ""
             ) {
+                val normalizedNumber = buildP2PNumberSnapshot(phoneNumber).normalized.ifBlank { phoneNumber }
+                val customAlias = CallerAnnouncementManager.getAlias(this, normalizedNumber)
+                if (customAlias.isNotBlank()) {
+                    CallerAnnouncementManager.announce(this, customAlias)
+                }
+
                 Log.e("CMF_RINGTONE_DEBUG", "=== RINGTONE PLAYBACK START ===")
                 Log.e("CMF_RINGTONE_DEBUG", "Device: ${Build.MANUFACTURER} ${Build.BRAND} ${Build.MODEL}")
                 Log.e("CMF_RINGTONE_DEBUG", "OS: ${Build.VERSION.RELEASE} SDK: ${Build.VERSION.SDK_INT}")
@@ -1771,6 +1777,7 @@ class MyInCallService : InCallService() {
                 resetCurrentCall: Boolean = false,
                 markSilenced: Boolean = false
             ) {
+                CallerAnnouncementManager.stop()
                 if (markSilenced && activeIncomingRingtoneKey != null) {
                     incomingRingtoneSilencedForCurrentCall = true
                 }

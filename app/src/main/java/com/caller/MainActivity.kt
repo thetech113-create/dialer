@@ -112,6 +112,7 @@ import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material.icons.filled.Search
 import androidx.compose.material.icons.filled.Send
 import androidx.compose.material.icons.filled.Info
+import androidx.compose.material.icons.filled.Mic
 import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material.icons.filled.Share
 import androidx.compose.material.icons.filled.Videocam
@@ -5512,6 +5513,7 @@ class MainActivity : ComponentActivity() {
         onDelete: () -> Unit,
         modifier: Modifier = Modifier
     ) {
+        val context = androidx.compose.ui.platform.LocalContext.current
         val safeName = remember(name) { sanitizeDisplayNameForUi(name) }
         val isDarkRecentTheme = isSystemInDarkTheme()
         val fullScreenBackground = if (isDarkRecentTheme) Color.Black else Color(0xFFF5F7FB)
@@ -5568,6 +5570,41 @@ class MainActivity : ComponentActivity() {
                             }
 
                             Spacer(modifier = Modifier.height(16.dp))
+
+                            var showTtsDialog by remember { mutableStateOf(false) }
+
+                            if (showTtsDialog) {
+                                var ttsInput by remember { mutableStateOf(CallerAnnouncementManager.getAlias(context, normalizePhoneNumber(phoneNumber))) }
+                                AlertDialog(
+                                    onDismissRequest = { showTtsDialog = false },
+                                    title = { Text("Set Caller Announcement Name") },
+                                    text = {
+                                        OutlinedTextField(
+                                            value = ttsInput,
+                                            onValueChange = { ttsInput = it },
+                                            placeholder = { Text("e.g. Amma, Boss, etc.") },
+                                            singleLine = true
+                                        )
+                                    },
+                                    confirmButton = {
+                                        TextButton(onClick = {
+                                            if (ttsInput.isNotBlank()) {
+                                                CallerAnnouncementManager.setAlias(context, normalizePhoneNumber(phoneNumber), ttsInput)
+                                            } else {
+                                                CallerAnnouncementManager.removeAlias(context, normalizePhoneNumber(phoneNumber))
+                                            }
+                                            showTtsDialog = false
+                                        }) {
+                                            Text("Save")
+                                        }
+                                    },
+                                    dismissButton = {
+                                        TextButton(onClick = { showTtsDialog = false }) {
+                                            Text("Cancel")
+                                        }
+                                    }
+                                )
+                            }
 
                             // Compact Contact Header Card
                             Surface(
@@ -5645,6 +5682,14 @@ class MainActivity : ComponentActivity() {
                                                 onClick = {
                                                     showSecondaryMenu = false
                                                     onShare()
+                                                }
+                                            )
+                                            DropdownMenuItem(
+                                                text = { Text("Set Caller TTS Name") },
+                                                leadingIcon = { Icon(Icons.Default.Mic, contentDescription = "TTS Tag") },
+                                                onClick = {
+                                                    showSecondaryMenu = false
+                                                    showTtsDialog = true
                                                 }
                                             )
                                             DropdownMenuItem(
