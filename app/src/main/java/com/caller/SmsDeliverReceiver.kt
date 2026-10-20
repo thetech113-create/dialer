@@ -158,13 +158,17 @@ class SmsDeliverReceiver : BroadcastReceiver() {
                 PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
             )
 
+            val spamVerdict = analyzeSmsSpam(context, phoneNumber, messageBody)
+            val finalTitle = if (spamVerdict.isPotentialSpam) "⚠️ Spam Warning: $contactName" else contactName
+            val finalNotificationText = if (spamVerdict.isPotentialSpam) "[Spam Warning] $notificationText" else notificationText
+
             val builder = NotificationCompat.Builder(context, SMS_NOTIFICATION_CHANNEL_ID)
                 .setSmallIcon(android.R.drawable.ic_menu_send)
-                .setContentTitle(contactName)
-                .setContentText(notificationText)
+                .setContentTitle(finalTitle)
+                .setContentText(finalNotificationText)
                 .setStyle(
                     NotificationCompat.BigTextStyle()
-                        .bigText(messageBody)
+                        .bigText(if (spamVerdict.isPotentialSpam) "${spamVerdict.summary}\n\n$messageBody" else messageBody)
                 )
                 .setAutoCancel(true)
                 .setContentIntent(pendingIntent)

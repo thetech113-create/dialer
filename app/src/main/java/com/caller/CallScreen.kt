@@ -1810,6 +1810,7 @@ class CallActivity : ComponentActivity() {
             object : OnBackPressedCallback(true) {
                 override fun handleOnBackPressed() {
                     if (hasLiveCall()) {
+                        CallBubbleOverlay.showFromCallActivityExit(this@CallActivity)
                         MyInCallService.getInstance()?.showCallBubbleIfNeeded()
                         if (!isFinishing && !isDestroyed) {
                             finish()
@@ -2090,7 +2091,7 @@ class CallActivity : ComponentActivity() {
 
     override fun onResume() {
         super.onResume()
-        // Full call screen is open: the floating call pill isn't needed on top of it.
+        CallBubbleOverlay.isCallActivityVisible = true
         CallBubbleOverlay.hide(this)
         logCall("InCallActivity.onResume hasActiveCall=${hasLiveCall()}")
         logCallActivityLifecycle("onResume")
@@ -2107,6 +2108,7 @@ class CallActivity : ComponentActivity() {
         logCall("InCallActivity.onUserLeaveHint hasActiveCall=${hasLiveCall()}")
         logCallActivityLifecycle("onUserLeaveHint")
         if (hasLiveCall()) {
+            CallBubbleOverlay.showFromCallActivityExit(this)
             MyInCallService.getInstance()?.showCallBubbleIfNeeded()
         }
     }
@@ -2114,8 +2116,10 @@ class CallActivity : ComponentActivity() {
     override fun onStop() {
         logCall("InCallActivity.onStop hasActiveCall=${hasLiveCall()}")
         logCallActivityLifecycle("onStop")
+        CallBubbleOverlay.isCallActivityVisible = false
         super.onStop()
-        if (hasLiveCall() && !isFinishing) {
+        if (hasLiveCall()) {
+            CallBubbleOverlay.showFromCallActivityExit(this)
             MyInCallService.getInstance()?.showCallBubbleIfNeeded()
         }
     }
@@ -2127,7 +2131,15 @@ class CallActivity : ComponentActivity() {
     }
     
     override fun onBackPressed() {
-        openInAppMainUi("back_press")
+        if (hasLiveCall()) {
+            CallBubbleOverlay.showFromCallActivityExit(this)
+            MyInCallService.getInstance()?.showCallBubbleIfNeeded()
+            if (!isFinishing && !isDestroyed) {
+                finish()
+            }
+        } else {
+            openInAppMainUi("back_press")
+        }
     }
 }
 

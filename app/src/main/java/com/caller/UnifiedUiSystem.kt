@@ -22,16 +22,10 @@ import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.LocalView
 import androidx.core.view.WindowCompat
 
-/**
- * Single centralized source of truth for Light/Dark mode color reversal
- * and notification-shade / status-bar / navigation-bar alignment across
- * both WindowManager Views (CallBubbleOverlay) and Jetpack Compose screens.
- */
 object UnifiedUiSystem {
 
     data class Palette(
         val isDark: Boolean,
-        // Raw ARGB Ints for Android Views / WindowManager (CallBubbleOverlay, Notifications, Window bars)
         val bgTopArgb: Int,
         val bgMidArgb: Int,
         val bgBottomArgb: Int,
@@ -43,7 +37,6 @@ object UnifiedUiSystem {
         val timerAccentArgb: Int,
         val hangUpRedArgb: Int
     ) {
-        // Compose Colors derived directly from the single ARGB source (zero duplication)
         val bgTop: Color get() = Color(bgTopArgb)
         val bgMid: Color get() = Color(bgMidArgb)
         val bgBottom: Color get() = Color(bgBottomArgb)
@@ -59,15 +52,6 @@ object UnifiedUiSystem {
         val radialGlowColor: Color
             get() = if (isDark) Color(0xFF1E293B).copy(alpha = 0.35f) else Color(0xFFCBD5E1).copy(alpha = 0.55f)
 
-        val chipContainer: Color
-            get() = if (isDark) Color.White.copy(alpha = 0.12f) else Color.Black.copy(alpha = 0.08f)
-
-        val chipBadgeBg: Color
-            get() = textPrimary
-
-        val chipBadgeText: Color
-            get() = bgTop
-
         val tileIdleBg: Color
             get() = if (isDark) Color.White.copy(alpha = 0.14f) else Color.Black.copy(alpha = 0.08f)
 
@@ -81,18 +65,19 @@ object UnifiedUiSystem {
             get() = textPrimary.copy(alpha = 0.35f)
     }
 
+    // Transparent glass pillSurfaceArgb (#59 = 35% alpha in dark, #66 = 40% alpha in light)
     private val DarkPalette = Palette(
         isDark = true,
         bgTopArgb = AndroidColor.parseColor("#080B11"),
         bgMidArgb = AndroidColor.parseColor("#10141E"),
         bgBottomArgb = AndroidColor.parseColor("#0A0D14"),
         cardSurfaceArgb = AndroidColor.parseColor("#161B26"),
-        pillSurfaceArgb = AndroidColor.parseColor("#F2202124"),
-        pillBorderArgb = AndroidColor.parseColor("#29FFFFFF"),
+        pillSurfaceArgb = AndroidColor.parseColor("#5910141E"),
+        pillBorderArgb = AndroidColor.parseColor("#38FFFFFF"),
         textPrimaryArgb = AndroidColor.parseColor("#FFFFFF"),
         textSecondaryArgb = AndroidColor.parseColor("#D0D5DD"),
         timerAccentArgb = AndroidColor.parseColor("#7CE38B"),
-        hangUpRedArgb = AndroidColor.parseColor("#E5484D")
+        hangUpRedArgb = AndroidColor.parseColor("#CCFF3B30")
     )
 
     private val LightPalette = Palette(
@@ -101,12 +86,12 @@ object UnifiedUiSystem {
         bgMidArgb = AndroidColor.parseColor("#F1F5F9"),
         bgBottomArgb = AndroidColor.parseColor("#E2E8F0"),
         cardSurfaceArgb = AndroidColor.parseColor("#FFFFFF"),
-        pillSurfaceArgb = AndroidColor.parseColor("#F7FFFFFF"),
-        pillBorderArgb = AndroidColor.parseColor("#24000000"),
+        pillSurfaceArgb = AndroidColor.parseColor("#66FFFFFF"),
+        pillBorderArgb = AndroidColor.parseColor("#30000000"),
         textPrimaryArgb = AndroidColor.parseColor("#0F172A"),
         textSecondaryArgb = AndroidColor.parseColor("#475569"),
         timerAccentArgb = AndroidColor.parseColor("#15803D"),
-        hangUpRedArgb = AndroidColor.parseColor("#E5484D")
+        hangUpRedArgb = AndroidColor.parseColor("#CCF03E3E")
     )
 
     fun isDarkMode(context: Context): Boolean {
@@ -124,13 +109,12 @@ object UnifiedUiSystem {
         val isDark = remember(configuration.uiMode) { isDarkMode(context) }
         val palette = if (isDark) DarkPalette else LightPalette
 
-        // Automatically sync system status bar & navigation bar icon contrast
         val view = LocalView.current
         if (!view.isInEditMode) {
             SideEffect {
                 val window = (context as? Activity)?.window ?: return@SideEffect
-                window.statusBarColor = palette.bgTopArgb
-                window.navigationBarColor = palette.bgBottomArgb
+                window.statusBarColor = AndroidColor.TRANSPARENT
+                window.navigationBarColor = AndroidColor.TRANSPARENT
                 val controller = WindowCompat.getInsetsController(window, view)
                 controller.isAppearanceLightStatusBars = !palette.isDark
                 controller.isAppearanceLightNavigationBars = !palette.isDark
@@ -148,14 +132,11 @@ object UnifiedUiSystem {
 
     fun createPillBackground(context: Context, palette: Palette = palette(context)): GradientDrawable =
         GradientDrawable().apply {
-            cornerRadius = dp(context, 28).toFloat()
+            cornerRadius = dp(context, 20).toFloat()
             setColor(palette.pillSurfaceArgb)
             setStroke(dp(context, 1).coerceAtLeast(1), palette.pillBorderArgb)
         }
 
-    /**
-     * Exact top inset below the device status bar / camera cutout / notification shade handle.
-     */
     fun getSafeTopInsetPx(context: Context, wm: WindowManager? = null): Int {
         val windowManager = wm ?: (context.getSystemService(Context.WINDOW_SERVICE) as? WindowManager)
         var topInset = 0
@@ -177,9 +158,6 @@ object UnifiedUiSystem {
         return topInset.coerceAtLeast(dp(context, 28))
     }
 
-    /**
-     * Exact bottom inset above the navigation bar / gesture pill.
-     */
     fun getSafeBottomInsetPx(context: Context, wm: WindowManager? = null): Int {
         val windowManager = wm ?: (context.getSystemService(Context.WINDOW_SERVICE) as? WindowManager)
         var bottomInset = 0
@@ -199,15 +177,9 @@ object UnifiedUiSystem {
         return bottomInset.coerceAtLeast(0)
     }
 
-    /**
-     * Default Y coordinate for floating overlays (8dp below the status bar / cutout).
-     */
     fun getBubbleDefaultTopYPx(context: Context, wm: WindowManager): Int =
-        getSafeTopInsetPx(context, wm) + dp(context, 8)
+        getSafeTopInsetPx(context, wm) + dp(context, 6)
 
-    /**
-     * Clamps overlay Y drag so it never enters the top notification shade or bottom navigation bar.
-     */
     fun clampBubbleYPx(context: Context, wm: WindowManager, requestedY: Int, pillHeightPx: Int): Int {
         val minTop = getBubbleDefaultTopYPx(context, wm)
         val screenHeight = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
@@ -216,14 +188,11 @@ object UnifiedUiSystem {
         } else {
             context.resources.displayMetrics.heightPixels
         }
-        val maxBottom = (screenHeight - getSafeBottomInsetPx(context, wm) - pillHeightPx - dp(context, 16))
+        val maxBottom = (screenHeight - getSafeBottomInsetPx(context, wm) - pillHeightPx - dp(context, 12))
             .coerceAtLeast(minTop)
         return requestedY.coerceIn(minTop, maxBottom)
     }
 
-    /**
-     * Compose modifier that pads any screen below the notification shade / cutout and above the nav bar.
-     */
     @Composable
     fun Modifier.safeNotificationShadePadding(): Modifier {
         val context = LocalContext.current

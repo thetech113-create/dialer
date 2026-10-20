@@ -423,14 +423,32 @@ private fun MessagesThreadsPage(
                     }
                     Spacer(modifier = Modifier.width(14.dp))
                     Column(modifier = Modifier.weight(1f)) {
-                        Text(
-                            text = displayName,
-                            color = titleColor,
-                            style = MaterialTheme.typography.bodyLarge,
-                            fontWeight = FontWeight.Bold,
-                            maxLines = 1,
-                            overflow = TextOverflow.Ellipsis
-                        )
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            Text(
+                                text = displayName,
+                                color = titleColor,
+                                style = MaterialTheme.typography.bodyLarge,
+                                fontWeight = FontWeight.Bold,
+                                maxLines = 1,
+                                overflow = TextOverflow.Ellipsis,
+                                modifier = Modifier.weight(1f, fill = false)
+                            )
+                            if (thread.spamVerdict.isPotentialSpam) {
+                                Spacer(modifier = Modifier.width(6.dp))
+                                Surface(
+                                    shape = RoundedCornerShape(6.dp),
+                                    color = MaterialTheme.colorScheme.errorContainer
+                                ) {
+                                    Text(
+                                        text = "Spam",
+                                        color = MaterialTheme.colorScheme.onErrorContainer,
+                                        style = MaterialTheme.typography.labelSmall,
+                                        fontWeight = FontWeight.Bold,
+                                        modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp)
+                                    )
+                                }
+                            }
+                        }
                         Spacer(modifier = Modifier.height(4.dp))
                         Text(
                             text = thread.snippet,
@@ -715,7 +733,18 @@ private fun MessageConversationPage(
                             ConversationMessageBubble(
                                 message = message,
                                 bodyColor = bodyColor,
-                                onLongPress = { selectedMessageForMenu = message }
+                                onLongPress = { selectedMessageForMenu = message },
+                                onFeedbackUpdated = {
+                                    conversationMessages = conversationMessages.map { item ->
+                                        if (item.id == message.id) {
+                                            item.copy(
+                                                spamVerdict = analyzeSmsSpam(context, item.address, item.body)
+                                            )
+                                        } else {
+                                            item
+                                        }
+                                    }
+                                }
                             )
                         }
                     }
@@ -771,6 +800,52 @@ private fun MessageConversationPage(
                                 Icon(Icons.Default.Share, contentDescription = null, modifier = Modifier.size(20.dp))
                                 Spacer(modifier = Modifier.width(12.dp))
                                 Text("Share Message to Other Apps", style = MaterialTheme.typography.bodyLarge)
+                            }
+                        }
+                        TextButton(
+                            onClick = {
+                                recordSmsUserFeedback(context, targetMessage.address, targetMessage.body, true)
+                                conversationMessages = conversationMessages.map { item ->
+                                    if (item.id == targetMessage.id) {
+                                        item.copy(
+                                            spamVerdict = analyzeSmsSpam(context, item.address, item.body)
+                                        )
+                                    } else {
+                                        item
+                                    }
+                                }
+                                Toast.makeText(context, "Reported message as spam", Toast.LENGTH_SHORT).show()
+                                selectedMessageForMenu = null
+                            },
+                            modifier = Modifier.fillMaxWidth()
+                        ) {
+                            Row(modifier = Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+                                Icon(Icons.Default.Delete, contentDescription = null, tint = MaterialTheme.colorScheme.error, modifier = Modifier.size(20.dp))
+                                Spacer(modifier = Modifier.width(12.dp))
+                                Text("Report Message as Spam", color = MaterialTheme.colorScheme.error, style = MaterialTheme.typography.bodyLarge)
+                            }
+                        }
+                        TextButton(
+                            onClick = {
+                                recordSmsUserFeedback(context, targetMessage.address, targetMessage.body, false)
+                                conversationMessages = conversationMessages.map { item ->
+                                    if (item.id == targetMessage.id) {
+                                        item.copy(
+                                            spamVerdict = analyzeSmsSpam(context, item.address, item.body)
+                                        )
+                                    } else {
+                                        item
+                                    }
+                                }
+                                Toast.makeText(context, "Marked message as safe (Not spam)", Toast.LENGTH_SHORT).show()
+                                selectedMessageForMenu = null
+                            },
+                            modifier = Modifier.fillMaxWidth()
+                        ) {
+                            Row(modifier = Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+                                Icon(Icons.Default.Message, contentDescription = null, tint = MaterialTheme.colorScheme.primary, modifier = Modifier.size(20.dp))
+                                Spacer(modifier = Modifier.width(12.dp))
+                                Text("Mark Message as Safe (Not Spam)", color = MaterialTheme.colorScheme.primary, style = MaterialTheme.typography.bodyLarge)
                             }
                         }
                         TextButton(
@@ -859,8 +934,10 @@ private fun MessageConversationPage(
 private fun ConversationMessageBubble(
     message: SmsConversationMessage,
     bodyColor: Color,
-    onLongPress: () -> Unit
+    onLongPress: () -> Unit,
+    onFeedbackUpdated: () -> Unit
 ) {
+    val context = LocalContext.current
     val bubbleColor = if (message.isOutgoing) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.surfaceVariant
     val bubbleTextColor = if (message.isOutgoing) MaterialTheme.colorScheme.onPrimary else MaterialTheme.colorScheme.onSurface
 
@@ -884,6 +961,54 @@ private fun ConversationMessageBubble(
             color = bubbleColor
         ) {
             Column(modifier = Modifier.padding(horizontal = 14.dp, vertical = 10.dp)) {
+                if (message.spamVerdict.isPotentialSpam) {
+                    Surface(
+                        shape = RoundedCornerShape(10.dp),
+                        color = MaterialTheme.colorScheme.errorContainer,
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(bottom = 8.dp)
+                    ) {
+                        Column(modifier = Modifier.padding(horizontal = 10.dp, vertical = 8.dp)) {
+                            Row(verticalAlignment = Alignment.CenterVertically) {
+                                Text(
+                                    text = "⚠️ " + (message.spamVerdict.summary.ifBlank { "Suspected Spam or Scam" }),
+                                    color = MaterialTheme.colorScheme.onErrorContainer,
+                                    style = MaterialTheme.typography.labelMedium,
+                                    fontWeight = FontWeight.Bold,
+                                    modifier = Modifier.weight(1f)
+                                )
+                            }
+                            Spacer(modifier = Modifier.height(6.dp))
+                            Row(
+                                modifier = Modifier.fillMaxWidth(),
+                                horizontalArrangement = Arrangement.End
+                            ) {
+                                TextButton(
+                                    onClick = {
+                                        recordSmsUserFeedback(context, message.address, message.body, false)
+                                        Toast.makeText(context, "Marked as safe (Not spam)", Toast.LENGTH_SHORT).show()
+                                        onFeedbackUpdated()
+                                    },
+                                    contentPadding = PaddingValues(horizontal = 8.dp, vertical = 2.dp)
+                                ) {
+                                    Text("Not Spam", style = MaterialTheme.typography.labelMedium)
+                                }
+                                Spacer(modifier = Modifier.width(4.dp))
+                                TextButton(
+                                    onClick = {
+                                        recordSmsUserFeedback(context, message.address, message.body, true)
+                                        Toast.makeText(context, "Reported as spam", Toast.LENGTH_SHORT).show()
+                                        onFeedbackUpdated()
+                                    },
+                                    contentPadding = PaddingValues(horizontal = 8.dp, vertical = 2.dp)
+                                ) {
+                                    Text("Report Spam", color = MaterialTheme.colorScheme.error, style = MaterialTheme.typography.labelMedium, fontWeight = FontWeight.Bold)
+                                }
+                            }
+                        }
+                    }
+                }
                 LinkifiedSmsText(
                     text = message.body,
                     textColor = bubbleTextColor,
