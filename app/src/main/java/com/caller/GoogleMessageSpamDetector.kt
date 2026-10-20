@@ -36,33 +36,28 @@ private const val GOOGLE_WEB_RISK_CACHE_TTL_MS = 24L * 60L * 60L * 1000L
 private const val GOOGLE_WEB_RISK_TIMEOUT_MS = 4000
 private const val GOOGLE_WEB_RISK_PREFS = "google_message_spam_detector"
 
-private val SMS_URL_REGEX = Regex("""(?i)\b((?:https?://|www\.)[^\s<>()]+)""")
-private val SMS_SPAM_KEYWORDS = listOf(
-    "verify account",
-    "account suspended",
-    "kyc",
-    "urgent action",
-    "click link",
-    "claim reward",
-    "claim prize",
-    "bank update",
-    "upi",
-    "loan approved",
-    "gift",
-    "winner",
-    "refund pending",
-    "limited time"
+// Known Indian DLT 2-letter operator prefixes for verified headers (e.g. AX-HDFCBK, VK-SBIINB)
+private val INDIAN_DLT_PREFIXES = setOf(
+    "ax", "ad", "am", "ap", "at", "av", "ba", "bp", "bw", "bz", "ca", "cb", "cp", "cs",
+    "dm", "dn", "dq", "dr", "fm", "ft", "ga", "hd", "ic", "ik", "im", "in", "ip", "ix",
+    "jk", "jm", "jx", "ka", "kd", "kl", "km", "ks", "kx", "la", "ld", "lk", "lm", "mb",
+    "md", "mg", "mh", "mk", "ml", "mn", "mp", "mr", "ms", "mt", "mz", "nb", "nl", "no",
+    "nr", "nw", "od", "or", "pb", "pd", "pg", "pj", "pn", "pr", "pt", "py", "ra", "rj",
+    "rk", "rm", "rn", "sd", "sk", "sm", "sn", "sr", "st", "td", "tg", "tm", "tn", "tr",
+    "ts", "tt", "ua", "uk", "up", "ut", "va", "vd", "vi", "vk", "vm", "vn", "vr", "wb",
+    "wg", "wx", "xy"
 )
-private val SMS_SHORTENER_HOSTS = setOf(
-    "bit.ly",
-    "tinyurl.com",
-    "goo.gl",
-    "t.co",
-    "is.gd",
-    "cutt.ly",
-    "rb.gy",
-    "shorturl.at"
-)
+
+// High-risk scam keywords (requires multi-token or context match)
+private val SCAM_KYC_KEYWORDS = listOf("kyc update", "account blocked", "account suspended", "pan update", "yono sbi blocked", "hdfc netbanking blocked", "netbanking suspended", "unauthorized transaction click", "update kyc immediately", "sim block")
+private val SCAM_UTILITY_KEYWORDS = listOf("electricity bill unpaid", "power will be disconnected", "electricity connection cut", "unpaid bill tonight", "contact electricity officer")
+private val SCAM_JOB_KEYWORDS = listOf("earn 5000 daily", "part time job", "like youtube videos", "daily income 2000", "work from home job", "telegram channel")
+private val SCAM_LOTTERY_KEYWORDS = listOf("won 25 lakhs", "kbc lottery winner", "lucky draw winner", "claim reward 5000", "cash prize recipient")
+
+// Suspicious URL domain extensions often used in Indian SMS phishing
+private val SUSPICIOUS_TLDS = setOf("xyz", "top", "tk", "icu", "cfd", "rest", "work", "click", "link", "site", "online", "cc", "vip", "buzz", "club", "space")
+
+private val SMS_SHORTENER_HOSTS = setOf("bit.ly", "tinyurl.com", "goo.gl", "t.co", "is.gd", "cutt.ly", "rb.gy", "shorturl.at")
 
 fun analyzeSmsSpam(context: Context, sender: String, body: String): SmsSpamVerdict {
     if (body.isBlank()) return SmsSpamVerdict()
@@ -73,33 +68,86 @@ fun analyzeSmsSpam(context: Context, sender: String, body: String): SmsSpamVerdi
     var googleThreatTypes = emptyList<String>()
     var provider = ""
 
-    val normalizedBody = body.lowercase(Locale.getDefault())
-    val urls = extractUrlsFromSms(body)
-    val keywordHits = SMS_SPAM_KEYWORDS.count { normalizedBody.contains(it) }
+    val normalizedBody = body.lowercase(Locale.ROOT)
+    val senderTrimmed = sender.trim().lowercase(Locale.ROOT)
 
-    if (keywordHits >= 2 && urls.isNotEmpty()) {
-        score += 40
-        reasons += "phishing_language_with_link"
-    } else if (keywordHits >= 3) {
-        score += 25
-        reasons += "aggressive_spam_language"
+    // 1. Extract URLs using strict token boundary detector
+    val detectedEntities = detectSmsEntities(body)
+    val urls = detectedEntities.filter { it.type == SmsEntityType.URL }.map { it.actionValue }
+
+    // 2. Check for Genuine Transactional / OTP Exemptions FIRST (Section 6)
+    val isOtpMessage = normalizedBody.contains("otp") || normalizedBody.contains("one time password") || normalizedBody.contains("verification code") || normalizedBody.contains("secret code") || normalizedBody.contains("valid for")
+    val isBankTransaction = normalizedBody.contains("debited") || normalizedBody.contains("credited") || normalizedBody.contains("a/c x") || normalizedBody.contains("account bal") || normalizedBody.contains("upi ref") || normalizedBody.contains("vpa") || normalizedBody.contains("salary credited") || normalizedBody.contains("swiggy") || normalizedBody.contains("zomato") || normalizedBody.contains("amazon") || normalizedBody.contains("flipkart")
+
+    val isVerifiedDltHeader = isVerifiedIndianDltHeader(senderTrimmed)
+
+    // If it's a genuine OTP / Bank transaction and has no scam threat phrases, exempt completely
+    val hasScamThreatPhrase = SCAM_KYC_KEYWORDS.any { normalizedBody.contains(it) } ||
+        SCAM_UTILITY_KEYWORDS.any { normalizedBody.contains(it) } ||
+        SCAM_JOB_KEYWORDS.any { normalizedBody.contains(it) } ||
+        SCAM_LOTTERY_KEYWORDS.any { normalizedBody.contains(it) } ||
+        normalizedBody.contains(".apk")
+
+    if ((isOtpMessage || isBankTransaction || isVerifiedDltHeader) && !hasScamThreatPhrase) {
+        return SmsSpamVerdict(
+            isPotentialSpam = false,
+            score = 0,
+            reasons = listOf("verified_transactional_or_otp"),
+            summary = "Legitimate Transactional SMS"
+        )
     }
 
-    if (looksLikeSuspiciousSender(sender)) {
+    // 3. Rule Evaluation: High-Confidence Threat Patterns
+    if (SCAM_KYC_KEYWORDS.any { normalizedBody.contains(it) }) {
+        score += 70
+        reasons += "bank_kyc_phishing_scam"
+    }
+
+    if (SCAM_UTILITY_KEYWORDS.any { normalizedBody.contains(it) }) {
+        score += 80
+        reasons += "electricity_bill_unpaid_scam"
+    }
+
+    if (SCAM_JOB_KEYWORDS.any { normalizedBody.contains(it) }) {
+        score += 70
+        reasons += "part_time_job_telegram_scam"
+    }
+
+    if (SCAM_LOTTERY_KEYWORDS.any { normalizedBody.contains(it) }) {
+        score += 75
+        reasons += "kbc_lottery_fake_reward_scam"
+    }
+
+    if (normalizedBody.contains(".apk") || normalizedBody.contains("download apk")) {
+        score += 85
+        reasons += "malware_apk_download_threat"
+    }
+
+    // 4. URL & Phishing Analysis
+    if (urls.isNotEmpty()) {
+        urls.forEach { url ->
+            val lowerUrl = url.lowercase(Locale.ROOT)
+            val domainExt = lowerUrl.substringAfterLast('.', "")
+            if (domainExt in SUSPICIOUS_TLDS) {
+                score += 35
+                detectedUrl = url
+                reasons += "suspicious_domain_extension"
+            }
+            if (isShortenedUrl(url)) {
+                score += 15
+                if (detectedUrl.isBlank()) detectedUrl = url
+                reasons += "shortened_url"
+            }
+        }
+    }
+
+    // 5. Sender Identity Check (Non-DLT suspicious format)
+    if (!isVerifiedDltHeader && looksLikeSuspiciousSenderFormat(senderTrimmed)) {
         score += 10
-        reasons += "suspicious_sender_format"
+        reasons += "unverified_sender_format"
     }
 
-    if (urls.size >= 2) {
-        score += 10
-        reasons += "multiple_links"
-    }
-
-    urls.firstOrNull { isShortenedUrl(it) }?.let {
-        score += 10
-        reasons += "shortened_link"
-    }
-
+    // 6. Optional Cached Google Web Risk Check
     urls.forEach { url ->
         val googleResult = lookupGoogleWebRiskCached(context, url) ?: return@forEach
         if (googleResult.isUnsafe) {
@@ -114,6 +162,7 @@ fun analyzeSmsSpam(context: Context, sender: String, body: String): SmsSpamVerdi
 
     val finalScore = score.coerceIn(0, 100)
     val isPotentialSpam = finalScore >= 45
+
     return SmsSpamVerdict(
         isPotentialSpam = isPotentialSpam,
         score = finalScore,
@@ -130,6 +179,31 @@ fun analyzeSmsSpam(context: Context, sender: String, body: String): SmsSpamVerdi
     )
 }
 
+private fun isVerifiedIndianDltHeader(sender: String): Boolean {
+    val clean = sender.trim().lowercase(Locale.ROOT)
+    if (clean.contains('-')) {
+        val parts = clean.split('-')
+        if (parts.size == 2 && parts[0] in INDIAN_DLT_PREFIXES && parts[1].length in 3..8) {
+            return true
+        }
+    }
+    // 4 to 6 digit official shortcodes (e.g. 1900, 1901, 880011)
+    val digits = clean.filter { it.isDigit() }
+    if (digits.length in 4..6 && clean.all { it.isDigit() }) {
+        return true
+    }
+    return false
+}
+
+private fun looksLikeSuspiciousSenderFormat(sender: String): Boolean {
+    val clean = sender.trim().lowercase(Locale.ROOT)
+    if (clean.isBlank()) return true
+    val digits = clean.filter { it.isDigit() }
+    // Random 7-9 digit unformatted number or random string
+    if (digits.length in 7..9 && clean.all { it.isDigit() }) return true
+    return false
+}
+
 private fun buildSmsSpamSummary(
     isPotentialSpam: Boolean,
     provider: String,
@@ -139,38 +213,19 @@ private fun buildSmsSpamSummary(
     if (!isPotentialSpam) return ""
     return when {
         provider.isNotBlank() && detectedUrl.isNotBlank() -> "Potential spam: unsafe link flagged by $provider"
-        reasons.contains("phishing_language_with_link") -> "Potential spam: phishing-style message with link"
-        reasons.contains("aggressive_spam_language") -> "Potential spam: suspicious financial or prize language"
+        reasons.contains("electricity_bill_unpaid_scam") -> "Potential scam: electricity bill disconnection threat"
+        reasons.contains("bank_kyc_phishing_scam") -> "Potential scam: bank/KYC account block threat"
+        reasons.contains("malware_apk_download_threat") -> "Potential threat: suspicious APK download link"
+        reasons.contains("part_time_job_telegram_scam") -> "Potential scam: fake job or Telegram earning offer"
+        reasons.contains("kbc_lottery_fake_reward_scam") -> "Potential scam: fake lottery or prize claim"
+        reasons.contains("suspicious_domain_extension") -> "Potential spam: suspicious link domain"
         else -> "Potential spam"
     }
 }
 
-private fun extractUrlsFromSms(body: String): List<String> {
-    return SMS_URL_REGEX.findAll(body)
-        .map { match ->
-            var url = match.groupValues[1].trim().trimEnd('.', ',', ';', ':', '!')
-            if (url.startsWith("www.", ignoreCase = true)) {
-                url = "https://$url"
-            }
-            url
-        }
-        .filter { it.isNotBlank() }
-        .distinct()
-        .toList()
-}
-
-private fun looksLikeSuspiciousSender(sender: String): Boolean {
-    val trimmed = sender.trim()
-    val digitsOnly = trimmed.filter { it.isDigit() }
-    if (trimmed.isBlank()) return false
-    if (digitsOnly.length in 4..7) return true
-    if (trimmed.any { it.isLetter() } && trimmed.any { it.isDigit() } && trimmed.length <= 10) return true
-    return false
-}
-
 private fun isShortenedUrl(rawUrl: String): Boolean {
     return runCatching {
-        val host = URL(rawUrl).host.lowercase(Locale.getDefault()).removePrefix("www.")
+        val host = URL(rawUrl).host.lowercase(Locale.ROOT).removePrefix("www.")
         host in SMS_SHORTENER_HOSTS
     }.getOrDefault(false)
 }

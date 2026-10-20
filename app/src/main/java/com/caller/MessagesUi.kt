@@ -1,12 +1,19 @@
-@file:OptIn(androidx.compose.material3.ExperimentalMaterial3Api::class)
+@file:OptIn(
+    androidx.compose.material3.ExperimentalMaterial3Api::class,
+    androidx.compose.foundation.ExperimentalFoundationApi::class
+)
 
 package com.caller
 
+import android.content.ClipData
+import android.content.ClipboardManager
 import android.content.Context
+import android.content.Intent
 import android.widget.Toast
 import androidx.activity.compose.BackHandler // ADDED FOR BACK NAVIGATION
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -27,13 +34,18 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.ArrowBack
+import androidx.compose.material.icons.filled.ContentCopy
+import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.Message
 import androidx.compose.material.icons.filled.People
 import androidx.compose.material.icons.filled.Refresh
-import androidx.compose.material.icons.filled.Send
 import androidx.compose.material.icons.filled.Search
+import androidx.compose.material.icons.filled.Send
+import androidx.compose.material.icons.filled.Share
+import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.CircularProgressIndicator
+import androidx.compose.material3.Divider
 import androidx.compose.material3.FloatingActionButton
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
@@ -603,6 +615,7 @@ private fun MessageConversationPage(
     val conversationListState = rememberLazyListState()
     var conversationMessages by remember { mutableStateOf<List<SmsConversationMessage>>(emptyList()) }
     var isConversationLoading by remember { mutableStateOf(false) }
+    var selectedMessageForMenu by remember { mutableStateOf<SmsConversationMessage?>(null) }
 
     LaunchedEffect(composeAddress, selectedThreadId, refreshKey) {
         if (composeAddress.isBlank() && selectedThreadId.isBlank()) {
@@ -698,15 +711,96 @@ private fun MessageConversationPage(
                         contentPadding = PaddingValues(vertical = 8.dp),
                         verticalArrangement = Arrangement.spacedBy(10.dp)
                     ) {
-                        items(conversationMessages) { message ->
+                        items(conversationMessages, key = { it.id }) { message ->
                             ConversationMessageBubble(
                                 message = message,
-                                bodyColor = bodyColor
+                                bodyColor = bodyColor,
+                                onLongPress = { selectedMessageForMenu = message }
                             )
                         }
                     }
                 }
             }
+        }
+
+        if (selectedMessageForMenu != null) {
+            val targetMessage = selectedMessageForMenu!!
+            AlertDialog(
+                onDismissRequest = { selectedMessageForMenu = null },
+                title = { Text("Message Options", fontWeight = FontWeight.Bold) },
+                text = {
+                    Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                        Text(
+                            text = targetMessage.body,
+                            style = MaterialTheme.typography.bodyMedium,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            maxLines = 4,
+                            overflow = TextOverflow.Ellipsis
+                        )
+                        Divider()
+                        TextButton(
+                            onClick = {
+                                val clipboard = context.getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
+                                val clip = ClipData.newPlainText("SMS Message", targetMessage.body)
+                                clipboard.setPrimaryClip(clip)
+                                Toast.makeText(context, "Message text copied", Toast.LENGTH_SHORT).show()
+                                selectedMessageForMenu = null
+                            },
+                            modifier = Modifier.fillMaxWidth()
+                        ) {
+                            Row(modifier = Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+                                Icon(Icons.Default.ContentCopy, contentDescription = null, modifier = Modifier.size(20.dp))
+                                Spacer(modifier = Modifier.width(12.dp))
+                                Text("Copy Message Text", style = MaterialTheme.typography.bodyLarge)
+                            }
+                        }
+                        TextButton(
+                            onClick = {
+                                runCatching {
+                                    val shareIntent = Intent(Intent.ACTION_SEND).apply {
+                                        type = "text/plain"
+                                        putExtra(Intent.EXTRA_TEXT, targetMessage.body)
+                                    }
+                                    context.startActivity(Intent.createChooser(shareIntent, "Share Message via").addFlags(Intent.FLAG_ACTIVITY_NEW_TASK))
+                                }
+                                selectedMessageForMenu = null
+                            },
+                            modifier = Modifier.fillMaxWidth()
+                        ) {
+                            Row(modifier = Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+                                Icon(Icons.Default.Share, contentDescription = null, modifier = Modifier.size(20.dp))
+                                Spacer(modifier = Modifier.width(12.dp))
+                                Text("Share Message to Other Apps", style = MaterialTheme.typography.bodyLarge)
+                            }
+                        }
+                        TextButton(
+                            onClick = {
+                                val msgId = targetMessage.id
+                                val deleted = deleteSmsMessage(context, msgId)
+                                if (deleted) {
+                                    conversationMessages = conversationMessages.filterNot { it.id == msgId }
+                                    Toast.makeText(context, "Deleted message from system database", Toast.LENGTH_SHORT).show()
+                                } else {
+                                    Toast.makeText(context, "Cannot delete message. Set app as default SMS app.", Toast.LENGTH_SHORT).show()
+                                }
+                                selectedMessageForMenu = null
+                            },
+                            modifier = Modifier.fillMaxWidth()
+                        ) {
+                            Row(modifier = Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+                                Icon(Icons.Default.Delete, contentDescription = null, tint = MaterialTheme.colorScheme.error, modifier = Modifier.size(20.dp))
+                                Spacer(modifier = Modifier.width(12.dp))
+                                Text("Delete Message Completely", color = MaterialTheme.colorScheme.error, style = MaterialTheme.typography.bodyLarge)
+                            }
+                        }
+                    }
+                },
+                confirmButton = {
+                    TextButton(onClick = { selectedMessageForMenu = null }) {
+                        Text("Cancel")
+                    }
+                }
+            )
         }
 
         Spacer(modifier = Modifier.height(10.dp))
@@ -764,7 +858,8 @@ private fun MessageConversationPage(
 @Composable
 private fun ConversationMessageBubble(
     message: SmsConversationMessage,
-    bodyColor: Color
+    bodyColor: Color,
+    onLongPress: () -> Unit
 ) {
     val bubbleColor = if (message.isOutgoing) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.surfaceVariant
     val bubbleTextColor = if (message.isOutgoing) MaterialTheme.colorScheme.onPrimary else MaterialTheme.colorScheme.onSurface
@@ -774,7 +869,12 @@ private fun ConversationMessageBubble(
         horizontalArrangement = if (message.isOutgoing) Arrangement.End else Arrangement.Start
     ) {
         Surface(
-            modifier = Modifier.fillMaxWidth(0.85f),
+            modifier = Modifier
+                .fillMaxWidth(0.85f)
+                .combinedClickable(
+                    onClick = { onLongPress() },
+                    onLongClick = { onLongPress() }
+                ),
             shape = RoundedCornerShape(
                 topStart = 22.dp,
                 topEnd = 22.dp,
@@ -788,7 +888,9 @@ private fun ConversationMessageBubble(
                     text = message.body,
                     textColor = bubbleTextColor,
                     linkColor = if (message.isOutgoing) Color(0xFF93C5FD) else Color(0xFF2563EB),
-                    style = MaterialTheme.typography.bodyLarge
+                    style = MaterialTheme.typography.bodyLarge,
+                    onMessageClick = onLongPress,
+                    onMessageLongClick = onLongPress
                 )
                 Spacer(modifier = Modifier.height(4.dp))
                 Text(

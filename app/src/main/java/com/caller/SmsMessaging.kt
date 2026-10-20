@@ -2,6 +2,7 @@ package com.caller
 
 import android.Manifest
 import android.app.role.RoleManager
+import android.content.ContentUris
 import android.content.ContentValues
 import android.content.Context
 import android.content.Intent
@@ -12,6 +13,7 @@ import android.provider.Telephony
 import android.telephony.SmsManager
 import android.telephony.SmsMessage
 import android.util.Base64
+import android.util.Log
 import androidx.core.content.ContextCompat
 import java.util.Locale
 
@@ -243,6 +245,48 @@ fun loadSmsConversation(
     }
 
     return messages.asReversed()
+}
+
+fun deleteSmsMessage(context: Context, messageId: String): Boolean {
+    return try {
+        if (!isDefaultSmsApp(context)) {
+            Log.w("SmsMessaging", "deleteSmsMessage failed: App is not default SMS app")
+            return false
+        }
+        val uri = ContentUris.withAppendedId(Telephony.Sms.CONTENT_URI, messageId.toLong())
+        val deletedRows = context.contentResolver.delete(uri, null, null)
+        Log.w("SmsMessaging", "deleteSmsMessage id=$messageId deletedRows=$deletedRows")
+        if (deletedRows > 0) {
+            notifySmsThreadsChanged(context)
+            true
+        } else {
+            false
+        }
+    } catch (e: Exception) {
+        Log.e("SmsMessaging", "Error deleting SMS message id=$messageId", e)
+        false
+    }
+}
+
+fun deleteSmsThread(context: Context, threadId: String): Boolean {
+    return try {
+        if (!isDefaultSmsApp(context)) {
+            Log.w("SmsMessaging", "deleteSmsThread failed: App is not default SMS app")
+            return false
+        }
+        val uri = ContentUris.withAppendedId(Telephony.Threads.CONTENT_URI, threadId.toLong())
+        val deletedRows = context.contentResolver.delete(uri, null, null)
+        Log.w("SmsMessaging", "deleteSmsThread threadId=$threadId deletedRows=$deletedRows")
+        if (deletedRows > 0) {
+            notifySmsThreadsChanged(context)
+            true
+        } else {
+            false
+        }
+    } catch (e: Exception) {
+        Log.e("SmsMessaging", "Error deleting SMS threadId=$threadId", e)
+        false
+    }
 }
 
 fun sendSmsMessage(context: Context, rawAddress: String, rawBody: String): Result<Unit> {
