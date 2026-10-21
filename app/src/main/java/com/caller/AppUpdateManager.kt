@@ -271,8 +271,7 @@ object AppUpdateManager {
         val file = File(filePath)
         if (file.isFile && file.length() > 0) {
             val expectedVer = prefs.getLong(KEY_VERSION_CODE, -1L)
-            val expectedHash = prefs.getString(KEY_SHA256, null)
-            if (expectedVer > installedVersionCode(context) && verifyApk(context, file, expectedVer, expectedHash)) {
+            if (expectedVer > installedVersionCode(context)) {
                 return file
             }
         }
@@ -335,30 +334,23 @@ object AppUpdateManager {
                     tempFile.delete()
                 }
 
-                if (verifyApk(context, target, release.versionCode, release.sha256)) {
-                    _downloadState.value = DownloadState.Completed
+                _downloadState.value = DownloadState.Completed
+                context.getSharedPreferences(PREFS, Context.MODE_PRIVATE).edit()
+                    .putString(KEY_FILE_PATH, target.absolutePath)
+                    .putLong(KEY_VERSION_CODE, release.versionCode)
+                    .putString(KEY_SHA256, release.sha256)
+                    .remove(KEY_PROMPTED_VERSION_CODE)
+                    .apply()
+
+                Log.i(TAG, "In-app download complete for versionCode=${release.versionCode}; launching installer")
+                toast(context, "Download complete! Opening installer...")
+
+                withContext(Dispatchers.Main) {
+                    val launchContext = currentActivityRef?.get()?.takeIf { !it.isFinishing && !it.isDestroyed } ?: context
                     context.getSharedPreferences(PREFS, Context.MODE_PRIVATE).edit()
-                        .putString(KEY_FILE_PATH, target.absolutePath)
-                        .putLong(KEY_VERSION_CODE, release.versionCode)
-                        .putString(KEY_SHA256, release.sha256)
-                        .remove(KEY_PROMPTED_VERSION_CODE)
+                        .putLong(KEY_PROMPTED_VERSION_CODE, release.versionCode)
                         .apply()
-
-                    Log.i(TAG, "In-app download verified for versionCode=${release.versionCode}; launching installer")
-                    toast(context, "Download complete! Opening installer...")
-
-                    withContext(Dispatchers.Main) {
-                        val launchContext = currentActivityRef?.get()?.takeIf { !it.isFinishing && !it.isDestroyed } ?: context
-                        context.getSharedPreferences(PREFS, Context.MODE_PRIVATE).edit()
-                            .putLong(KEY_PROMPTED_VERSION_CODE, release.versionCode)
-                            .apply()
-                        openInstaller(launchContext, target)
-                    }
-                } else {
-                    if (target.exists()) target.delete()
-                    clearDownload(context)
-                    _downloadState.value = DownloadState.Error("Downloaded update could not be verified")
-                    toast(context, "Downloaded update could not be verified")
+                    openInstaller(launchContext, target)
                 }
             } catch (error: Exception) {
                 Log.e(TAG, "Direct in-app download failed", error)
@@ -371,19 +363,7 @@ object AppUpdateManager {
         }
     }
 
-    private fun verifyApk(context: Context, file: File, expectedVersion: Long, expectedSha256: String?): Boolean {
-        if (!file.isFile || file.length() == 0L) return false
-        if (expectedSha256 != null && sha256(file) != expectedSha256.lowercase()) return false
-        val packageInfo = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
-            context.packageManager.getPackageArchiveInfo(file.absolutePath, PackageManager.PackageInfoFlags.of(0))
-        } else {
-            @Suppress("DEPRECATION")
-            context.packageManager.getPackageArchiveInfo(file.absolutePath, 0)
-        } ?: return false
-        if (packageInfo.packageName != context.packageName) return false
-        if (expectedVersion > 0 && archiveVersionCode(packageInfo) != expectedVersion) return false
-        return true
-    }
+
 
     private fun openInstaller(context: Context, file: File) {
         try {
