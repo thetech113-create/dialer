@@ -44,11 +44,13 @@
     <uses-feature android:name="android.hardware.telephony" android:required="false" />
     <uses-feature android:name="android.software.telecom" android:required="true"/>
 
-    <!-- Required on Android 11+ (API 30+) so TextToSpeech can bind to the system TTS engine -->
+    <!-- Required for TargetSDK 35 so TextToSpeech can bind to Google TTS on Samsung devices -->
     <queries>
         <intent>
             <action android:name="android.intent.action.TTS_SERVICE" />
         </intent>
+        <package android:name="com.google.android.tts" />
+        <package android:name="com.samsung.SMT" />
     </queries>
 
     <application

@@ -1,7 +1,10 @@
 package com.caller
 
 import android.Manifest
+import android.content.BroadcastReceiver
 import android.content.Context
+import android.content.Intent
+import android.content.IntentFilter
 import android.content.pm.PackageManager
 import android.media.AudioAttributes
 import android.media.AudioFocusRequest
@@ -10,9 +13,11 @@ import android.os.Build
 import android.os.Bundle
 import android.os.Handler
 import android.os.Looper
+import android.os.SystemClock
 import android.provider.ContactsContract
 import android.speech.tts.TextToSpeech
 import android.speech.tts.UtteranceProgressListener
+import android.speech.tts.Voice
 import android.telephony.TelephonyManager
 import android.util.Log
 import androidx.compose.foundation.background
@@ -71,6 +76,7 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.core.content.ContextCompat
+import com.caller.logging.UltraForensicLogger
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import org.json.JSONArray
@@ -98,20 +104,31 @@ data class SelectableSavedContact(
 
 object CallerAnnouncementManager {
     private const val TAG = "CallerAnnouncementManager"
+    private const val FORENSIC_COMP = "CallerAnnouncement"
     private const val PREFS_NAME = "caller_announcement_prefs"
     private const val KEY_ENABLED = "announcements_enabled"
     private const val KEY_ALIAS_RULES_JSON = "custom_alias_rules_v2_json"
     private const val NAME_KEY_PREFIX = "name_alias:"
-    private const val REPEAT_DELAY_MS = 3500L
+    private const val GOOGLE_TTS_PACKAGE = "com.google.android.tts"
+    private const val REPEAT_DELAY_MS = 3200L
+    private const val DEDUP_DISPATCH_WINDOW_MS = 2800L
 
     private val mainHandler = Handler(Looper.getMainLooper())
     private var tts: TextToSpeech? = null
     private var isTtsInitialized = false
     private var isTtsInitializing = false
     private var isPlaying = false
+    private var receiverRegistered = false
+    private var useSamsungAccessibilityFallback = false
 
     @Volatile
     private var pendingTextToSpeak: String? = null
+
+    @Volatile
+    private var lastDispatchedText: String? = null
+
+    @Volatile
+    private var lastSpeakDispatchElapsedMs: Long = 0L
 
     @Volatile
     private var shouldKeepAnnouncing = false
@@ -119,9 +136,23 @@ object CallerAnnouncementManager {
     private var appContextRef: Context? = null
     private var activeFocusRequest: AudioFocusRequest? = null
 
-    private val speechAudioAttributes: AudioAttributes by lazy {
+    private val ringAudioAttributes: AudioAttributes by lazy {
         AudioAttributes.Builder()
             .setUsage(AudioAttributes.USAGE_NOTIFICATION_RINGTONE)
+            .setContentType(AudioAttributes.CONTENT_TYPE_SPEECH)
+            .build()
+    }
+
+    private val samsungFallbackAudioAttributes: AudioAttributes by lazy {
+        AudioAttributes.Builder()
+            .setUsage(AudioAttributes.USAGE_ASSISTANCE_ACCESSIBILITY)
+            .setContentType(AudioAttributes.CONTENT_TYPE_SPEECH)
+            .build()
+    }
+
+    private val focusAudioAttributes: AudioAttributes by lazy {
+        AudioAttributes.Builder()
+            .setUsage(AudioAttributes.USAGE_ASSISTANCE_NAVIGATION_GUIDANCE)
             .setContentType(AudioAttributes.CONTENT_TYPE_SPEECH)
             .build()
     }
@@ -134,12 +165,63 @@ object CallerAnnouncementManager {
                 stop()
                 return
             }
-            speakInternal(ctx, text)
+            speakInternal(ctx, text, forceAudiblePreview = false)
+        }
+    }
+
+    private val callStateReceiver = object : BroadcastReceiver() {
+        override fun onReceive(context: Context?, intent: Intent?) {
+            val ctx = context?.applicationContext ?: context ?: return
+            when (intent?.action) {
+                "SILENCE_RINGTONE", "FINISH_CALL_ACTIVITY" -> {
+                    UltraForensicLogger.info(FORENSIC_COMP, "STOP_SIGNAL", "Received ${intent.action}")
+                    stop()
+                }
+                "CALL_STATE_UPDATED" -> {
+                    val isInCall = intent.getBooleanExtra("IS_IN_CALL", false)
+                    val primaryState = intent.getStringExtra("PRIMARY_STATE").orEmpty()
+                    val primaryNumber = intent.getStringExtra("PRIMARY_NUMBER").orEmpty()
+                    val primaryName = intent.getStringExtra("PRIMARY_NAME").orEmpty()
+
+                    if (isInCall && (primaryState == "RINGING" || primaryState == "NEW")) {
+                        announceIncomingCaller(
+                            context = ctx,
+                            phoneNumber = primaryNumber,
+                            contactName = primaryName
+                        )
+                    } else if (!isInCall || (primaryState.isNotBlank() && primaryState != "RINGING" && primaryState != "NEW")) {
+                        stop()
+                    }
+                }
+            }
+        }
+    }
+
+    private fun safeAppContext(context: Context): Context {
+        return context.applicationContext ?: context
+    }
+
+    private fun registerCallReceiverIfNeeded(context: Context) {
+        if (receiverRegistered) return
+        runCatching {
+            val appCtx = safeAppContext(context)
+            val filter = IntentFilter().apply {
+                addAction("CALL_STATE_UPDATED")
+                addAction("SILENCE_RINGTONE")
+                addAction("FINISH_CALL_ACTIVITY")
+            }
+            ContextCompat.registerReceiver(
+                appCtx,
+                callStateReceiver,
+                filter,
+                ContextCompat.RECEIVER_NOT_EXPORTED
+            )
+            receiverRegistered = true
         }
     }
 
     private fun prefsContext(context: Context): Context {
-        return DirectBootCallManager.getDirectBootContext(context.applicationContext)
+        return DirectBootCallManager.getDirectBootContext(safeAppContext(context))
     }
 
     fun isEnabled(context: Context): Boolean {
@@ -150,78 +232,195 @@ object CallerAnnouncementManager {
     fun setEnabled(context: Context, enabled: Boolean) {
         val prefs = prefsContext(context).getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
         prefs.edit().putBoolean(KEY_ENABLED, enabled).apply()
+        UltraForensicLogger.info(FORENSIC_COMP, "SETTING_CHANGED", "enabled=$enabled")
         if (!enabled) stop()
     }
 
-    fun init(context: Context) {
-        val appCtx = context.applicationContext
+    @JvmOverloads
+    fun init(context: Context, useDefaultEngineFallback: Boolean = false) {
+        val appCtx = safeAppContext(context)
         appContextRef = appCtx
+        registerCallReceiverIfNeeded(appCtx)
+
         if (tts != null && (isTtsInitialized || isTtsInitializing)) return
 
         isTtsInitializing = true
-        runCatching {
-            tts = TextToSpeech(appCtx) { status ->
-                mainHandler.post {
-                    isTtsInitializing = false
-                    if (status == TextToSpeech.SUCCESS) {
-                        val engine = tts ?: return@post
-                        isTtsInitialized = true
-                        val localeResult = engine.setLanguage(Locale.getDefault())
-                        if (localeResult == TextToSpeech.LANG_MISSING_DATA ||
-                            localeResult == TextToSpeech.LANG_NOT_SUPPORTED
-                        ) {
-                            engine.setLanguage(Locale.US)
+        // Always try binding directly to Google TTS first (fixes Samsung com.samsung.SMT silence bug)
+        val tryGoogleEngineFirst = !useDefaultEngineFallback
+        UltraForensicLogger.info(
+            FORENSIC_COMP,
+            "TTS_INIT_START",
+            "tryGoogleEngineFirst=$tryGoogleEngineFirst manufacturer=${Build.MANUFACTURER}"
+        )
+
+        val initListener = TextToSpeech.OnInitListener { status ->
+            mainHandler.post {
+                isTtsInitializing = false
+                if (status == TextToSpeech.SUCCESS) {
+                    val engine = tts ?: return@post
+                    isTtsInitialized = true
+
+                    configureInstalledVoiceAndLanguage(engine)
+                    engine.setPitch(1.0f)
+                    engine.setSpeechRate(1.0f)
+                    engine.setAudioAttributes(
+                        if (useSamsungAccessibilityFallback) samsungFallbackAudioAttributes else ringAudioAttributes
+                    )
+
+                    engine.setOnUtteranceProgressListener(object : UtteranceProgressListener() {
+                        override fun onStart(utteranceId: String?) {
+                            isPlaying = true
+                            UltraForensicLogger.info(FORENSIC_COMP, "UTTERANCE_START", "id=$utteranceId")
                         }
-                        engine.setSpeechRate(0.92f)
-                        engine.setAudioAttributes(speechAudioAttributes)
-                        engine.setOnUtteranceProgressListener(object : UtteranceProgressListener() {
-                            override fun onStart(utteranceId: String?) {
-                                isPlaying = true
-                            }
 
-                            override fun onDone(utteranceId: String?) {
-                                isPlaying = false
-                                abandonAudioFocus(appCtx)
-                                mainHandler.removeCallbacks(repeatRunnable)
-                                if (shouldKeepAnnouncing && isDeviceStillRinging(appCtx)) {
-                                    mainHandler.postDelayed(repeatRunnable, REPEAT_DELAY_MS)
-                                }
+                        override fun onDone(utteranceId: String?) {
+                            isPlaying = false
+                            abandonAudioFocus(appCtx)
+                            UltraForensicLogger.info(
+                                FORENSIC_COMP,
+                                "UTTERANCE_DONE",
+                                "id=$utteranceId keepAnnouncing=$shouldKeepAnnouncing"
+                            )
+                            mainHandler.removeCallbacks(repeatRunnable)
+                            if (shouldKeepAnnouncing && isDeviceStillRinging(appCtx)) {
+                                mainHandler.postDelayed(repeatRunnable, REPEAT_DELAY_MS)
                             }
-
-                            @Deprecated("Deprecated in Java")
-                            override fun onError(utteranceId: String?) {
-                                isPlaying = false
-                                abandonAudioFocus(appCtx)
-                            }
-
-                            override fun onError(utteranceId: String?, errorCode: Int) {
-                                isPlaying = false
-                                abandonAudioFocus(appCtx)
-                            }
-                        })
-                        Log.w(TAG, "TTS initialized successfully")
-
-                        val queued = pendingTextToSpeak
-                        if (!queued.isNullOrBlank()) {
-                            speakInternal(appCtx, queued)
                         }
-                    } else {
-                        isTtsInitialized = false
-                        tts = null
-                        Log.e(TAG, "TTS initialization failed: status=$status")
+
+                        @Deprecated("Deprecated in Java")
+                        override fun onError(utteranceId: String?) {
+                            handleUtteranceError(appCtx, utteranceId, -1)
+                        }
+
+                        override fun onError(utteranceId: String?, errorCode: Int) {
+                            handleUtteranceError(appCtx, utteranceId, errorCode)
+                        }
+                    })
+
+                    UltraForensicLogger.info(
+                        FORENSIC_COMP,
+                        "TTS_INIT_SUCCESS",
+                        "defaultEngine=${ runCatching { engine.defaultEngine }.getOrDefault("unknown") }"
+                    )
+
+                    val queued = pendingTextToSpeak
+                    if (!queued.isNullOrBlank()) {
+                        speakInternal(appCtx, queued, forceAudiblePreview = !shouldKeepAnnouncing)
+                    }
+                } else {
+                    isTtsInitialized = false
+                    runCatching { tts?.shutdown() }
+                    tts = null
+                    UltraForensicLogger.forensic(
+                        FORENSIC_COMP,
+                        "TTS_INIT_FAILED",
+                        "status=$status tryGoogleEngineFirst=$tryGoogleEngineFirst"
+                    )
+                    // If Google TTS failed to bind (e.g. disabled on device), fall back to system default engine
+                    if (tryGoogleEngineFirst) {
+                        init(appCtx, useDefaultEngineFallback = true)
                     }
                 }
+            }
+        }
+
+        runCatching {
+            tts = if (tryGoogleEngineFirst) {
+                TextToSpeech(appCtx, initListener, GOOGLE_TTS_PACKAGE)
+            } else {
+                TextToSpeech(appCtx, initListener)
             }
         }.onFailure { e ->
             isTtsInitializing = false
             isTtsInitialized = false
-            Log.e(TAG, "TTS constructor failed: ${e.message}", e)
+            tts = null
+            UltraForensicLogger.deepest(FORENSIC_COMP, "TTS_CONSTRUCTOR_EXCEPTION", e.message.orEmpty(), e)
+            if (tryGoogleEngineFirst) {
+                init(appCtx, useDefaultEngineFallback = true)
+            }
         }
     }
 
     /**
-     * Loads all configured per-contact announcement rules.
+     * Selects a verified installed voice on disk so Samsung devices with Locale en_IN
+     * never fail silently due to KEY_FEATURE_NOT_INSTALLED.
      */
+    private fun configureInstalledVoiceAndLanguage(engine: TextToSpeech) {
+        val preferredLocales = listOf(
+            Locale("en", "IN"),
+            Locale.getDefault(),
+            Locale.UK,
+            Locale.US
+        )
+
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.LOLLIPOP) {
+            val installedVoice: Voice? = runCatching {
+                val allVoices = engine.voices ?: emptySet()
+                val installedVoices = allVoices.filter { voice ->
+                    val features = voice.features ?: emptySet()
+                    !features.contains(TextToSpeech.Engine.KEY_FEATURE_NOT_INSTALLED) &&
+                        voice.locale != null &&
+                        voice.locale.language.equals("en", ignoreCase = true)
+                }
+                // Prefer offline installed voice matching en_IN -> default -> en_GB -> en_US
+                installedVoices.firstOrNull { v ->
+                    !v.isNetworkConnectionRequired &&
+                        v.locale.country.equals("IN", ignoreCase = true)
+                } ?: installedVoices.firstOrNull { v ->
+                    !v.isNetworkConnectionRequired &&
+                        v.locale.country.equals(Locale.getDefault().country, ignoreCase = true)
+                } ?: installedVoices.firstOrNull { v ->
+                    !v.isNetworkConnectionRequired
+                } ?: installedVoices.firstOrNull()
+            }.getOrNull()
+
+            if (installedVoice != null) {
+                val voiceResult = runCatching { engine.setVoice(installedVoice) }.getOrDefault(TextToSpeech.ERROR)
+                if (voiceResult == TextToSpeech.SUCCESS) {
+                    UltraForensicLogger.info(
+                        FORENSIC_COMP,
+                        "VOICE_SELECTED",
+                        "name=${installedVoice.name} locale=${installedVoice.locale}"
+                    )
+                    return
+                }
+            }
+        }
+
+        for (candidate in preferredLocales) {
+            val avail = runCatching { engine.isLanguageAvailable(candidate) }.getOrDefault(TextToSpeech.LANG_NOT_SUPPORTED)
+            if (avail >= TextToSpeech.LANG_AVAILABLE) {
+                val setRes = runCatching { engine.setLanguage(candidate) }.getOrDefault(TextToSpeech.ERROR)
+                if (setRes >= TextToSpeech.LANG_AVAILABLE) {
+                    UltraForensicLogger.info(FORENSIC_COMP, "LOCALE_SELECTED", "locale=$candidate result=$setRes")
+                    return
+                }
+            }
+        }
+        runCatching { engine.setLanguage(Locale.US) }
+    }
+
+    private fun handleUtteranceError(context: Context, utteranceId: String?, errorCode: Int) {
+        isPlaying = false
+        abandonAudioFocus(context)
+        UltraForensicLogger.forensic(
+            FORENSIC_COMP,
+            "UTTERANCE_ERROR",
+            "id=$utteranceId errorCode=$errorCode samsungFallback=$useSamsungAccessibilityFallback"
+        )
+        // If Samsung blocked STREAM_RING during ringing, switch to accessibility speech attributes and retry once
+        if (!useSamsungAccessibilityFallback && Build.MANUFACTURER.equals("samsung", ignoreCase = true)) {
+            useSamsungAccessibilityFallback = true
+            val text = pendingTextToSpeak
+            if (!text.isNullOrBlank() && shouldKeepAnnouncing) {
+                lastSpeakDispatchElapsedMs = 0L
+                mainHandler.postDelayed({
+                    speakInternal(context, text, forceAudiblePreview = false)
+                }, 150L)
+            }
+        }
+    }
+
     fun getAllCustomAliases(context: Context): List<CallerSpokenAlias> {
         val prefs = prefsContext(context).getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
         val rawJson = prefs.getString(KEY_ALIAS_RULES_JSON, null).orEmpty()
@@ -261,9 +460,6 @@ object CallerAnnouncementManager {
         }.getOrDefault(emptyList())
     }
 
-    /**
-     * Saves or updates a custom announcement setting for a selected saved contact (including all of their numbers).
-     */
     fun saveCustomContactRule(
         context: Context,
         contactId: String,
@@ -344,7 +540,6 @@ object CallerAnnouncementManager {
                     put("enabled", rule.enabled)
                 }
             )
-            // Only index active/enabled rules into fast lookup keys
             if (rule.enabled) {
                 rule.phoneNumbers.forEach { rawNum ->
                     if (rawNum.isNotBlank()) {
@@ -367,9 +562,7 @@ object CallerAnnouncementManager {
         editor.apply()
     }
 
-    /**
-     * Resolves a custom alias by phone number OR by saved contact name (e.g. "Hamsa" -> "Amma").
-     */
+    @JvmOverloads
     fun getAlias(context: Context, rawOrNormalizedNumber: String, contactName: String? = null): String {
         val prefs = prefsContext(context).getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
 
@@ -433,40 +626,51 @@ object CallerAnnouncementManager {
         return "Incoming call from $cleaned"
     }
 
-    /**
-     * Resolves Custom Spoken Alias ("Amma") -> Saved Contact Name ("Hamsa") -> Spoken Phone Number,
-     * and announces "Incoming call from <Name>".
-     */
     fun announceIncomingCaller(
         context: Context,
         phoneNumber: String,
         contactName: String? = null
     ) {
-        if (!isEnabled(context)) return
-
-        val customAlias = getAlias(context, phoneNumber, contactName)
-        val cleanContact = contactName?.trim().orEmpty().takeUnless {
-            it.isBlank() || it.equals("Unknown", ignoreCase = true)
+        val appCtx = safeAppContext(context)
+        if (!isEnabled(appCtx)) {
+            UltraForensicLogger.info(FORENSIC_COMP, "SKIP_DISABLED", "Caller announcement is disabled in prefs")
+            return
         }
+
+        val resolvedContactName = contactName?.trim()?.takeUnless {
+            it.isBlank() || it.equals("Unknown", ignoreCase = true) || it == phoneNumber.trim()
+        } ?: if (phoneNumber.isNotBlank()) {
+            DirectBootCallManager.getDpsContactName(appCtx, phoneNumber).takeUnless {
+                it.isBlank() || it.equals("Unknown", ignoreCase = true)
+            }
+        } else {
+            null
+        }
+
+        val customAlias = getAlias(appCtx, phoneNumber, resolvedContactName)
         val spokenIdentity = when {
             customAlias.isNotBlank() -> customAlias
-            !cleanContact.isNullOrBlank() -> cleanContact
+            !resolvedContactName.isNullOrBlank() -> resolvedContactName
             phoneNumber.isNotBlank() -> formatNumberForSpeech(phoneNumber)
             else -> "Unknown caller"
         }
-        announce(context, spokenIdentity, repeatWhileRinging = true)
+
+        UltraForensicLogger.info(
+            FORENSIC_COMP,
+            "ANNOUNCE_RESOLVED",
+            "hasCustomAlias=${customAlias.isNotBlank()} hasContact=${!resolvedContactName.isNullOrBlank()} spokenIdentity=$spokenIdentity"
+        )
+        announce(appCtx, spokenIdentity, repeatWhileRinging = true)
     }
 
-    /**
-     * Plays a single preview ("Incoming call from Amma") when testing in Settings.
-     */
     fun testAnnouncementPreview(context: Context, spokenAlias: String) {
         val cleaned = spokenAlias.trim().ifBlank { "Amma" }
         val text = buildIncomingCallAnnouncementPhrase(cleaned)
-        val appCtx = context.applicationContext
+        val appCtx = safeAppContext(context)
         appContextRef = appCtx
         pendingTextToSpeak = text
         shouldKeepAnnouncing = false
+        lastSpeakDispatchElapsedMs = 0L
         mainHandler.removeCallbacks(repeatRunnable)
 
         mainHandler.post {
@@ -478,34 +682,50 @@ object CallerAnnouncementManager {
         }
     }
 
+    @JvmOverloads
     fun announce(context: Context, nameOrAlias: String, repeatWhileRinging: Boolean = true) {
-        val appCtx = context.applicationContext
+        val appCtx = safeAppContext(context)
         appContextRef = appCtx
+        registerCallReceiverIfNeeded(appCtx)
+
         if (!isEnabled(appCtx)) return
 
         val cleaned = nameOrAlias.trim()
         if (cleaned.isEmpty()) return
 
         if (!isRingerAudible(appCtx)) {
-            Log.w(TAG, "Skipping caller announcement: silent/vibrate mode")
+            UltraForensicLogger.info(
+                FORENSIC_COMP,
+                "SKIP_SILENT_RINGER",
+                "Ringer mode is silent/vibrate and no headset connected"
+            )
             return
         }
 
         val fullText = buildIncomingCallAnnouncementPhrase(cleaned)
+        val nowElapsed = SystemClock.elapsedRealtime()
 
-        val isSameTextAlreadyRunning = shouldKeepAnnouncing && pendingTextToSpeak == fullText && isPlaying
+        // CRITICAL FIX: Prevent rapid duplicate CALL_STATE_UPDATED / Compose recompositions
+        // from calling QUEUE_FLUSH and cancelling in-flight synthesis before onStart() fires!
+        val isDuplicateInFlight = shouldKeepAnnouncing &&
+            pendingTextToSpeak == fullText &&
+            (isPlaying || isTtsInitializing ||
+                (lastDispatchedText == fullText && (nowElapsed - lastSpeakDispatchElapsedMs) < DEDUP_DISPATCH_WINDOW_MS))
+
         pendingTextToSpeak = fullText
         shouldKeepAnnouncing = repeatWhileRinging
 
-        if (isSameTextAlreadyRunning) return
+        if (isDuplicateInFlight) {
+            return
+        }
 
         mainHandler.post {
             if (!isTtsInitialized || tts == null) {
-                Log.w(TAG, "TTS not ready yet; queueing announcement: $fullText")
+                UltraForensicLogger.info(FORENSIC_COMP, "QUEUE_PENDING_INIT", "text=$fullText")
                 init(appCtx)
                 return@post
             }
-            speakInternal(appCtx, fullText)
+            speakInternal(appCtx, fullText, forceAudiblePreview = false)
         }
     }
 
@@ -513,20 +733,48 @@ object CallerAnnouncementManager {
         if (!forceAudiblePreview && (!shouldKeepAnnouncing || !isRingerAudible(context))) return
         val engine = tts ?: return
 
-        requestAudioFocusWithDucking(context)
-        engine.setAudioAttributes(speechAudioAttributes)
+        lastDispatchedText = text
+        lastSpeakDispatchElapsedMs = SystemClock.elapsedRealtime()
 
-        val params = Bundle().apply {
-            putInt(TextToSpeech.Engine.KEY_PARAM_STREAM, AudioManager.STREAM_RING)
-            putFloat(TextToSpeech.Engine.KEY_PARAM_VOLUME, 1.0f)
+        requestAudioFocusWithDucking(context)
+        engine.setPitch(1.0f)
+        engine.setSpeechRate(1.0f)
+
+        val targetAttributes = if (useSamsungAccessibilityFallback) {
+            samsungFallbackAudioAttributes
+        } else {
+            ringAudioAttributes
+        }
+        val targetStream = if (useSamsungAccessibilityFallback) {
+            AudioManager.STREAM_NOTIFICATION
+        } else {
+            AudioManager.STREAM_RING
         }
 
-        engine.speak(
+        engine.setAudioAttributes(targetAttributes)
+
+        val utteranceId = "incoming_call_${System.currentTimeMillis()}"
+        val params = Bundle().apply {
+            putInt(TextToSpeech.Engine.KEY_PARAM_STREAM, targetStream)
+            putFloat(TextToSpeech.Engine.KEY_PARAM_VOLUME, 1.0f)
+            putString(TextToSpeech.Engine.KEY_PARAM_UTTERANCE_ID, utteranceId)
+        }
+
+        val speakResult = engine.speak(
             text,
             TextToSpeech.QUEUE_FLUSH,
             params,
-            "incoming_call_${System.currentTimeMillis()}"
+            utteranceId
         )
+        UltraForensicLogger.info(
+            FORENSIC_COMP,
+            "SPEAK_DISPATCHED",
+            "result=$speakResult stream=$targetStream text=$text utteranceId=$utteranceId"
+        )
+
+        if (speakResult == TextToSpeech.ERROR) {
+            handleUtteranceError(context, utteranceId, TextToSpeech.ERROR)
+        }
     }
 
     private fun isRingerAudible(context: Context): Boolean {
@@ -534,7 +782,21 @@ object CallerAnnouncementManager {
             val am = context.getSystemService(Context.AUDIO_SERVICE) as? AudioManager ?: return true
             val ringerNormal = am.ringerMode == AudioManager.RINGER_MODE_NORMAL
             val ringVolume = am.getStreamVolume(AudioManager.STREAM_RING)
-            ringerNormal && ringVolume > 0
+            if (ringerNormal && ringVolume > 0) return true
+
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
+                val outputs = am.getDevices(AudioManager.GET_DEVICES_OUTPUTS)
+                val hasHeadset = outputs.any {
+                    it.type == android.media.AudioDeviceInfo.TYPE_BLUETOOTH_A2DP ||
+                        it.type == android.media.AudioDeviceInfo.TYPE_BLUETOOTH_SCO ||
+                        it.type == android.media.AudioDeviceInfo.TYPE_WIRED_HEADSET ||
+                        it.type == android.media.AudioDeviceInfo.TYPE_WIRED_HEADPHONES ||
+                        it.type == android.media.AudioDeviceInfo.TYPE_USB_HEADSET ||
+                        it.type == android.media.AudioDeviceInfo.TYPE_BLE_HEADSET
+                }
+                if (hasHeadset) return true
+            }
+            false
         } catch (_: Exception) {
             true
         }
@@ -559,8 +821,9 @@ object CallerAnnouncementManager {
             val am = context.getSystemService(Context.AUDIO_SERVICE) as? AudioManager ?: return
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
                 val req = AudioFocusRequest.Builder(AudioManager.AUDIOFOCUS_GAIN_TRANSIENT_MAY_DUCK)
-                    .setAudioAttributes(speechAudioAttributes)
+                    .setAudioAttributes(focusAudioAttributes)
                     .setAcceptsDelayedFocusGain(false)
+                    .setWillPauseWhenDucked(false)
                     .setOnAudioFocusChangeListener {}
                     .build()
                 activeFocusRequest = req
@@ -602,6 +865,8 @@ object CallerAnnouncementManager {
     fun stop() {
         shouldKeepAnnouncing = false
         pendingTextToSpeak = null
+        lastDispatchedText = null
+        lastSpeakDispatchElapsedMs = 0L
         mainHandler.removeCallbacks(repeatRunnable)
         mainHandler.post {
             runCatching {
@@ -687,12 +952,6 @@ private val QUICK_SPOKEN_PRESETS = listOf(
     "Amma", "Appa", "Akka", "Anna", "Ajji", "Home", "Boss"
 )
 
-/**
- * Settings Card:
- * - Master Enable/Disable Switch
- * - Multiple Saved Contacts with individual custom spoken names & per-contact ON/OFF toggles
- * - Tap-to-Select Saved Contact Picker (no typing contact names or phone numbers)
- */
 @OptIn(ExperimentalLayoutApi::class)
 @Composable
 fun CallerAnnouncementSettingsCard(
@@ -709,6 +968,7 @@ fun CallerAnnouncementSettingsCard(
     var loadedFallbackContacts by remember { mutableStateOf<List<Contact>>(emptyList()) }
 
     LaunchedEffect(contacts) {
+        CallerAnnouncementManager.init(context)
         if (contacts.isEmpty()) {
             loadedFallbackContacts = withContext(Dispatchers.IO) {
                 queryDeviceContactsFallback(context)
@@ -785,15 +1045,15 @@ fun CallerAnnouncementSettingsCard(
                 verticalAlignment = Alignment.CenterVertically,
                 horizontalArrangement = Arrangement.SpaceBetween
             ) {
-                Column(modifier = Modifier.weight(1f)) {
+                Column(modifier = Modifier.weight(1f).padding(end = 8.dp)) {
                     Text(
-                        text = "Custom Spoken Names",
+                        text = "Custom Contact Announcements",
                         style = MaterialTheme.typography.bodyLarge,
                         fontWeight = FontWeight.SemiBold,
                         color = MaterialTheme.colorScheme.onSurface
                     )
                     Text(
-                        text = "Example: Saved as \"Hamsa\" → says \"Amma is calling\"",
+                        text = "Select saved contacts and set a custom spoken name for each (e.g. Hamsa → \"Incoming call from Amma\")",
                         style = MaterialTheme.typography.bodySmall,
                         color = MaterialTheme.colorScheme.onSurfaceVariant
                     )
@@ -807,11 +1067,11 @@ fun CallerAnnouncementSettingsCard(
                 ) {
                     Icon(
                         imageVector = Icons.Default.Add,
-                        contentDescription = "Add custom spoken name",
+                        contentDescription = "Select contact",
                         modifier = Modifier.size(18.dp)
                     )
                     Spacer(modifier = Modifier.width(4.dp))
-                    Text("Add", fontSize = 13.sp)
+                    Text("Select Contact", fontSize = 13.sp)
                 }
             }
 
@@ -964,7 +1224,6 @@ fun CallerAnnouncementSettingsCard(
                 Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
                     val chosen = selectedContact
                     if (chosen == null) {
-                        // STEP 1: Tap to select directly from saved contacts (no manual typing of contact details)
                         OutlinedTextField(
                             value = searchFilter,
                             onValueChange = { searchFilter = it },
@@ -1014,7 +1273,6 @@ fun CallerAnnouncementSettingsCard(
                                             .fillMaxWidth()
                                             .clickable {
                                                 selectedContact = contactItem
-                                                // Pre-fill existing alias if this contact already has a rule
                                                 val existingForContact = customAliases.firstOrNull {
                                                     it.contactName.equals(contactItem.name, ignoreCase = true)
                                                 }
@@ -1064,7 +1322,6 @@ fun CallerAnnouncementSettingsCard(
                             }
                         }
                     } else {
-                        // STEP 2: Saved contact is selected -> Choose preset chip or enter spoken name
                         Surface(
                             modifier = Modifier.fillMaxWidth(),
                             shape = RoundedCornerShape(14.dp),
