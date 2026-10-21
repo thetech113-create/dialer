@@ -113,6 +113,12 @@
                 <category android:name="android.intent.category.DEFAULT" />
             </intent-filter>
 
+            <!-- POST_CALL intent filter: required by Telecom on Android 12+ / MIUI for call completion -->
+            <intent-filter>
+                <action android:name="android.telecom.action.POST_CALL" />
+                <category android:name="android.intent.category.DEFAULT" />
+            </intent-filter>
+
             <intent-filter>
                 <action android:name="android.intent.action.VIEW" />
                 <category android:name="android.intent.category.DEFAULT" />
@@ -240,7 +246,7 @@
             android:inheritShowWhenLocked="true"
             android:turnScreenOn="true"
             android:excludeFromRecents="true"
-            android:exported="false"
+            android:exported="true"
             android:taskAffinity=".CallUI"
             android:launchMode="singleInstance"
             android:configChanges="keyboard|keyboardHidden|orientation|screenSize|screenLayout|uiMode|density|smallestScreenSize|colorMode|fontScale|layoutDirection|locale" />

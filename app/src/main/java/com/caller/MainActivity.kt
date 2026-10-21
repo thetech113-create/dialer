@@ -913,6 +913,12 @@ class MainActivity : ComponentActivity() {
         UltraForensicLogger.init(this)
         requestWindowFeature(Window.FEATURE_NO_TITLE)
         super.onCreate(savedInstanceState)
+        if (intent?.action == "android.telecom.action.POST_CALL" ||
+            intent?.action == POWER_END_RECOVERY_ACTION
+        ) {
+            finishAndRemoveTask()
+            return
+        }
         actionBar?.hide()
         enableEdgeToEdge()
 
@@ -3233,6 +3239,21 @@ class MainActivity : ComponentActivity() {
     }
 
     private fun handleIncomingCallIntent() {
+        val currentIntent = intent ?: return
+        val action = currentIntent.action.orEmpty()
+
+        if (action == "android.telecom.action.POST_CALL" ||
+            action == POWER_END_RECOVERY_ACTION ||
+            action == "OPEN_RECENTS"
+        ) {
+            Log.w(P2P_FORENSIC_TAG, "Blocked post-call auto-launch intent action=$action")
+            setIntent(Intent(this, MainActivity::class.java))
+            if (!isMainActivityVisible) {
+                moveTaskToBack(true)
+            }
+            return
+        }
+
         intent?.let { intent ->
             if (isPhoneLauncherIntent(intent)) {
                 uiState = uiState.copy(

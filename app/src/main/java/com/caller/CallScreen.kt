@@ -1672,6 +1672,8 @@ class CallActivity : ComponentActivity() {
         }
         isFinishingCallUi = true
         MyInCallService.appWasOnScreenAtCallStart = false
+        CallBubbleOverlay.isCallActivityVisible = false
+        CallBubbleOverlay.hide(this)
         Log.w(CALL_UI_FORENSIC_TAG, "call_ui_finish reason=$reason finishAndRemoveTask")
         if (!isFinishing && !isDestroyed) {
             finishAndRemoveTask()
@@ -1679,23 +1681,24 @@ class CallActivity : ComponentActivity() {
     }
 
     private fun openInAppMainUi(reason: String) {
+        // Only open MainActivity when the user explicitly taps "Add call" during an active call
+        if (reason != "add_call") {
+            finishCallUiAfterCall("blocked_open_main_ui:$reason")
+            return
+        }
         Log.w(CALL_UI_FORENSIC_TAG, "call_ui_navigation action=open_main_ui reason=$reason")
         val intent = Intent(this, MainActivity::class.java).apply {
-            action = "OPEN_RECENTS"
+            action = "ADD_CALL_FROM_INCALL"
             addFlags(
                 Intent.FLAG_ACTIVITY_NEW_TASK or
-                Intent.FLAG_ACTIVITY_SINGLE_TOP or
+                    Intent.FLAG_ACTIVITY_SINGLE_TOP or
                     Intent.FLAG_ACTIVITY_CLEAR_TOP or
-                    Intent.FLAG_ACTIVITY_REORDER_TO_FRONT or
-                    Intent.FLAG_ACTIVITY_RESET_TASK_IF_NEEDED
+                    Intent.FLAG_ACTIVITY_REORDER_TO_FRONT
             )
         }
         startActivity(intent)
         @Suppress("DEPRECATION")
         overridePendingTransition(0, 0)
-        if (!isFinishing && !isDestroyed) {
-            finish()
-        }
     }
 
     private fun updateSeededCallState(intent: Intent?) {
@@ -1767,17 +1770,14 @@ class CallActivity : ComponentActivity() {
 
     override fun onNewIntent(intent: Intent?) {
         super.onNewIntent(intent)
+        isFinishingCallUi = false
         logCallActivityLifecycle("onNewIntent", "action=${intent?.action.orEmpty()}")
-        if (isTerminalHint(intent) || !hasLiveCall()) {
-            finishCallUiAfterCall("new_intent_no_live_call")
-            return
-        }
         // Update activity's intent so action checks in CallingScreen work
-        setIntent(intent) 
+        setIntent(intent)
         updateSeededCallState(intent)
         @Suppress("DEPRECATION")
         overridePendingTransition(0, 0)
-        
+
         // Keep the UI state fresh, but do not forcibly steal foreground focus on
         // every wake intent. That lets users switch to other apps during dialing.
         if (intent?.action == CALL_UI_ACTION_WAKE || intent?.action == Intent.ACTION_MAIN) {
@@ -1785,12 +1785,13 @@ class CallActivity : ComponentActivity() {
             MyInCallService.getInstance()?.forceUpdateUI()
         }
     }
-    
+
     override fun onCreate(savedInstanceState: Bundle?) {
         // 1. CRITICAL: Must be called BEFORE super.onCreate
         requestWindowFeature(android.view.Window.FEATURE_NO_TITLE)
-        
+
         super.onCreate(savedInstanceState)
+        isFinishingCallUi = false
         logCall("InCallActivity.onCreate hasActiveCall=${hasLiveCall()}")
         logCallActivityLifecycle("onCreate", "action=${intent?.action.orEmpty()}")
         @Suppress("DEPRECATION")
