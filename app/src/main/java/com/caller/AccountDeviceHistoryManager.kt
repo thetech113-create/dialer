@@ -3,6 +3,7 @@ package com.caller
 import android.content.Context
 import android.os.Build
 import android.util.Log
+import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
@@ -15,14 +16,19 @@ import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Add
+import androidx.compose.material.icons.filled.Delete
+import androidx.compose.material.icons.filled.Edit
+import androidx.compose.material.icons.filled.PhoneAndroid
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.Divider
 import androidx.compose.material3.Icon
+import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedTextField
+import androidx.compose.material3.Surface
 import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
@@ -33,8 +39,10 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import org.json.JSONArray
@@ -84,6 +92,11 @@ object AccountDeviceHistoryManager {
         return accId
     }
 
+    fun setAccountId(context: Context, accountId: String) {
+        if (accountId.isBlank()) return
+        getPrefs(context).edit().putString(KEY_ACCOUNT_ID, accountId.trim()).apply()
+    }
+
     fun getCurrentDeviceId(context: Context): String {
         val prefs = getPrefs(context)
         var devId = prefs.getString(KEY_DEVICE_ID, null)
@@ -131,12 +144,33 @@ object AccountDeviceHistoryManager {
         }
     }
 
+    fun removeVerifiedNumber(context: Context, number: String) {
+        val current = getVerifiedNumbers(context).filterNot { it == number.trim() }
+        val array = JSONArray(current)
+        getPrefs(context).edit().putString(KEY_VERIFIED_NUMBERS_JSON, array.toString()).apply()
+    }
+
     fun registerPeerDevice(context: Context, peer: AccountDeviceRegistration) {
         val prefs = getPrefs(context)
         val peers = getPeerDevices(context).toMutableList()
         peers.removeAll { it.deviceId == peer.deviceId }
         peers.add(peer)
 
+        val array = JSONArray()
+        peers.forEach { p ->
+            array.put(JSONObject().apply {
+                put("accountId", p.accountId)
+                put("deviceId", p.deviceId)
+                put("deviceName", p.deviceName)
+                put("verifiedNumbers", JSONArray(p.verifiedNumbers))
+            })
+        }
+        prefs.edit().putString(KEY_PEER_DEVICES_JSON, array.toString()).apply()
+    }
+
+    fun removePeerDevice(context: Context, deviceId: String) {
+        val prefs = getPrefs(context)
+        val peers = getPeerDevices(context).filterNot { it.deviceId == deviceId }
         val array = JSONArray()
         peers.forEach { p ->
             array.put(JSONObject().apply {
@@ -229,11 +263,25 @@ fun MultiDeviceSettingsCard(
     var filteringEnabled by remember {
         mutableStateOf(AccountDeviceHistoryManager.isFilteringEnabled(context))
     }
+    var accountId by remember {
+        mutableStateOf(AccountDeviceHistoryManager.getAccountId(context))
+    }
     var verifiedNumbers by remember {
         mutableStateOf(AccountDeviceHistoryManager.getVerifiedNumbers(context))
     }
+    var peerDevices by remember {
+        mutableStateOf(AccountDeviceHistoryManager.getPeerDevices(context))
+    }
+
+    var showEditAccountDialog by remember { mutableStateOf(false) }
+    var accountInput by remember { mutableStateOf(accountId) }
+
     var showAddNumberDialog by remember { mutableStateOf(false) }
     var newNumberInput by remember { mutableStateOf("") }
+
+    var showAddPeerDialog by remember { mutableStateOf(false) }
+    var peerNameInput by remember { mutableStateOf("") }
+    var peerNumberInput by remember { mutableStateOf("") }
 
     Card(
         modifier = modifier.fillMaxWidth(),
@@ -256,6 +304,46 @@ fun MultiDeviceSettingsCard(
 
             Spacer(modifier = Modifier.height(12.dp))
 
+            // 1. Account ID / Sign-In Status
+            Surface(
+                modifier = Modifier.fillMaxWidth(),
+                shape = RoundedCornerShape(16.dp),
+                color = MaterialTheme.colorScheme.primary.copy(alpha = 0.12f)
+            ) {
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(horizontal = 14.dp, vertical = 12.dp),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Column(modifier = Modifier.weight(1f)) {
+                        Text(
+                            text = "Account ID / Primary Number",
+                            style = MaterialTheme.typography.labelMedium,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                        Spacer(modifier = Modifier.height(2.dp))
+                        Text(
+                            text = formatPhoneNumberForDisplay(accountId),
+                            style = MaterialTheme.typography.bodyLarge,
+                            fontWeight = FontWeight.Bold,
+                            color = MaterialTheme.colorScheme.primary
+                        )
+                    }
+                    TextButton(onClick = {
+                        accountInput = accountId
+                        showEditAccountDialog = true
+                    }) {
+                        Icon(Icons.Default.Edit, contentDescription = null, modifier = Modifier.size(16.dp))
+                        Spacer(modifier = Modifier.width(4.dp))
+                        Text("Edit ID")
+                    }
+                }
+            }
+
+            Spacer(modifier = Modifier.height(14.dp))
+
+            // 2. Hide Self-Calls Toggle
             Row(
                 modifier = Modifier.fillMaxWidth(),
                 verticalAlignment = Alignment.CenterVertically,
@@ -292,6 +380,7 @@ fun MultiDeviceSettingsCard(
             Divider(color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.08f))
             Spacer(modifier = Modifier.height(14.dp))
 
+            // 3. This Device's Numbers
             Row(
                 modifier = Modifier.fillMaxWidth(),
                 verticalAlignment = Alignment.CenterVertically,
@@ -299,7 +388,7 @@ fun MultiDeviceSettingsCard(
             ) {
                 Column(modifier = Modifier.weight(1f)) {
                     Text(
-                        text = "This Device's Phone Number",
+                        text = "This Device (${AccountDeviceHistoryManager.getCurrentDeviceName(context)})",
                         style = MaterialTheme.typography.bodyLarge,
                         fontWeight = FontWeight.SemiBold,
                         color = MaterialTheme.colorScheme.onSurface
@@ -328,13 +417,145 @@ fun MultiDeviceSettingsCard(
                     Text("Add Number", fontSize = 13.sp)
                 }
             }
+
+            Spacer(modifier = Modifier.height(14.dp))
+            Divider(color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.08f))
+            Spacer(modifier = Modifier.height(14.dp))
+
+            // 4. Linked Peer Devices
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.SpaceBetween
+            ) {
+                Column(modifier = Modifier.weight(1f)) {
+                    Text(
+                        text = "Linked Account Devices",
+                        style = MaterialTheme.typography.bodyLarge,
+                        fontWeight = FontWeight.SemiBold,
+                        color = MaterialTheme.colorScheme.onSurface
+                    )
+                    Text(
+                        text = "Link your other phone (e.g. OPPO or Redmi) so calls between them are managed",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                }
+                Button(
+                    onClick = { showAddPeerDialog = true },
+                    shape = RoundedCornerShape(14.dp)
+                ) {
+                    Icon(
+                        imageVector = Icons.Default.Add,
+                        contentDescription = "Add Linked Device",
+                        modifier = Modifier.size(18.dp)
+                    )
+                    Spacer(modifier = Modifier.width(4.dp))
+                    Text("Link Device", fontSize = 13.sp)
+                }
+            }
+
+            if (peerDevices.isNotEmpty()) {
+                Spacer(modifier = Modifier.height(10.dp))
+                Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                    peerDevices.forEach { peer ->
+                        Surface(
+                            modifier = Modifier.fillMaxWidth(),
+                            shape = RoundedCornerShape(16.dp),
+                            color = MaterialTheme.colorScheme.surface.copy(alpha = 0.72f)
+                        ) {
+                            Row(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .padding(horizontal = 14.dp, vertical = 10.dp),
+                                verticalAlignment = Alignment.CenterVertically
+                            ) {
+                                Icon(
+                                    imageVector = Icons.Default.PhoneAndroid,
+                                    contentDescription = null,
+                                    tint = MaterialTheme.colorScheme.primary,
+                                    modifier = Modifier.size(24.dp)
+                                )
+                                Spacer(modifier = Modifier.width(12.dp))
+                                Column(modifier = Modifier.weight(1f)) {
+                                    Text(
+                                        text = peer.deviceName,
+                                        style = MaterialTheme.typography.bodyMedium,
+                                        fontWeight = FontWeight.Bold,
+                                        color = MaterialTheme.colorScheme.onSurface
+                                    )
+                                    Text(
+                                        text = peer.verifiedNumbers.joinToString(", ") { formatPhoneNumberForDisplay(it) },
+                                        style = MaterialTheme.typography.bodySmall,
+                                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                                    )
+                                }
+                                IconButton(
+                                    onClick = {
+                                        AccountDeviceHistoryManager.removePeerDevice(context, peer.deviceId)
+                                        peerDevices = AccountDeviceHistoryManager.getPeerDevices(context)
+                                    }
+                                ) {
+                                    Icon(
+                                        imageVector = Icons.Default.Delete,
+                                        contentDescription = "Unlink Device",
+                                        tint = MaterialTheme.colorScheme.error
+                                    )
+                                }
+                            }
+                        }
+                    }
+                }
+            }
         }
     }
 
+    // Dialog 1: Edit Account ID
+    if (showEditAccountDialog) {
+        AlertDialog(
+            onDismissRequest = { showEditAccountDialog = false },
+            title = { Text("Account ID / Primary Number", fontWeight = FontWeight.Bold) },
+            text = {
+                Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                    Text(
+                        text = "Enter your primary account phone number. Devices with numbers linked to this Account ID share multi-device call history controls.",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                    OutlinedTextField(
+                        value = accountInput,
+                        onValueChange = { accountInput = it },
+                        label = { Text("Account Phone Number (e.g. +91 98765 43210)") },
+                        singleLine = true,
+                        modifier = Modifier.fillMaxWidth()
+                    )
+                }
+            },
+            confirmButton = {
+                Button(
+                    enabled = accountInput.isNotBlank(),
+                    onClick = {
+                        AccountDeviceHistoryManager.setAccountId(context, accountInput)
+                        accountId = AccountDeviceHistoryManager.getAccountId(context)
+                        showEditAccountDialog = false
+                    }
+                ) {
+                    Text("Save")
+                }
+            },
+            dismissButton = {
+                TextButton(onClick = { showEditAccountDialog = false }) {
+                    Text("Cancel")
+                }
+            }
+        )
+    }
+
+    // Dialog 2: Add Verified Number for This Device
     if (showAddNumberDialog) {
         AlertDialog(
             onDismissRequest = { showAddNumberDialog = false },
-            title = { Text("Add Verified Number for This Device", fontWeight = FontWeight.Bold) },
+            title = { Text("Add Number for This Device", fontWeight = FontWeight.Bold) },
             text = {
                 Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
                     Text(
@@ -366,6 +587,62 @@ fun MultiDeviceSettingsCard(
             },
             dismissButton = {
                 TextButton(onClick = { showAddNumberDialog = false }) {
+                    Text("Cancel")
+                }
+            }
+        )
+    }
+
+    // Dialog 3: Add Linked Peer Device
+    if (showAddPeerDialog) {
+        AlertDialog(
+            onDismissRequest = { showAddPeerDialog = false },
+            title = { Text("Link Other Device on Account", fontWeight = FontWeight.Bold) },
+            text = {
+                Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                    Text(
+                        text = "Enter your other phone's device name (e.g. OPPO A6 Pro 5G) and its phone number.",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                    OutlinedTextField(
+                        value = peerNameInput,
+                        onValueChange = { peerNameInput = it },
+                        label = { Text("Device Name (e.g. OPPO A6 Pro 5G)") },
+                        singleLine = true,
+                        modifier = Modifier.fillMaxWidth()
+                    )
+                    OutlinedTextField(
+                        value = peerNumberInput,
+                        onValueChange = { peerNumberInput = it },
+                        label = { Text("Peer Phone Number (e.g. +91 91234 56789)") },
+                        singleLine = true,
+                        modifier = Modifier.fillMaxWidth()
+                    )
+                }
+            },
+            confirmButton = {
+                Button(
+                    enabled = peerNameInput.isNotBlank() && peerNumberInput.isNotBlank(),
+                    onClick = {
+                        val newPeer = AccountDeviceRegistration(
+                            accountId = accountId,
+                            deviceId = "peer_" + System.currentTimeMillis(),
+                            deviceName = peerNameInput,
+                            verifiedNumbers = listOf(peerNumberInput)
+                        )
+                        AccountDeviceHistoryManager.registerPeerDevice(context, newPeer)
+                        peerDevices = AccountDeviceHistoryManager.getPeerDevices(context)
+                        peerNameInput = ""
+                        peerNumberInput = ""
+                        showAddPeerDialog = false
+                    }
+                ) {
+                    Text("Save & Link")
+                }
+            },
+            dismissButton = {
+                TextButton(onClick = { showAddPeerDialog = false }) {
                     Text("Cancel")
                 }
             }
