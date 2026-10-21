@@ -7970,6 +7970,10 @@ fun SettingsScreen(
             color = MaterialTheme.colorScheme.onSurfaceVariant
         )
 
+        CallerAnnouncementSettingsCard(
+            modifier = Modifier.fillMaxWidth()
+        )
+
         // Card 1: Default App Roles
         Card(
             modifier = Modifier.fillMaxWidth(),
