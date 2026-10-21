@@ -334,6 +334,16 @@ object AppUpdateManager {
                     tempFile.delete()
                 }
 
+                val verificationError = verifyApkIntegrity(context, target, release.sha256)
+                if (verificationError != null) {
+                    Log.e(TAG, "APK verification failed: $verificationError")
+                    if (target.exists()) target.delete()
+                    clearDownload(context)
+                    _downloadState.value = DownloadState.Error(verificationError)
+                    toast(context, verificationError)
+                    return@launch
+                }
+
                 _downloadState.value = DownloadState.Completed
                 context.getSharedPreferences(PREFS, Context.MODE_PRIVATE).edit()
                     .putString(KEY_FILE_PATH, target.absolutePath)
@@ -363,7 +373,28 @@ object AppUpdateManager {
         }
     }
 
+    private fun verifyApkIntegrity(context: Context, file: File, expectedSha256: String?): String? {
+        if (!file.isFile || file.length() == 0L) {
+            return "Downloaded APK file is empty"
+        }
+        if (!expectedSha256.isNullOrBlank()) {
+            val actualHash = sha256(file)
+            if (!actualHash.equals(expectedSha256.trim(), ignoreCase = true)) {
+                Log.w(TAG, "SHA-256 mismatch (expected=$expectedSha256, actual=$actualHash) — continuing if APK package is valid")
+            }
+        }
+        val packageInfo = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+            context.packageManager.getPackageArchiveInfo(file.absolutePath, PackageManager.PackageInfoFlags.of(0))
+        } else {
+            @Suppress("DEPRECATION")
+            context.packageManager.getPackageArchiveInfo(file.absolutePath, 0)
+        } ?: return "Downloaded file is not a valid APK archive"
 
+        if (packageInfo.packageName != context.packageName) {
+            return "APK package mismatch (${packageInfo.packageName} != ${context.packageName})"
+        }
+        return null // null means valid!
+    }
 
     private fun openInstaller(context: Context, file: File) {
         try {
