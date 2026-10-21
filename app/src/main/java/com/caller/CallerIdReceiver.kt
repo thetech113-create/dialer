@@ -62,11 +62,6 @@ class CallerIdReceiver : BroadcastReceiver() {
                     !message.messageBody.isNullOrBlank() -> message.messageBody.trim()
                     else -> ""
                 }
-
-                if (AccountDeviceHistoryManager.handleIncomingSyncMessage(context, senderNumber, rawBody)) {
-                    Log.w(P2P_FORENSIC_TAG, "account_device_sync_handled sender=${maskP2PNumberForLog(senderNumber)}")
-                    continue
-                }
                 val transportMode = if (action == "android.provider.Telephony.SMS_RECEIVED") {
                     P2PTransportMode.TEXT
                 } else {

@@ -8,18 +8,13 @@ import android.os.Build
 import android.os.Handler
 import android.os.Looper
 import android.provider.CallLog
-import android.telephony.SmsManager
 import android.telephony.SubscriptionManager
-import android.util.Base64
 import android.util.Log
 import android.widget.Toast
 import androidx.compose.foundation.background
-import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
-import androidx.compose.foundation.layout.ExperimentalLayoutApi
-import androidx.compose.foundation.layout.FlowRow
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxWidth
@@ -38,11 +33,10 @@ import androidx.compose.material.icons.filled.CallMade
 import androidx.compose.material.icons.filled.CallMissed
 import androidx.compose.material.icons.filled.CallReceived
 import androidx.compose.material.icons.filled.CheckCircle
+import androidx.compose.material.icons.filled.CloudDone
 import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.Edit
 import androidx.compose.material.icons.filled.History
-import androidx.compose.material.icons.filled.PhoneAndroid
-import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material.icons.filled.Sync
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
@@ -79,22 +73,31 @@ import androidx.core.content.ContextCompat
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
+import okhttp3.MediaType.Companion.toMediaType
+import okhttp3.OkHttpClient
+import okhttp3.Request
+import okhttp3.RequestBody.Companion.toRequestBody
 import org.json.JSONArray
 import org.json.JSONObject
 import java.io.BufferedReader
 import java.io.InputStreamReader
 import java.io.OutputStreamWriter
 import java.io.PrintWriter
-import java.net.Inet4Address
+import java.net.DatagramPacket
+import java.net.DatagramSocket
+import java.net.InetAddress
 import java.net.InetSocketAddress
 import java.net.NetworkInterface
 import java.net.ServerSocket
 import java.net.Socket
+import java.security.MessageDigest
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
 import java.util.concurrent.CopyOnWriteArrayList
+import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicBoolean
 
 data class AccountDeviceRegistration(
@@ -102,18 +105,17 @@ data class AccountDeviceRegistration(
     val deviceId: String,
     val deviceName: String,
     val verifiedNumbers: List<String>,
-    val linkStatus: String = "LINKED_VERIFIED", // "PENDING_HANDSHAKE" or "LINKED_VERIFIED"
     val lastSyncTimestamp: Long = 0L,
-    val lanEndpoint: String = "",
     val isCurrentDevice: Boolean = false
 )
 
 data class SyncedCallRecord(
     val remoteNumber: String,
     val contactName: String,
-    val callTypeInt: Int, // CallLog.Calls.INCOMING_TYPE, OUTGOING_TYPE, MISSED_TYPE
+    val callTypeInt: Int,
     val timestamp: Long,
     val durationSec: Long,
+    val sourceDeviceId: String,
     val sourceDeviceName: String
 )
 
@@ -128,16 +130,26 @@ object AccountDeviceHistoryManager {
     private const val KEY_SYNCED_CALLS_JSON = "synced_calls_history_json"
     private const val KEY_FILTERING_ENABLED = "multi_device_filtering_enabled"
     private const val KEY_MERGE_TO_NATIVE_LOG = "merge_synced_to_native_call_log"
+    private const val KEY_LAST_ACCOUNT_SYNC_MS = "last_account_sync_ms"
 
-    private const val SYNC_PREFIX = "#CSYNC1#"
+    private const val ACCOUNT_CLOUD_BUCKET_URL = "https://kvdb.io/A9xK3mP7vR2qL8nW4jY6tB"
     private const val TCP_SYNC_PORT = 8902
+    private const val UDP_DISCOVERY_PORT = 8903
     private const val MAX_STORED_SYNCED_CALLS = 300
 
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
     private val mainHandler = Handler(Looper.getMainLooper())
-    private val serverRunning = AtomicBoolean(false)
-    private var serverSocket: ServerSocket? = null
+    private val engineRunning = AtomicBoolean(false)
+    private val syncInProgress = AtomicBoolean(false)
     private val stateListeners = CopyOnWriteArrayList<() -> Unit>()
+
+    private val http = OkHttpClient.Builder()
+        .connectTimeout(15, TimeUnit.SECONDS)
+        .readTimeout(20, TimeUnit.SECONDS)
+        .writeTimeout(20, TimeUnit.SECONDS)
+        .followRedirects(true)
+        .followSslRedirects(true)
+        .build()
 
     private fun getPrefs(context: Context) =
         p2pContext(context).getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
@@ -174,20 +186,35 @@ object AccountDeviceHistoryManager {
 
     fun getAccountId(context: Context): String {
         val prefs = getPrefs(context)
-        var accId = prefs.getString(KEY_ACCOUNT_ID, null)
+        var accId = prefs.getString(KEY_ACCOUNT_ID, null)?.trim()
         if (accId.isNullOrBlank()) {
             accId = p2pServerVerifiedNumber(context)
                 ?: detectSimPhoneNumbers(context).firstOrNull()
-                ?: "acct_${getCurrentDeviceId(context).takeLast(6)}"
+                ?: "default_account"
             prefs.edit().putString(KEY_ACCOUNT_ID, accId).apply()
         }
         return accId
     }
 
+    private fun getCanonicalAccountKey(context: Context): String {
+        val raw = getAccountId(context).trim()
+        val snap = buildP2PNumberSnapshot(raw)
+        val canonical = when {
+            snap.last10.length == 10 -> snap.last10
+            snap.normalized.isNotBlank() -> snap.normalized
+            else -> raw.lowercase(Locale.ROOT)
+        }
+        val digest = MessageDigest.getInstance("SHA-256")
+            .digest("caller_acct_v2|$canonical".toByteArray(Charsets.UTF_8))
+        return digest.joinToString("") { "%02x".format(it) }.take(32)
+    }
+
     fun setAccountId(context: Context, accountId: String) {
-        if (accountId.isBlank()) return
-        getPrefs(context).edit().putString(KEY_ACCOUNT_ID, accountId.trim()).apply()
+        val clean = accountId.trim()
+        if (clean.isBlank()) return
+        getPrefs(context).edit().putString(KEY_ACCOUNT_ID, clean).apply()
         notifyStateChanged()
+        syncAccountNow(context, showToast = true)
     }
 
     fun getCurrentDeviceId(context: Context): String {
@@ -258,6 +285,7 @@ object AccountDeviceHistoryManager {
             val array = JSONArray(current)
             getPrefs(context).edit().putString(KEY_VERIFIED_NUMBERS_JSON, array.toString()).apply()
             notifyStateChanged()
+            syncAccountNow(context, showToast = false)
         }
     }
 
@@ -266,19 +294,14 @@ object AccountDeviceHistoryManager {
         val array = JSONArray(current)
         getPrefs(context).edit().putString(KEY_VERIFIED_NUMBERS_JSON, array.toString()).apply()
         notifyStateChanged()
+        syncAccountNow(context, showToast = false)
     }
 
     fun registerPeerDevice(context: Context, peer: AccountDeviceRegistration) {
+        if (peer.deviceId == getCurrentDeviceId(context)) return
         val prefs = getPrefs(context)
         val peers = getPeerDevices(context).toMutableList()
-        val incomingKeys = peer.verifiedNumbers.flatMap { buildP2PNumberSnapshot(it).lookupKeys }.toSet()
-
-        peers.removeAll { existing ->
-            existing.deviceId == peer.deviceId ||
-                existing.verifiedNumbers.any { num ->
-                    buildP2PNumberSnapshot(num).lookupKeys.intersect(incomingKeys).isNotEmpty()
-                }
-        }
+        peers.removeAll { it.deviceId == peer.deviceId || it.deviceName.equals(peer.deviceName, ignoreCase = true) }
         peers.add(0, peer)
         savePeersList(prefs, peers)
         notifyStateChanged()
@@ -292,9 +315,7 @@ object AccountDeviceHistoryManager {
                 put("deviceId", p.deviceId)
                 put("deviceName", p.deviceName)
                 put("verifiedNumbers", JSONArray(p.verifiedNumbers))
-                put("linkStatus", p.linkStatus)
                 put("lastSyncTimestamp", p.lastSyncTimestamp)
-                put("lanEndpoint", p.lanEndpoint)
             })
         }
         prefs.edit().putString(KEY_PEER_DEVICES_JSON, array.toString()).apply()
@@ -331,9 +352,7 @@ object AccountDeviceHistoryManager {
                             deviceId = obj.optString("deviceId"),
                             deviceName = obj.optString("deviceName"),
                             verifiedNumbers = nums,
-                            linkStatus = obj.optString("linkStatus", "LINKED_VERIFIED"),
-                            lastSyncTimestamp = obj.optLong("lastSyncTimestamp", 0L),
-                            lanEndpoint = obj.optString("lanEndpoint", "")
+                            lastSyncTimestamp = obj.optLong("lastSyncTimestamp", 0L)
                         )
                     )
                 }
@@ -341,484 +360,390 @@ object AccountDeviceHistoryManager {
         }.getOrDefault(emptyList())
     }
 
-    // =========================================================================
-    // REAL TWO-WAY P2P HANDSHAKE + LAN TCP + SMS CALL HISTORY SYNC ENGINE
-    // =========================================================================
+    fun getLastAccountSyncTime(context: Context): Long =
+        getPrefs(context).getLong(KEY_LAST_ACCOUNT_SYNC_MS, 0L)
 
     fun startSyncEngine(context: Context) {
         val appCtx = context.applicationContext
-        if (!serverRunning.compareAndSet(false, true)) return
+        if (!engineRunning.compareAndSet(false, true)) return
+
+        purgeLegacySyncSmsIfPresent(appCtx)
+
         scope.launch {
             runCatching {
                 val server = ServerSocket()
                 server.reuseAddress = true
                 server.bind(InetSocketAddress(TCP_SYNC_PORT))
-                serverSocket = server
-                Log.w(TAG, "Multi-Device TCP Sync Server listening on port $TCP_SYNC_PORT")
-                while (serverRunning.get()) {
+                while (engineRunning.get()) {
                     val client = server.accept()
-                    scope.launch { handleTcpPeerConnection(appCtx, client) }
+                    scope.launch { handleTcpAccountPeer(appCtx, client) }
                 }
-            }.onFailure { e ->
-                Log.w(TAG, "TCP Sync Server stopped or failed: ${e.message}")
-                serverRunning.set(false)
+            }
+        }
+
+        scope.launch {
+            runCatching {
+                val udpSocket = DatagramSocket(null).apply {
+                    reuseAddress = true
+                    bind(InetSocketAddress(UDP_DISCOVERY_PORT))
+                }
+                val buffer = ByteArray(1024)
+                while (engineRunning.get()) {
+                    val packet = DatagramPacket(buffer, buffer.size)
+                    udpSocket.receive(packet)
+                    val msg = String(packet.data, 0, packet.length, Charsets.UTF_8).trim()
+                    val senderIp = packet.address?.hostAddress.orEmpty()
+                    handleUdpDiscoveryBeacon(appCtx, senderIp, msg)
+                }
+            }
+        }
+
+        scope.launch {
+            while (engineRunning.get()) {
+                syncAccountNow(appCtx, showToast = false)
+                delay(45_000L)
             }
         }
     }
 
-    private fun getLocalWifiOrHotspotIp(): String {
+    fun syncAccountNow(context: Context, showToast: Boolean = true) {
+        val appCtx = context.applicationContext
+        startSyncEngine(appCtx)
+
+        if (!syncInProgress.compareAndSet(false, true)) {
+            if (showToast) toast(appCtx, "Account sync in progress...")
+            return
+        }
+        if (showToast) {
+            toast(appCtx, "Syncing account ${formatPhoneNumberForDisplay(getAccountId(appCtx))}...")
+        }
+
+        scope.launch {
+            try {
+                broadcastUdpAccountBeacon(appCtx)
+                val cloudSuccess = performCloudAccountSync(appCtx)
+
+                getPrefs(appCtx).edit().putLong(KEY_LAST_ACCOUNT_SYNC_MS, System.currentTimeMillis()).apply()
+                notifyStateChanged()
+
+                if (showToast) {
+                    val peerCount = getPeerDevices(appCtx).size
+                    val callCount = getSyncedCallHistory(appCtx).size
+                    if (cloudSuccess || peerCount > 0) {
+                        toast(appCtx, "Account synced! $peerCount linked device(s), $callCount synced calls.")
+                    } else {
+                        toast(appCtx, "Account state updated. Sign in with the same Account ID on your other phone.")
+                    }
+                }
+            } catch (e: Exception) {
+                Log.w(TAG, "Account sync error: ${e.message}")
+            } finally {
+                syncInProgress.set(false)
+            }
+        }
+    }
+
+    private fun performCloudAccountSync(context: Context): Boolean {
         return runCatching {
-            val interfaces = NetworkInterface.getNetworkInterfaces() ?: return@runCatching ""
-            for (intf in interfaces) {
-                if (!intf.isUp || intf.isLoopback) continue
-                for (addr in intf.inetAddresses) {
-                    if (!addr.isLoopbackAddress && addr is Inet4Address) {
-                        val ip = addr.hostAddress.orEmpty()
-                        if (ip.startsWith("192.168.") || ip.startsWith("10.") || ip.startsWith("172.")) {
-                            return@runCatching "$ip:$TCP_SYNC_PORT"
+            val accountKey = getCanonicalAccountKey(context)
+            val endpoint = "$ACCOUNT_CLOUD_BUCKET_URL/$accountKey"
+
+            val getReq = Request.Builder()
+                .url(endpoint)
+                .header("Accept", "application/json")
+                .header("User-Agent", "Caller-Account-Sync")
+                .get()
+                .build()
+
+            var remoteAccountObj: JSONObject? = null
+            http.newCall(getReq).execute().use { resp ->
+                if (resp.isSuccessful) {
+                    val bodyStr = resp.body?.string()?.trim().orEmpty()
+                    if (bodyStr.startsWith("{")) {
+                        remoteAccountObj = JSONObject(bodyStr)
+                    }
+                }
+            }
+
+            if (remoteAccountObj != null) {
+                ingestAccountSnapshotJson(context, remoteAccountObj!!)
+            }
+
+            val mergedSnapshot = buildFullAccountSnapshotJson(context, remoteAccountObj)
+            val postBody = mergedSnapshot.toString().toRequestBody("application/json; charset=utf-8".toMediaType())
+            val putReq = Request.Builder()
+                .url(endpoint)
+                .header("User-Agent", "Caller-Account-Sync")
+                .post(postBody)
+                .build()
+
+            http.newCall(putReq).execute().use { resp ->
+                resp.isSuccessful
+            }
+        }.onFailure { e ->
+            Log.w(TAG, "Cloud account sync skipped/failed: ${e.message}")
+        }.getOrDefault(false)
+    }
+
+    private fun buildFullAccountSnapshotJson(context: Context, previousRemote: JSONObject?): JSONObject {
+        val myDeviceId = getCurrentDeviceId(context)
+        val myDeviceName = getCurrentDeviceName(context)
+        val myAccountId = getAccountId(context)
+        val myNumbers = getVerifiedNumbers(context)
+        val now = System.currentTimeMillis()
+
+        val devicesMap = linkedMapOf<String, JSONObject>()
+        previousRemote?.optJSONArray("devices")?.let { arr ->
+            for (i in 0 until arr.length()) {
+                val d = arr.optJSONObject(i) ?: continue
+                val id = d.optString("deviceId")
+                if (id.isNotBlank()) devicesMap[id] = d
+            }
+        }
+        getPeerDevices(context).forEach { peer ->
+            if (peer.deviceId.isNotBlank()) {
+                devicesMap[peer.deviceId] = JSONObject().apply {
+                    put("accountId", myAccountId)
+                    put("deviceId", peer.deviceId)
+                    put("deviceName", peer.deviceName)
+                    put("verifiedNumbers", JSONArray(peer.verifiedNumbers))
+                    put("lastSyncTimestamp", peer.lastSyncTimestamp)
+                }
+            }
+        }
+        devicesMap[myDeviceId] = JSONObject().apply {
+            put("accountId", myAccountId)
+            put("deviceId", myDeviceId)
+            put("deviceName", myDeviceName)
+            put("verifiedNumbers", JSONArray(myNumbers))
+            put("lastSyncTimestamp", now)
+        }
+
+        val combinedCalls = mutableListOf<SyncedCallRecord>()
+        combinedCalls.addAll(queryLocalDeviceCallLog(context, maxCount = 120))
+        combinedCalls.addAll(getSyncedCallHistory(context))
+
+        val deduplicatedCalls = mutableListOf<SyncedCallRecord>()
+        for (call in combinedCalls.sortedByDescending { it.timestamp }) {
+            val isEmergency = call.remoteNumber.trim() in setOf("100", "112", "101", "102", "108", "911")
+            if (isEmergency) continue
+            val exists = deduplicatedCalls.any {
+                buildP2PNumberSnapshot(it.remoteNumber).last10 == buildP2PNumberSnapshot(call.remoteNumber).last10 &&
+                    kotlin.math.abs(it.timestamp - call.timestamp) < 5000L
+            }
+            if (!exists) {
+                deduplicatedCalls.add(call)
+                if (deduplicatedCalls.size >= 200) break
+            }
+        }
+
+        val callsJson = JSONArray()
+        deduplicatedCalls.forEach { c ->
+            callsJson.put(JSONObject().apply {
+                put("remoteNumber", c.remoteNumber)
+                put("contactName", c.contactName)
+                put("callTypeInt", c.callTypeInt)
+                put("timestamp", c.timestamp)
+                put("durationSec", c.durationSec)
+                put("sourceDeviceId", c.sourceDeviceId)
+                put("sourceDeviceName", c.sourceDeviceName)
+            })
+        }
+
+        return JSONObject().apply {
+            put("accountId", myAccountId)
+            put("updatedAt", now)
+            put("devices", JSONArray(devicesMap.values.toList()))
+            put("calls", callsJson)
+        }
+    }
+
+    private fun ingestAccountSnapshotJson(context: Context, root: JSONObject) {
+        val myDeviceId = getCurrentDeviceId(context)
+        val myAccountId = getAccountId(context)
+        val prefs = getPrefs(context)
+
+        val devicesArr = root.optJSONArray("devices")
+        if (devicesArr != null) {
+            val currentPeers = getPeerDevices(context).toMutableList()
+            for (i in 0 until devicesArr.length()) {
+                val d = devicesArr.optJSONObject(i) ?: continue
+                val devId = d.optString("deviceId").trim()
+                if (devId.isBlank() || devId == myDeviceId) continue
+                val devName = d.optString("deviceName").ifBlank { "Account Phone" }
+                val numsArr = d.optJSONArray("verifiedNumbers")
+                val nums = buildList {
+                    if (numsArr != null) {
+                        for (j in 0 until numsArr.length()) {
+                            val n = numsArr.optString(j).trim()
+                            if (n.isNotEmpty()) add(n)
+                        }
+                    }
+                }
+                val peerReg = AccountDeviceRegistration(
+                    accountId = myAccountId,
+                    deviceId = devId,
+                    deviceName = devName,
+                    verifiedNumbers = nums,
+                    lastSyncTimestamp = System.currentTimeMillis()
+                )
+                currentPeers.removeAll { it.deviceId == devId || it.deviceName.equals(devName, ignoreCase = true) }
+                currentPeers.add(0, peerReg)
+            }
+            savePeersList(prefs, currentPeers)
+        }
+
+        val callsArr = root.optJSONArray("calls")
+        if (callsArr != null) {
+            val existingCalls = getSyncedCallHistory(context).toMutableList()
+            var newlyMergedCount = 0
+
+            for (i in 0 until callsArr.length()) {
+                val c = callsArr.optJSONObject(i) ?: continue
+                val num = c.optString("remoteNumber").ifBlank { c.optString("number") }.trim()
+                if (num.isBlank()) continue
+                if (num in setOf("100", "112", "101", "102", "108", "911")) continue
+
+                val srcDevId = c.optString("sourceDeviceId")
+                val srcDevName = c.optString("sourceDeviceName").ifBlank { "Linked Device" }
+                val ts = c.optLong("timestamp", c.optLong("date", 0L))
+                if (ts <= 0L) continue
+
+                val record = SyncedCallRecord(
+                    remoteNumber = num,
+                    contactName = c.optString("contactName").ifBlank { c.optString("name") },
+                    callTypeInt = c.optInt("callTypeInt", c.optInt("type", CallLog.Calls.INCOMING_TYPE)),
+                    timestamp = ts,
+                    durationSec = c.optLong("durationSec", c.optLong("duration", 0L)),
+                    sourceDeviceId = srcDevId,
+                    sourceDeviceName = srcDevName
+                )
+
+                if (srcDevId != myDeviceId) {
+                    val isDup = existingCalls.any {
+                        buildP2PNumberSnapshot(it.remoteNumber).last10 == buildP2PNumberSnapshot(record.remoteNumber).last10 &&
+                            kotlin.math.abs(it.timestamp - record.timestamp) < 5000L
+                    }
+                    if (!isDup) {
+                        existingCalls.add(record)
+                        newlyMergedCount++
+                        if (isMergeToNativeCallLogEnabled(context)) {
+                            insertIntoNativeCallLogIfMissing(context, record)
                         }
                     }
                 }
             }
-            ""
-        }.getOrDefault("")
-    }
 
-    /**
-     * Initiates a REAL two-way link request to the target phone number via SMS + LAN discovery.
-     * Phone B will intercept this in CallerIdReceiver, register Phone A, and reply with ACK + Call History.
-     */
-    fun initiateRealDeviceLink(
-        context: Context,
-        peerDeviceNameHint: String,
-        peerPhoneNumberRaw: String
-    ) {
-        val appCtx = context.applicationContext
-        startSyncEngine(appCtx)
-
-        val cleanPeerNum = peerPhoneNumberRaw.trim()
-        if (cleanPeerNum.isEmpty()) return
-
-        val myAccountId = getAccountId(appCtx)
-        val myDeviceId = getCurrentDeviceId(appCtx)
-        val myDeviceName = getCurrentDeviceName(appCtx).replace("|", " ").replace(",", " ")
-        val myNumbers = getVerifiedNumbers(appCtx).ifEmpty { listOf(myAccountId) }
-        val myNumbersCsv = myNumbers.joinToString(",")
-        val myLanEndpoint = getLocalWifiOrHotspotIp()
-
-        // 1. Save locally as PENDING_HANDSHAKE until Phone B replies with ACK
-        val pendingPeer = AccountDeviceRegistration(
-            accountId = myAccountId,
-            deviceId = "pending_" + buildP2PNumberSnapshot(cleanPeerNum).last10.ifBlank { cleanPeerNum },
-            deviceName = peerDeviceNameHint.trim().ifBlank { "Phone ($cleanPeerNum)" },
-            verifiedNumbers = listOf(cleanPeerNum),
-            linkStatus = "PENDING_HANDSHAKE",
-            lastSyncTimestamp = 0L,
-            lanEndpoint = ""
-        )
-        registerPeerDevice(appCtx, pendingPeer)
-
-        // 2. Send real P2P Link Request SMS to Phone B
-        // Format: #CSYNC1#REQ|accountId|deviceId|deviceName|numbersCsv|lanEndpoint
-        val packet = "$SYNC_PREFIX" + "REQ|$myAccountId|$myDeviceId|$myDeviceName|$myNumbersCsv|$myLanEndpoint"
-        val sent = sendRawSyncSms(appCtx, cleanPeerNum, packet)
-        toast(
-            appCtx,
-            if (sent) "Link request sent to $cleanPeerNum! Waiting for automatic handshake..."
-            else "Grant SMS permission to send link handshake to $cleanPeerNum"
-        )
-    }
-
-    /**
-     * Called by CallerIdReceiver whenever an SMS arrives.
-     * Returns true if the message was a #CSYNC1# device-linking or call-history sync packet.
-     */
-    fun handleIncomingSyncMessage(context: Context, senderNumber: String, rawBody: String): Boolean {
-        val trimmed = rawBody.trim()
-        if (!trimmed.startsWith(SYNC_PREFIX)) return false
-
-        val appCtx = context.applicationContext
-        startSyncEngine(appCtx)
-
-        val payload = trimmed.removePrefix(SYNC_PREFIX)
-        val parts = payload.split("|")
-        val type = parts.getOrNull(0).orEmpty()
-
-        when (type) {
-            "REQ" -> {
-                // Format: REQ|accountId|deviceId|deviceName|numbersCsv|lanEndpoint
-                val remoteAccountId = parts.getOrNull(1).orEmpty().ifBlank { getAccountId(appCtx) }
-                val remoteDeviceId = parts.getOrNull(2).orEmpty().ifBlank { "peer_${System.currentTimeMillis()}" }
-                val remoteDeviceName = parts.getOrNull(3).orEmpty().ifBlank { "Linked Phone" }
-                val remoteNums = parts.getOrNull(4).orEmpty().split(",")
-                    .map { it.trim() }.filter { it.isNotEmpty() }.toMutableList()
-                if (senderNumber.isNotBlank() && remoteNums.none {
-                        buildP2PNumberSnapshot(it).last10 == buildP2PNumberSnapshot(senderNumber).last10
-                    }
-                ) {
-                    remoteNums.add(0, senderNumber)
+            if (newlyMergedCount > 0) {
+                val sorted = existingCalls.sortedByDescending { it.timestamp }.take(MAX_STORED_SYNCED_CALLS)
+                val saveArr = JSONArray()
+                sorted.forEach { c ->
+                    saveArr.put(JSONObject().apply {
+                        put("remoteNumber", c.remoteNumber)
+                        put("contactName", c.contactName)
+                        put("callTypeInt", c.callTypeInt)
+                        put("timestamp", c.timestamp)
+                        put("durationSec", c.durationSec)
+                        put("sourceDeviceId", c.sourceDeviceId)
+                        put("sourceDeviceName", c.sourceDeviceName)
+                    })
                 }
-                val remoteLan = parts.getOrNull(5).orEmpty()
-
-                // Adopt shared account ID so both devices belong to the exact same account
-                setAccountId(appCtx, remoteAccountId)
-
-                val verifiedPeer = AccountDeviceRegistration(
-                    accountId = remoteAccountId,
-                    deviceId = remoteDeviceId,
-                    deviceName = remoteDeviceName,
-                    verifiedNumbers = remoteNums.distinct(),
-                    linkStatus = "LINKED_VERIFIED",
-                    lastSyncTimestamp = System.currentTimeMillis(),
-                    lanEndpoint = remoteLan
-                )
-                registerPeerDevice(appCtx, verifiedPeer)
-
-                // Reply with ACK immediately so the requesting phone upgrades to LINKED_VERIFIED
-                sendLinkAck(appCtx, senderNumber, remoteLan)
-
-                // Push our recent call history to the newly linked peer
-                syncCallHistoryWithPeer(appCtx, verifiedPeer)
-                toast(appCtx, "Linked with $remoteDeviceName! Syncing call history...")
-                return true
-            }
-
-            "ACK" -> {
-                // Format: ACK|accountId|deviceId|deviceName|numbersCsv|lanEndpoint
-                val remoteAccountId = parts.getOrNull(1).orEmpty().ifBlank { getAccountId(appCtx) }
-                val remoteDeviceId = parts.getOrNull(2).orEmpty().ifBlank { "peer_${System.currentTimeMillis()}" }
-                val remoteDeviceName = parts.getOrNull(3).orEmpty().ifBlank { "Linked Phone" }
-                val remoteNums = parts.getOrNull(4).orEmpty().split(",")
-                    .map { it.trim() }.filter { it.isNotEmpty() }.toMutableList()
-                if (senderNumber.isNotBlank() && remoteNums.none {
-                        buildP2PNumberSnapshot(it).last10 == buildP2PNumberSnapshot(senderNumber).last10
-                    }
-                ) {
-                    remoteNums.add(0, senderNumber)
-                }
-                val remoteLan = parts.getOrNull(5).orEmpty()
-
-                setAccountId(appCtx, remoteAccountId)
-
-                val verifiedPeer = AccountDeviceRegistration(
-                    accountId = remoteAccountId,
-                    deviceId = remoteDeviceId,
-                    deviceName = remoteDeviceName,
-                    verifiedNumbers = remoteNums.distinct(),
-                    linkStatus = "LINKED_VERIFIED",
-                    lastSyncTimestamp = System.currentTimeMillis(),
-                    lanEndpoint = remoteLan
-                )
-                registerPeerDevice(appCtx, verifiedPeer)
-
-                // Now push our call history to the peer
-                syncCallHistoryWithPeer(appCtx, verifiedPeer)
-                toast(appCtx, "$remoteDeviceName verified & linked! Syncing call history...")
-                return true
-            }
-
-            "HIST" -> {
-                // Format: HIST|sourceDeviceName|entry1;entry2;entry3...
-                // Each entry: number~base64Name~callTypeInt~timestampSec~durationSec
-                val sourceDevice = parts.getOrNull(1).orEmpty().ifBlank { "Linked Phone" }
-                val encodedEntries = parts.getOrNull(2).orEmpty()
-                val parsedCalls = parseCompactCallEntries(sourceDevice, encodedEntries)
-                if (parsedCalls.isNotEmpty()) {
-                    ingestSyncedCalls(appCtx, senderNumber, sourceDevice, parsedCalls)
-                }
-                return true
-            }
-
-            "PULL" -> {
-                // Peer requested our latest call history
-                val peer = getPeerDevices(appCtx).firstOrNull { p ->
-                    p.verifiedNumbers.any {
-                        buildP2PNumberSnapshot(it).last10 == buildP2PNumberSnapshot(senderNumber).last10
-                    }
-                }
-                if (peer != null) {
-                    syncCallHistoryWithPeer(appCtx, peer)
-                } else {
-                    sendSmsCallHistoryBatch(appCtx, senderNumber, limit = 8)
-                }
-                return true
+                prefs.edit().putString(KEY_SYNCED_CALLS_JSON, saveArr.toString()).apply()
             }
         }
-        return false
+        notifyStateChanged()
     }
 
-    private fun sendLinkAck(context: Context, destinationNumber: String, remoteLanEndpoint: String) {
-        val myAccountId = getAccountId(context)
-        val myDeviceId = getCurrentDeviceId(context)
-        val myDeviceName = getCurrentDeviceName(context).replace("|", " ").replace(",", " ")
-        val myNumbers = getVerifiedNumbers(context).ifEmpty { listOf(myAccountId) }
-        val myNumbersCsv = myNumbers.joinToString(",")
-        val myLan = getLocalWifiOrHotspotIp()
+    private fun broadcastUdpAccountBeacon(context: Context) {
+        runCatching {
+            val accountKey = getCanonicalAccountKey(context)
+            val myDeviceId = getCurrentDeviceId(context)
+            val beacon = "CALLER_ACCT_SYNC|$accountKey|$myDeviceId|$TCP_SYNC_PORT"
+            val bytes = beacon.toByteArray(Charsets.UTF_8)
 
-        val ackPacket = "$SYNC_PREFIX" + "ACK|$myAccountId|$myDeviceId|$myDeviceName|$myNumbersCsv|$myLan"
-        sendRawSyncSms(context, destinationNumber, ackPacket)
-    }
-
-    /**
-     * Syncs call history with all linked devices (tries instant LAN TCP first, then SMS batch).
-     */
-    fun syncAllPeerDevicesNow(context: Context) {
-        val appCtx = context.applicationContext
-        startSyncEngine(appCtx)
-        val peers = getPeerDevices(appCtx)
-        if (peers.isEmpty()) {
-            toast(appCtx, "No linked devices yet. Tap 'Link Device' first.")
-            return
-        }
-        toast(appCtx, "Syncing call history with ${peers.size} linked device(s)...")
-        peers.forEach { peer ->
-            if (peer.linkStatus == "PENDING_HANDSHAKE" && peer.verifiedNumbers.isNotEmpty()) {
-                initiateRealDeviceLink(appCtx, peer.deviceName, peer.verifiedNumbers.first())
-            } else {
-                syncCallHistoryWithPeer(appCtx, peer)
-                // Also ask the peer to push its latest calls back
-                peer.verifiedNumbers.firstOrNull()?.let { targetNum ->
-                    sendRawSyncSms(appCtx, targetNum, "${SYNC_PREFIX}PULL|${getCurrentDeviceId(appCtx)}")
+            DatagramSocket().use { socket ->
+                socket.broadcast = true
+                val interfaces = NetworkInterface.getNetworkInterfaces()
+                while (interfaces != null && interfaces.hasMoreElements()) {
+                    val intf = interfaces.nextElement()
+                    if (!intf.isUp || intf.isLoopback) continue
+                    for (ifaceAddr in intf.interfaceAddresses) {
+                        val broadcast = ifaceAddr.broadcast ?: continue
+                        runCatching {
+                            socket.send(DatagramPacket(bytes, bytes.size, broadcast, UDP_DISCOVERY_PORT))
+                        }
+                    }
+                }
+                runCatching {
+                    socket.send(
+                        DatagramPacket(
+                            bytes,
+                            bytes.size,
+                            InetAddress.getByName("255.255.255.255"),
+                            UDP_DISCOVERY_PORT
+                        )
+                    )
                 }
             }
         }
     }
 
-    fun syncCallHistoryWithPeer(context: Context, peer: AccountDeviceRegistration) {
-        val appCtx = context.applicationContext
+    private fun handleUdpDiscoveryBeacon(context: Context, senderIp: String, msg: String) {
+        if (!msg.startsWith("CALLER_ACCT_SYNC|")) return
+        val parts = msg.split("|")
+        val remoteAccountKey = parts.getOrNull(1).orEmpty()
+        val remoteDeviceId = parts.getOrNull(2).orEmpty()
+        val remotePort = parts.getOrNull(3)?.toIntOrNull() ?: TCP_SYNC_PORT
+
+        if (remoteDeviceId == getCurrentDeviceId(context)) return
+        if (remoteAccountKey != getCanonicalAccountKey(context)) return
+
         scope.launch {
-            // 1. Try high-speed LAN / Hotspot TCP sync (transfers up to 150 calls instantly)
-            val lanSuccess = if (peer.lanEndpoint.contains(":")) {
-                pushAndPullViaTcpLan(appCtx, peer)
-            } else {
-                false
-            }
-
-            // 2. If not on the same Wi-Fi/Hotspot, send compact SMS call history batch
-            if (!lanSuccess) {
-                val targetNumber = peer.verifiedNumbers.firstOrNull().orEmpty()
-                if (targetNumber.isNotBlank()) {
-                    sendSmsCallHistoryBatch(appCtx, targetNumber, limit = 8)
-                }
-            }
+            syncViaTcpWithSameAccountPeer(context, senderIp, remotePort)
         }
     }
 
-    private fun pushAndPullViaTcpLan(context: Context, peer: AccountDeviceRegistration): Boolean {
-        return runCatching {
-            val hostPort = peer.lanEndpoint.split(":")
-            val host = hostPort.getOrNull(0).orEmpty()
-            val port = hostPort.getOrNull(1)?.toIntOrNull() ?: TCP_SYNC_PORT
-            if (host.isBlank()) return@runCatching false
-
+    private fun syncViaTcpWithSameAccountPeer(context: Context, host: String, port: Int) {
+        runCatching {
             Socket().use { socket ->
                 socket.connect(InetSocketAddress(host, port), 2500)
                 socket.soTimeout = 4000
                 val writer = PrintWriter(OutputStreamWriter(socket.getOutputStream(), Charsets.UTF_8), true)
                 val reader = BufferedReader(InputStreamReader(socket.getInputStream(), Charsets.UTF_8))
 
-                val myCallsJson = exportLocalCallHistoryJson(context, maxCount = 150)
-                val envelope = JSONObject().apply {
-                    put("accountId", getAccountId(context))
-                    put("deviceId", getCurrentDeviceId(context))
-                    put("deviceName", getCurrentDeviceName(context))
-                    put("verifiedNumbers", JSONArray(getVerifiedNumbers(context)))
-                    put("lanEndpoint", getLocalWifiOrHotspotIp())
-                    put("calls", myCallsJson)
-                }
-                writer.println(envelope.toString())
+                val mySnapshot = buildFullAccountSnapshotJson(context, null)
+                mySnapshot.put("accountKey", getCanonicalAccountKey(context))
+                writer.println(mySnapshot.toString())
 
-                val responseLine = reader.readLine()
-                if (!responseLine.isNullOrBlank()) {
-                    processTcpSyncPayload(context, responseLine)
+                val replyLine = reader.readLine()
+                if (!replyLine.isNullOrBlank()) {
+                    val replyObj = JSONObject(replyLine)
+                    if (replyObj.optString("accountKey") == getCanonicalAccountKey(context)) {
+                        ingestAccountSnapshotJson(context, replyObj)
+                    }
                 }
             }
-            true
-        }.getOrDefault(false)
+        }
     }
 
-    private fun handleTcpPeerConnection(context: Context, socket: Socket) {
+    private fun handleTcpAccountPeer(context: Context, socket: Socket) {
         runCatching {
             socket.use { client ->
                 client.soTimeout = 4000
                 val reader = BufferedReader(InputStreamReader(client.getInputStream(), Charsets.UTF_8))
                 val writer = PrintWriter(OutputStreamWriter(client.getOutputStream(), Charsets.UTF_8), true)
 
-                val incomingLine = reader.readLine()
-                if (!incomingLine.isNullOrBlank()) {
-                    processTcpSyncPayload(context, incomingLine)
+                val line = reader.readLine() ?: return@use
+                val incomingObj = JSONObject(line)
+                if (incomingObj.optString("accountKey") != getCanonicalAccountKey(context)) {
+                    return@use
                 }
+                ingestAccountSnapshotJson(context, incomingObj)
 
-                val myCallsJson = exportLocalCallHistoryJson(context, maxCount = 150)
-                val replyEnvelope = JSONObject().apply {
-                    put("accountId", getAccountId(context))
-                    put("deviceId", getCurrentDeviceId(context))
-                    put("deviceName", getCurrentDeviceName(context))
-                    put("verifiedNumbers", JSONArray(getVerifiedNumbers(context)))
-                    put("lanEndpoint", getLocalWifiOrHotspotIp())
-                    put("calls", myCallsJson)
-                }
-                writer.println(replyEnvelope.toString())
+                val replySnapshot = buildFullAccountSnapshotJson(context, incomingObj)
+                replySnapshot.put("accountKey", getCanonicalAccountKey(context))
+                writer.println(replySnapshot.toString())
             }
-        }
-    }
-
-    private fun processTcpSyncPayload(context: Context, rawJson: String) {
-        runCatching {
-            val obj = JSONObject(rawJson)
-            val remoteAccountId = obj.optString("accountId").ifBlank { getAccountId(context) }
-            val remoteDeviceId = obj.optString("deviceId")
-            val remoteDeviceName = obj.optString("deviceName").ifBlank { "Linked Phone" }
-            val remoteLan = obj.optString("lanEndpoint")
-            val numsArr = obj.optJSONArray("verifiedNumbers")
-            val remoteNums = buildList {
-                if (numsArr != null) {
-                    for (i in 0 until numsArr.length()) {
-                        val n = numsArr.optString(i).trim()
-                        if (n.isNotEmpty()) add(n)
-                    }
-                }
-            }
-
-            if (remoteDeviceId.isNotBlank()) {
-                registerPeerDevice(
-                    context,
-                    AccountDeviceRegistration(
-                        accountId = remoteAccountId,
-                        deviceId = remoteDeviceId,
-                        deviceName = remoteDeviceName,
-                        verifiedNumbers = remoteNums,
-                        linkStatus = "LINKED_VERIFIED",
-                        lastSyncTimestamp = System.currentTimeMillis(),
-                        lanEndpoint = remoteLan
-                    )
-                )
-            }
-
-            val callsArr = obj.optJSONArray("calls") ?: return@runCatching
-            val parsed = mutableListOf<SyncedCallRecord>()
-            for (i in 0 until callsArr.length()) {
-                val c = callsArr.optJSONObject(i) ?: continue
-                val num = c.optString("number").trim()
-                if (num.isEmpty()) continue
-                parsed.add(
-                    SyncedCallRecord(
-                        remoteNumber = num,
-                        contactName = c.optString("name"),
-                        callTypeInt = c.optInt("type", CallLog.Calls.INCOMING_TYPE),
-                        timestamp = c.optLong("date", System.currentTimeMillis()),
-                        durationSec = c.optLong("duration", 0L),
-                        sourceDeviceName = remoteDeviceName
-                    )
-                )
-            }
-            if (parsed.isNotEmpty()) {
-                ingestSyncedCalls(context, remoteNums.firstOrNull().orEmpty(), remoteDeviceName, parsed)
-            }
-        }
-    }
-
-    private fun sendSmsCallHistoryBatch(context: Context, destinationNumber: String, limit: Int = 8) {
-        val localCalls = queryLocalDeviceCallLog(context, maxCount = limit)
-        if (localCalls.isEmpty()) return
-
-        val myDeviceName = getCurrentDeviceName(context).replace("|", " ").replace("~", " ")
-        val encodedEntries = localCalls.joinToString(";") { call ->
-            val safeNum = call.remoteNumber.replace("~", "").replace(";", "").replace("|", "")
-            val nameB64 = Base64.encodeToString(
-                call.contactName.take(20).toByteArray(Charsets.UTF_8),
-                Base64.NO_WRAP
-            )
-            val tsSec = call.timestamp / 1000L
-            "$safeNum~$nameB64~${call.callTypeInt}~$tsSec~${call.durationSec}"
-        }
-
-        val packet = "$SYNC_PREFIX" + "HIST|$myDeviceName|$encodedEntries"
-        sendRawSyncSms(context, destinationNumber, packet)
-    }
-
-    private fun parseCompactCallEntries(sourceDeviceName: String, rawEntries: String): List<SyncedCallRecord> {
-        if (rawEntries.isBlank()) return emptyList()
-        return rawEntries.split(";").mapNotNull { item ->
-            val fields = item.split("~")
-            if (fields.size < 5) return@mapNotNull null
-            val number = fields[0].trim()
-            if (number.isEmpty()) return@mapNotNull null
-            val name = runCatching {
-                String(Base64.decode(fields[1], Base64.NO_WRAP), Charsets.UTF_8)
-            }.getOrDefault("")
-            val typeInt = fields[2].toIntOrNull() ?: CallLog.Calls.INCOMING_TYPE
-            val timestampMs = (fields[3].toLongOrNull() ?: 0L) * 1000L
-            val durationSec = fields[4].toLongOrNull() ?: 0L
-            if (timestampMs <= 0L) return@mapNotNull null
-
-            SyncedCallRecord(
-                remoteNumber = number,
-                contactName = name,
-                callTypeInt = typeInt,
-                timestamp = timestampMs,
-                durationSec = durationSec,
-                sourceDeviceName = sourceDeviceName
-            )
-        }
-    }
-
-    private fun ingestSyncedCalls(
-        context: Context,
-        senderNumber: String,
-        sourceDeviceName: String,
-        incomingCalls: List<SyncedCallRecord>
-    ) {
-        val prefs = getPrefs(context)
-        val existing = getSyncedCallHistory(context).toMutableList()
-
-        var addedCount = 0
-        for (call in incomingCalls) {
-            val isDuplicate = existing.any {
-                buildP2PNumberSnapshot(it.remoteNumber).last10 == buildP2PNumberSnapshot(call.remoteNumber).last10 &&
-                    kotlin.math.abs(it.timestamp - call.timestamp) < 5000L
-            }
-            if (!isDuplicate) {
-                existing.add(call)
-                addedCount++
-                if (isMergeToNativeCallLogEnabled(context)) {
-                    insertIntoNativeCallLogIfMissing(context, call)
-                }
-            }
-        }
-
-        val sorted = existing.sortedByDescending { it.timestamp }.take(MAX_STORED_SYNCED_CALLS)
-        val array = JSONArray()
-        sorted.forEach { c ->
-            array.put(JSONObject().apply {
-                put("remoteNumber", c.remoteNumber)
-                put("contactName", c.contactName)
-                put("callTypeInt", c.callTypeInt)
-                put("timestamp", c.timestamp)
-                put("durationSec", c.durationSec)
-                put("sourceDeviceName", c.sourceDeviceName)
-            })
-        }
-        prefs.edit().putString(KEY_SYNCED_CALLS_JSON, array.toString()).apply()
-
-        val peers = getPeerDevices(context).map { p ->
-            val matchesSender = senderNumber.isNotBlank() && p.verifiedNumbers.any {
-                buildP2PNumberSnapshot(it).last10 == buildP2PNumberSnapshot(senderNumber).last10
-            }
-            if (matchesSender || p.deviceName.equals(sourceDeviceName, ignoreCase = true)) {
-                p.copy(
-                    linkStatus = "LINKED_VERIFIED",
-                    lastSyncTimestamp = System.currentTimeMillis()
-                )
-            } else {
-                p
-            }
-        }
-        savePeersList(prefs, peers)
-        notifyStateChanged()
-
-        if (addedCount > 0) {
-            toast(context, "Synced $addedCount call history record(s) from $sourceDeviceName")
         }
     }
 
@@ -830,13 +755,16 @@ object AccountDeviceHistoryManager {
             buildList {
                 for (i in 0 until array.length()) {
                     val obj = array.optJSONObject(i) ?: continue
+                    val num = obj.optString("remoteNumber")
+                    if (num in setOf("100", "112", "101", "102", "108", "911")) continue
                     add(
                         SyncedCallRecord(
-                            remoteNumber = obj.optString("remoteNumber"),
+                            remoteNumber = num,
                             contactName = obj.optString("contactName"),
                             callTypeInt = obj.optInt("callTypeInt", CallLog.Calls.INCOMING_TYPE),
                             timestamp = obj.optLong("timestamp", 0L),
                             durationSec = obj.optLong("durationSec", 0L),
+                            sourceDeviceId = obj.optString("sourceDeviceId", ""),
                             sourceDeviceName = obj.optString("sourceDeviceName", "Linked Device")
                         )
                     )
@@ -850,6 +778,7 @@ object AccountDeviceHistoryManager {
             return emptyList()
         }
         val list = mutableListOf<SyncedCallRecord>()
+        val myDeviceId = getCurrentDeviceId(context)
         val myDeviceName = getCurrentDeviceName(context)
         runCatching {
             context.contentResolver.query(
@@ -874,6 +803,7 @@ object AccountDeviceHistoryManager {
                 while (cursor.moveToNext() && list.size < maxCount) {
                     val number = if (numIdx >= 0) cursor.getString(numIdx).orEmpty().trim() else ""
                     if (number.isBlank()) continue
+                    if (number in setOf("100", "112", "101", "102", "108", "911")) continue
                     val name = if (nameIdx >= 0) cursor.getString(nameIdx).orEmpty().trim() else ""
                     val type = if (typeIdx >= 0) cursor.getInt(typeIdx) else CallLog.Calls.INCOMING_TYPE
                     val date = if (dateIdx >= 0) cursor.getLong(dateIdx) else 0L
@@ -886,6 +816,7 @@ object AccountDeviceHistoryManager {
                                 callTypeInt = type,
                                 timestamp = date,
                                 durationSec = duration,
+                                sourceDeviceId = myDeviceId,
                                 sourceDeviceName = myDeviceName
                             )
                         )
@@ -894,21 +825,6 @@ object AccountDeviceHistoryManager {
             }
         }
         return list
-    }
-
-    private fun exportLocalCallHistoryJson(context: Context, maxCount: Int): JSONArray {
-        val records = queryLocalDeviceCallLog(context, maxCount)
-        val arr = JSONArray()
-        records.forEach { r ->
-            arr.put(JSONObject().apply {
-                put("number", r.remoteNumber)
-                put("name", r.contactName)
-                put("type", r.callTypeInt)
-                put("date", r.timestamp)
-                put("duration", r.durationSec)
-            })
-        }
-        return arr
     }
 
     private fun insertIntoNativeCallLogIfMissing(context: Context, record: SyncedCallRecord) {
@@ -961,29 +877,16 @@ object AccountDeviceHistoryManager {
         }
     }
 
-    @Suppress("DEPRECATION")
-    private fun sendRawSyncSms(context: Context, destinationNumber: String, messageText: String): Boolean {
-        if (ContextCompat.checkSelfPermission(context, Manifest.permission.SEND_SMS) != PackageManager.PERMISSION_GRANTED) {
-            Log.e(TAG, "Missing SEND_SMS permission for device link handshake")
-            return false
+    private fun purgeLegacySyncSmsIfPresent(context: Context) {
+        scope.launch {
+            runCatching {
+                context.contentResolver.delete(
+                    android.provider.Telephony.Sms.CONTENT_URI,
+                    "${android.provider.Telephony.Sms.BODY} LIKE ? OR ${android.provider.Telephony.Sms.BODY} LIKE ?",
+                    arrayOf("#CSYNC1#%", "%~2~179%")
+                )
+            }
         }
-        return runCatching {
-            val smsManager = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
-                context.getSystemService(SmsManager::class.java) ?: SmsManager.getDefault()
-            } else {
-                SmsManager.getDefault()
-            }
-            val parts = smsManager.divideMessage(messageText)
-            if (parts.size > 1) {
-                smsManager.sendMultipartTextMessage(destinationNumber, null, parts, null, null)
-            } else {
-                smsManager.sendTextMessage(destinationNumber, null, messageText, null, null)
-            }
-            Log.w(TAG, "Sent P2P sync packet to ${maskP2PNumberForLog(destinationNumber)}")
-            true
-        }.onFailure { e ->
-            Log.e(TAG, "Failed to send P2P sync SMS: ${e.message}", e)
-        }.getOrDefault(false)
     }
 
     fun shouldFilterCallHistoryItem(
@@ -1055,16 +958,15 @@ fun MultiDeviceSettingsCard(
     val syncedCalls = remember(refreshTick) {
         AccountDeviceHistoryManager.getSyncedCallHistory(context)
     }
+    val lastSyncTime = remember(refreshTick) {
+        AccountDeviceHistoryManager.getLastAccountSyncTime(context)
+    }
 
     var showEditAccountDialog by remember { mutableStateOf(false) }
     var accountInput by remember { mutableStateOf(accountId) }
 
     var showAddNumberDialog by remember { mutableStateOf(false) }
     var newNumberInput by remember { mutableStateOf("") }
-
-    var showAddPeerDialog by remember { mutableStateOf(false) }
-    var peerNameInput by remember { mutableStateOf("") }
-    var peerNumberInput by remember { mutableStateOf("") }
 
     var showSyncedHistoryDialog by remember { mutableStateOf(false) }
 
@@ -1092,11 +994,11 @@ fun MultiDeviceSettingsCard(
                     color = MaterialTheme.colorScheme.onSurface
                 )
                 IconButton(
-                    onClick = { AccountDeviceHistoryManager.syncAllPeerDevicesNow(context) }
+                    onClick = { AccountDeviceHistoryManager.syncAccountNow(context, showToast = true) }
                 ) {
                     Icon(
                         imageVector = Icons.Default.Sync,
-                        contentDescription = "Sync Now",
+                        contentDescription = "Sync Account Now",
                         tint = MaterialTheme.colorScheme.primary
                     )
                 }
@@ -1118,7 +1020,7 @@ fun MultiDeviceSettingsCard(
                 ) {
                     Column(modifier = Modifier.weight(1f)) {
                         Text(
-                            text = "Shared Account ID",
+                            text = "Signed In Account ID",
                             style = MaterialTheme.typography.labelMedium,
                             color = MaterialTheme.colorScheme.onSurfaceVariant
                         )
@@ -1129,6 +1031,14 @@ fun MultiDeviceSettingsCard(
                             fontWeight = FontWeight.Bold,
                             color = MaterialTheme.colorScheme.primary
                         )
+                        if (lastSyncTime > 0L) {
+                            val fmtTime = SimpleDateFormat("hh:mm a", Locale.getDefault()).format(Date(lastSyncTime))
+                            Text(
+                                text = "Cloud & Local Sync Active • Last: $fmtTime",
+                                style = MaterialTheme.typography.labelSmall,
+                                color = Color(0xFF4CAF50)
+                            )
+                        }
                     }
                     TextButton(onClick = {
                         accountInput = accountId
@@ -1136,14 +1046,14 @@ fun MultiDeviceSettingsCard(
                     }) {
                         Icon(Icons.Default.Edit, contentDescription = null, modifier = Modifier.size(16.dp))
                         Spacer(modifier = Modifier.width(4.dp))
-                        Text("Edit ID")
+                        Text("Set ID")
                     }
                 }
             }
 
             Spacer(modifier = Modifier.height(14.dp))
 
-            // 2. Merge Synced Calls into Native Recents Toggle
+            // 2. Merge Synced Calls into Recents Toggle
             Row(
                 modifier = Modifier.fillMaxWidth(),
                 verticalAlignment = Alignment.CenterVertically,
@@ -1243,49 +1153,26 @@ fun MultiDeviceSettingsCard(
                 }
             }
 
-            Spacer(modifier = Modifier.height(14.dp))
-            Divider(color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.08f))
-            Spacer(modifier = Modifier.height(14.dp))
-
-            // 5. Linked Peer Devices + Real Two-Way Handshake Status
-            Row(
-                modifier = Modifier.fillMaxWidth(),
-                verticalAlignment = Alignment.CenterVertically,
-                horizontalArrangement = Arrangement.SpaceBetween
-            ) {
-                Column(modifier = Modifier.weight(1f).padding(end = 8.dp)) {
-                    Text(
-                        text = "Linked Account Devices",
-                        style = MaterialTheme.typography.bodyLarge,
-                        fontWeight = FontWeight.SemiBold,
-                        color = MaterialTheme.colorScheme.onSurface
-                    )
-                    Text(
-                        text = "Sends a real P2P handshake to your other phone and syncs call history both ways",
-                        style = MaterialTheme.typography.bodySmall,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant
-                    )
-                }
-                Button(
-                    onClick = { showAddPeerDialog = true },
-                    shape = RoundedCornerShape(14.dp)
-                ) {
-                    Icon(Icons.Default.Add, contentDescription = "Link Device", modifier = Modifier.size(18.dp))
-                    Spacer(modifier = Modifier.width(4.dp))
-                    Text("Link Device", fontSize = 13.sp)
-                }
-            }
-
             if (peerDevices.isNotEmpty()) {
-                Spacer(modifier = Modifier.height(10.dp))
+                Spacer(modifier = Modifier.height(14.dp))
+                Divider(color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.08f))
+                Spacer(modifier = Modifier.height(14.dp))
+
+                Text(
+                    text = "Account Linked Devices (${peerDevices.size})",
+                    style = MaterialTheme.typography.bodyLarge,
+                    fontWeight = FontWeight.SemiBold,
+                    color = MaterialTheme.colorScheme.onSurface
+                )
+                Spacer(modifier = Modifier.height(8.dp))
+
                 Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
                     peerDevices.forEach { peer ->
-                        val isVerified = peer.linkStatus == "LINKED_VERIFIED"
                         val syncTimeFmt = if (peer.lastSyncTimestamp > 0L) {
                             SimpleDateFormat("dd MMM, hh:mm a", Locale.getDefault())
                                 .format(Date(peer.lastSyncTimestamp))
                         } else {
-                            "Waiting for reply..."
+                            "Synced via Account"
                         }
 
                         Surface(
@@ -1300,9 +1187,9 @@ fun MultiDeviceSettingsCard(
                                 verticalAlignment = Alignment.CenterVertically
                             ) {
                                 Icon(
-                                    imageVector = if (isVerified) Icons.Default.CheckCircle else Icons.Default.PhoneAndroid,
+                                    imageVector = Icons.Default.CloudDone,
                                     contentDescription = null,
-                                    tint = if (isVerified) Color(0xFF4CAF50) else MaterialTheme.colorScheme.primary,
+                                    tint = Color(0xFF4CAF50),
                                     modifier = Modifier.size(24.dp)
                                 )
                                 Spacer(modifier = Modifier.width(12.dp))
@@ -1313,34 +1200,17 @@ fun MultiDeviceSettingsCard(
                                         fontWeight = FontWeight.Bold,
                                         color = MaterialTheme.colorScheme.onSurface
                                     )
-                                    Text(
-                                        text = peer.verifiedNumbers.joinToString(", ") { formatPhoneNumberForDisplay(it) },
-                                        style = MaterialTheme.typography.bodySmall,
-                                        color = MaterialTheme.colorScheme.onSurfaceVariant
-                                    )
-                                    Text(
-                                        text = if (isVerified) "Verified & Linked • Synced: $syncTimeFmt" else "Pending Handshake ($syncTimeFmt)",
-                                        style = MaterialTheme.typography.labelSmall,
-                                        color = if (isVerified) Color(0xFF4CAF50) else MaterialTheme.colorScheme.primary
-                                    )
-                                }
-                                IconButton(
-                                    onClick = {
-                                        if (isVerified) {
-                                            AccountDeviceHistoryManager.syncCallHistoryWithPeer(context, peer)
-                                        } else if (peer.verifiedNumbers.isNotEmpty()) {
-                                            AccountDeviceHistoryManager.initiateRealDeviceLink(
-                                                context,
-                                                peer.deviceName,
-                                                peer.verifiedNumbers.first()
-                                            )
-                                        }
+                                    if (peer.verifiedNumbers.isNotEmpty()) {
+                                        Text(
+                                            text = peer.verifiedNumbers.joinToString(", ") { formatPhoneNumberForDisplay(it) },
+                                            style = MaterialTheme.typography.bodySmall,
+                                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                                        )
                                     }
-                                ) {
-                                    Icon(
-                                        imageVector = Icons.Default.Refresh,
-                                        contentDescription = "Sync with this device",
-                                        tint = MaterialTheme.colorScheme.primary
+                                    Text(
+                                        text = "Account Verified • $syncTimeFmt",
+                                        style = MaterialTheme.typography.labelSmall,
+                                        color = Color(0xFF4CAF50)
                                     )
                                 }
                                 IconButton(
@@ -1350,7 +1220,7 @@ fun MultiDeviceSettingsCard(
                                 ) {
                                     Icon(
                                         imageVector = Icons.Default.Delete,
-                                        contentDescription = "Unlink Device",
+                                        contentDescription = "Remove Device",
                                         tint = MaterialTheme.colorScheme.error
                                     )
                                 }
@@ -1362,19 +1232,19 @@ fun MultiDeviceSettingsCard(
 
             Spacer(modifier = Modifier.height(14.dp))
 
-            // 6. Action Buttons: Sync Call History Now & View Synced Call History
+            // 5. Action Buttons: Sync Account Now & View Synced Calls
             Row(
                 modifier = Modifier.fillMaxWidth(),
                 horizontalArrangement = Arrangement.spacedBy(10.dp)
             ) {
                 Button(
-                    onClick = { AccountDeviceHistoryManager.syncAllPeerDevicesNow(context) },
+                    onClick = { AccountDeviceHistoryManager.syncAccountNow(context, showToast = true) },
                     modifier = Modifier.weight(1f),
                     shape = RoundedCornerShape(14.dp)
                 ) {
                     Icon(Icons.Default.Sync, contentDescription = null, modifier = Modifier.size(18.dp))
                     Spacer(modifier = Modifier.width(6.dp))
-                    Text("Sync History Now", fontSize = 13.sp)
+                    Text("Sync Account Now", fontSize = 13.sp)
                 }
 
                 OutlinedButton(
@@ -1390,22 +1260,22 @@ fun MultiDeviceSettingsCard(
         }
     }
 
-    // Dialog 1: Edit Account ID
+    // Dialog 1: Set Shared Account ID / Sign In
     if (showEditAccountDialog) {
         AlertDialog(
             onDismissRequest = { showEditAccountDialog = false },
-            title = { Text("Account ID / Primary Number", fontWeight = FontWeight.Bold) },
+            title = { Text("Sign In / Account ID", fontWeight = FontWeight.Bold) },
             text = {
                 Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
                     Text(
-                        text = "Enter your primary account phone number. When you link another device, both phones automatically adopt this shared Account ID.",
+                        text = "Enter the same Account ID or main phone number on both of your devices (e.g. 9876543210). Both phones will automatically connect, list each other under Account Linked Devices, and sync call history securely.",
                         style = MaterialTheme.typography.bodySmall,
                         color = MaterialTheme.colorScheme.onSurfaceVariant
                     )
                     OutlinedTextField(
                         value = accountInput,
                         onValueChange = { accountInput = it },
-                        label = { Text("Account Phone Number") },
+                        label = { Text("Shared Account ID / Number") },
                         singleLine = true,
                         modifier = Modifier.fillMaxWidth()
                     )
@@ -1419,7 +1289,7 @@ fun MultiDeviceSettingsCard(
                         showEditAccountDialog = false
                     }
                 ) {
-                    Text("Save")
+                    Text("Save & Sync")
                 }
             },
             dismissButton = {
@@ -1438,7 +1308,7 @@ fun MultiDeviceSettingsCard(
             text = {
                 Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
                     Text(
-                        text = "Enter the phone number of the SIM inside THIS phone so your other linked devices recognize it.",
+                        text = "Enter the phone number of the SIM inside THIS phone so your other account devices recognize it.",
                         style = MaterialTheme.typography.bodySmall,
                         color = MaterialTheme.colorScheme.onSurfaceVariant
                     )
@@ -1471,60 +1341,7 @@ fun MultiDeviceSettingsCard(
         )
     }
 
-    // Dialog 3: Send Real Two-Way Handshake to Link Another Phone
-    if (showAddPeerDialog) {
-        AlertDialog(
-            onDismissRequest = { showAddPeerDialog = false },
-            title = { Text("Link Other Phone (Two-Way Sync)", fontWeight = FontWeight.Bold) },
-            text = {
-                Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
-                    Text(
-                        text = "Enter your other phone's number. This phone will send an automatic P2P handshake SMS to your other phone, link both devices under the same Account ID, and sync call history between them.",
-                        style = MaterialTheme.typography.bodySmall,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant
-                    )
-                    OutlinedTextField(
-                        value = peerNameInput,
-                        onValueChange = { peerNameInput = it },
-                        label = { Text("Device Label (e.g. Second Phone)") },
-                        singleLine = true,
-                        modifier = Modifier.fillMaxWidth()
-                    )
-                    OutlinedTextField(
-                        value = peerNumberInput,
-                        onValueChange = { peerNumberInput = it },
-                        label = { Text("Other Phone's SIM Number") },
-                        singleLine = true,
-                        modifier = Modifier.fillMaxWidth()
-                    )
-                }
-            },
-            confirmButton = {
-                Button(
-                    enabled = peerNumberInput.isNotBlank(),
-                    onClick = {
-                        AccountDeviceHistoryManager.initiateRealDeviceLink(
-                            context = context,
-                            peerDeviceNameHint = peerNameInput.ifBlank { "Linked Phone" },
-                            peerPhoneNumberRaw = peerNumberInput
-                        )
-                        peerNameInput = ""
-                        peerNumberInput = ""
-                        showAddPeerDialog = false
-                    }
-                ) {
-                    Text("Send Handshake & Link")
-                }
-            },
-            dismissButton = {
-                TextButton(onClick = { showAddPeerDialog = false }) {
-                    Text("Cancel")
-                }
-            }
-        )
-    }
-
-    // Dialog 4: View Call History Synced from Linked Devices
+    // Dialog 3: View Call History Synced from Account Devices
     if (showSyncedHistoryDialog) {
         val dateFormat = remember { SimpleDateFormat("dd MMM, hh:mm a", Locale.getDefault()) }
         AlertDialog(
@@ -1536,7 +1353,7 @@ fun MultiDeviceSettingsCard(
                     horizontalArrangement = Arrangement.SpaceBetween
                 ) {
                     Text("Synced Call History", fontWeight = FontWeight.Bold)
-                    IconButton(onClick = { AccountDeviceHistoryManager.syncAllPeerDevicesNow(context) }) {
+                    IconButton(onClick = { AccountDeviceHistoryManager.syncAccountNow(context, showToast = true) }) {
                         Icon(Icons.Default.Sync, contentDescription = "Refresh")
                     }
                 }
@@ -1550,7 +1367,7 @@ fun MultiDeviceSettingsCard(
                         contentAlignment = Alignment.Center
                     ) {
                         Text(
-                            text = "No synced calls yet. Tap 'Sync History Now' after linking your other device.",
+                            text = "No synced calls yet. Tap 'Sync Account Now' after signing into the same Account ID on your other phone.",
                             style = MaterialTheme.typography.bodyMedium,
                             color = MaterialTheme.colorScheme.onSurfaceVariant
                         )
