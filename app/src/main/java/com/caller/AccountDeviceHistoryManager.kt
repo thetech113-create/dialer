@@ -3,6 +3,40 @@ package com.caller
 import android.content.Context
 import android.os.Build
 import android.util.Log
+import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.Add
+import androidx.compose.material3.AlertDialog
+import androidx.compose.material3.Button
+import androidx.compose.material3.Card
+import androidx.compose.material3.CardDefaults
+import androidx.compose.material3.Divider
+import androidx.compose.material3.Icon
+import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.OutlinedTextField
+import androidx.compose.material3.Switch
+import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
+import androidx.compose.runtime.Composable
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
+import androidx.compose.ui.Alignment
+import androidx.compose.ui.Modifier
+import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp
 import org.json.JSONArray
 import org.json.JSONObject
 
@@ -181,5 +215,160 @@ object AccountDeviceHistoryManager {
             "account_device_filtering action=hide_entry remoteNumber=${maskP2PNumberForLog(remoteNumber)} device=${getCurrentDeviceName(context)}"
         )
         return true
+    }
+}
+
+/**
+ * Drop-in Settings Card for configuring Multi-Device Account Sync and Verified Numbers.
+ */
+@Composable
+fun MultiDeviceSettingsCard(
+    modifier: Modifier = Modifier
+) {
+    val context = LocalContext.current
+    var filteringEnabled by remember {
+        mutableStateOf(AccountDeviceHistoryManager.isFilteringEnabled(context))
+    }
+    var verifiedNumbers by remember {
+        mutableStateOf(AccountDeviceHistoryManager.getVerifiedNumbers(context))
+    }
+    var showAddNumberDialog by remember { mutableStateOf(false) }
+    var newNumberInput by remember { mutableStateOf("") }
+
+    Card(
+        modifier = modifier.fillMaxWidth(),
+        shape = RoundedCornerShape(24.dp),
+        colors = CardDefaults.cardColors(
+            containerColor = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.45f)
+        )
+    ) {
+        Column(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(horizontal = 18.dp, vertical = 16.dp)
+        ) {
+            Text(
+                text = "Multi-Device Account Sync",
+                style = MaterialTheme.typography.titleMedium,
+                fontWeight = FontWeight.Bold,
+                color = MaterialTheme.colorScheme.onSurface
+            )
+
+            Spacer(modifier = Modifier.height(12.dp))
+
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.SpaceBetween
+            ) {
+                Column(modifier = Modifier.weight(1f).padding(end = 12.dp)) {
+                    Text(
+                        text = "Hide Self-Calls Across Devices",
+                        style = MaterialTheme.typography.bodyLarge,
+                        fontWeight = FontWeight.SemiBold,
+                        color = MaterialTheme.colorScheme.onSurface
+                    )
+                    Spacer(modifier = Modifier.height(2.dp))
+                    Text(
+                        text = if (filteringEnabled) {
+                            "Hides calls made to this phone from another device on the same account (Native Android logs remain untouched)"
+                        } else {
+                            "Disabled — all calls appear in Recents"
+                        },
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                }
+                Switch(
+                    checked = filteringEnabled,
+                    onCheckedChange = { enabled ->
+                        filteringEnabled = enabled
+                        AccountDeviceHistoryManager.setFilteringEnabled(context, enabled)
+                    }
+                )
+            }
+
+            Spacer(modifier = Modifier.height(14.dp))
+            Divider(color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.08f))
+            Spacer(modifier = Modifier.height(14.dp))
+
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.SpaceBetween
+            ) {
+                Column(modifier = Modifier.weight(1f)) {
+                    Text(
+                        text = "This Device's Phone Number",
+                        style = MaterialTheme.typography.bodyLarge,
+                        fontWeight = FontWeight.SemiBold,
+                        color = MaterialTheme.colorScheme.onSurface
+                    )
+                    Text(
+                        text = if (verifiedNumbers.isNotEmpty()) {
+                            verifiedNumbers.joinToString(", ") { formatPhoneNumberForDisplay(it) }
+                        } else {
+                            "No verified number set for this device"
+                        },
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.primary,
+                        fontWeight = FontWeight.Medium
+                    )
+                }
+                Button(
+                    onClick = { showAddNumberDialog = true },
+                    shape = RoundedCornerShape(14.dp)
+                ) {
+                    Icon(
+                        imageVector = Icons.Default.Add,
+                        contentDescription = "Add Number",
+                        modifier = Modifier.size(18.dp)
+                    )
+                    Spacer(modifier = Modifier.width(4.dp))
+                    Text("Add Number", fontSize = 13.sp)
+                }
+            }
+        }
+    }
+
+    if (showAddNumberDialog) {
+        AlertDialog(
+            onDismissRequest = { showAddNumberDialog = false },
+            title = { Text("Add Verified Number for This Device", fontWeight = FontWeight.Bold) },
+            text = {
+                Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                    Text(
+                        text = "Enter the phone number assigned to this phone's SIM so calls to this number from your other account devices are identified.",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                    OutlinedTextField(
+                        value = newNumberInput,
+                        onValueChange = { newNumberInput = it },
+                        label = { Text("Phone Number (e.g. +91 98765 43210)") },
+                        singleLine = true,
+                        modifier = Modifier.fillMaxWidth()
+                    )
+                }
+            },
+            confirmButton = {
+                Button(
+                    enabled = newNumberInput.isNotBlank(),
+                    onClick = {
+                        AccountDeviceHistoryManager.registerVerifiedNumber(context, newNumberInput)
+                        verifiedNumbers = AccountDeviceHistoryManager.getVerifiedNumbers(context)
+                        newNumberInput = ""
+                        showAddNumberDialog = false
+                    }
+                ) {
+                    Text("Save")
+                }
+            },
+            dismissButton = {
+                TextButton(onClick = { showAddNumberDialog = false }) {
+                    Text("Cancel")
+                }
+            }
+        )
     }
 }

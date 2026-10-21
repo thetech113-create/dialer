@@ -7967,6 +7967,10 @@ fun SettingsScreen(
             color = MaterialTheme.colorScheme.onSurfaceVariant
         )
 
+        MultiDeviceSettingsCard(
+            modifier = Modifier.fillMaxWidth()
+        )
+
         CallerAnnouncementSettingsCard(
             modifier = Modifier.fillMaxWidth()
         )
