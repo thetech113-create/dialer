@@ -3071,6 +3071,9 @@ class MainActivity : ComponentActivity() {
         }
 
         callRows.forEach { row ->
+            if (AccountDeviceHistoryManager.shouldFilterCallHistoryItem(this@MainActivity, row.phoneNumber, row.callType)) {
+                return@forEach
+            }
             val numberSnapshot = buildP2PNumberSnapshot(row.phoneNumber)
             Log.d("RecentCalls_Debug", "Number: ${row.phoneNumber} | Lookup keys: ${numberSnapshot.lookupKeys}")
             // contactMap also files a saved 18004190157 under 8004190157 (its lookupKeys drop the leading 1),
