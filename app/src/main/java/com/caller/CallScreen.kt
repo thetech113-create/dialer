@@ -1099,6 +1099,34 @@ private fun ModernCallingScreenLayout(
 
         val palette = UnifiedUiSystem.rememberPalette()
 
+        LaunchedEffect(
+            callState.isInCall,
+            callState.isRinging,
+            callState.isTerminal,
+            isEnding,
+            localAnswerRequested,
+            callState.phoneNumber,
+            callState.contactName
+        ) {
+            if (callState.isInCall && callState.isRinging && !callState.isTerminal && !isEnding && !localAnswerRequested) {
+                CallerAnnouncementManager.announceIncomingCaller(
+                    context = context,
+                    phoneNumber = callState.phoneNumber,
+                    contactName = callState.contactName
+                )
+            } else {
+                CallerAnnouncementManager.stop()
+            }
+        }
+
+        DisposableEffect(Unit) {
+            onDispose {
+                if (!callState.isRinging) {
+                    CallerAnnouncementManager.stop()
+                }
+            }
+        }
+
         Box(
             modifier = Modifier
                 .fillMaxSize()

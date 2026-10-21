@@ -929,6 +929,7 @@ class MainActivity : ComponentActivity() {
 
         SmsMonitoringService.startService(this)
         OtpAutoFillService.startOtpAutoFill(this)
+        CallerAnnouncementManager.init(this)
 
         unregisterAppPhoneAccountsSafely()
 
