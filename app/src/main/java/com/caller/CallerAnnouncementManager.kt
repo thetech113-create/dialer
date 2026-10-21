@@ -1,6 +1,8 @@
 package com.caller
 
+import android.Manifest
 import android.content.Context
+import android.content.pm.PackageManager
 import android.media.AudioAttributes
 import android.media.AudioFocusRequest
 import android.media.AudioManager
@@ -8,6 +10,7 @@ import android.os.Build
 import android.os.Bundle
 import android.os.Handler
 import android.os.Looper
+import android.provider.ContactsContract
 import android.speech.tts.TextToSpeech
 import android.speech.tts.UtteranceProgressListener
 import android.telephony.TelephonyManager
@@ -17,6 +20,8 @@ import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.ExperimentalLayoutApi
+import androidx.compose.foundation.layout.FlowRow
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxWidth
@@ -31,8 +36,12 @@ import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Add
+import androidx.compose.material.icons.filled.Check
+import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.Delete
+import androidx.compose.material.icons.filled.Edit
 import androidx.compose.material.icons.filled.Person
+import androidx.compose.material.icons.filled.Search
 import androidx.compose.material.icons.filled.VolumeUp
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
@@ -48,6 +57,7 @@ import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -60,6 +70,9 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import androidx.core.content.ContextCompat
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.withContext
 import org.json.JSONArray
 import org.json.JSONObject
 import java.util.Locale
@@ -67,16 +80,27 @@ import java.util.UUID
 
 data class CallerSpokenAlias(
     val id: String = UUID.randomUUID().toString(),
+    val contactId: String = "",
     val contactName: String,
-    val phoneNumber: String,
-    val spokenAlias: String
+    val phoneNumbers: List<String>,
+    val spokenAlias: String,
+    val enabled: Boolean = true
+) {
+    val primaryNumber: String
+        get() = phoneNumbers.firstOrNull().orEmpty()
+}
+
+data class SelectableSavedContact(
+    val contactId: String,
+    val name: String,
+    val phoneNumbers: List<String>
 )
 
 object CallerAnnouncementManager {
     private const val TAG = "CallerAnnouncementManager"
     private const val PREFS_NAME = "caller_announcement_prefs"
     private const val KEY_ENABLED = "announcements_enabled"
-    private const val KEY_ALIAS_RULES_JSON = "custom_alias_rules_json"
+    private const val KEY_ALIAS_RULES_JSON = "custom_alias_rules_v2_json"
     private const val NAME_KEY_PREFIX = "name_alias:"
     private const val REPEAT_DELAY_MS = 3500L
 
@@ -196,7 +220,7 @@ object CallerAnnouncementManager {
     }
 
     /**
-     * Returns all saved custom caller aliases (e.g. Hamsa -> Amma) for display in Settings.
+     * Loads all configured per-contact announcement rules.
      */
     fun getAllCustomAliases(context: Context): List<CallerSpokenAlias> {
         val prefs = prefsContext(context).getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
@@ -209,12 +233,27 @@ object CallerAnnouncementManager {
                     val obj = array.optJSONObject(i) ?: continue
                     val spoken = obj.optString("spokenAlias").trim()
                     if (spoken.isEmpty()) continue
+                    val numbersArray = obj.optJSONArray("phoneNumbers")
+                    val numbers = buildList {
+                        if (numbersArray != null) {
+                            for (j in 0 until numbersArray.length()) {
+                                val num = numbersArray.optString(j).trim()
+                                if (num.isNotEmpty()) add(num)
+                            }
+                        }
+                        val singleFallback = obj.optString("phoneNumber").trim()
+                        if (singleFallback.isNotEmpty() && singleFallback !in this) {
+                            add(singleFallback)
+                        }
+                    }
                     add(
                         CallerSpokenAlias(
                             id = obj.optString("id").ifBlank { UUID.randomUUID().toString() },
+                            contactId = obj.optString("contactId").trim(),
                             contactName = obj.optString("contactName").trim(),
-                            phoneNumber = obj.optString("phoneNumber").trim(),
-                            spokenAlias = spoken
+                            phoneNumbers = numbers,
+                            spokenAlias = spoken,
+                            enabled = obj.optBoolean("enabled", true)
                         )
                     )
                 }
@@ -223,52 +262,72 @@ object CallerAnnouncementManager {
     }
 
     /**
-     * Saves or updates a custom spoken alias for a contact name and/or phone number
-     * (e.g., contactName = "Hamsa", phoneNumber = "+91...", spokenAlias = "Amma").
+     * Saves or updates a custom announcement setting for a selected saved contact (including all of their numbers).
      */
-    fun saveCustomAlias(
+    fun saveCustomContactRule(
         context: Context,
+        contactId: String,
         contactName: String,
-        phoneNumber: String,
-        spokenAlias: String
+        phoneNumbers: List<String>,
+        spokenAlias: String,
+        enabled: Boolean = true,
+        editingRuleId: String? = null
     ) {
         val cleanName = contactName.trim()
-        val cleanNumber = phoneNumber.trim()
+        val cleanNumbers = phoneNumbers.map { it.trim() }.filter { it.isNotEmpty() }.distinct()
         val cleanSpoken = spokenAlias.trim()
-        if (cleanSpoken.isEmpty() || (cleanName.isEmpty() && cleanNumber.isEmpty())) return
+        if (cleanSpoken.isEmpty() || (cleanName.isEmpty() && cleanNumbers.isEmpty())) return
 
-        val existing = getAllCustomAliases(context).toMutableList()
-        val numberSnapshot = buildP2PNumberSnapshot(cleanNumber)
-
-        // Replace existing rule if it matches the same contact name or normalized number
-        existing.removeAll { item ->
-            val sameName = cleanName.isNotEmpty() && item.contactName.equals(cleanName, ignoreCase = true)
-            val sameNumber = cleanNumber.isNotEmpty() && item.phoneNumber.isNotEmpty() &&
-                buildP2PNumberSnapshot(item.phoneNumber).lookupKeys.intersect(numberSnapshot.lookupKeys.toSet()).isNotEmpty()
-            sameName || sameNumber
+        val incomingLookupKeys = LinkedHashSet<String>().apply {
+            cleanNumbers.forEach { num ->
+                add(num)
+                addAll(buildP2PNumberSnapshot(num).lookupKeys)
+            }
         }
 
-        existing.add(
-            0,
-            CallerSpokenAlias(
-                contactName = cleanName,
-                phoneNumber = cleanNumber,
-                spokenAlias = cleanSpoken
-            )
+        val existing = getAllCustomAliases(context).toMutableList()
+        val existingIdx = existing.indexOfFirst { item ->
+            (editingRuleId != null && item.id == editingRuleId) ||
+                (contactId.isNotBlank() && item.contactId == contactId) ||
+                (cleanName.isNotEmpty() && item.contactName.equals(cleanName, ignoreCase = true)) ||
+                item.phoneNumbers.any { num ->
+                    buildP2PNumberSnapshot(num).lookupKeys.intersect(incomingLookupKeys).isNotEmpty()
+                }
+        }
+
+        val updatedRule = CallerSpokenAlias(
+            id = if (existingIdx >= 0) existing[existingIdx].id else (editingRuleId ?: UUID.randomUUID().toString()),
+            contactId = contactId,
+            contactName = cleanName,
+            phoneNumbers = cleanNumbers,
+            spokenAlias = cleanSpoken,
+            enabled = enabled
         )
+
+        if (existingIdx >= 0) {
+            existing[existingIdx] = updatedRule
+        } else {
+            existing.add(0, updatedRule)
+        }
         persistCustomAliases(context, existing)
     }
 
+    fun setCustomRuleEnabled(context: Context, ruleId: String, enabled: Boolean) {
+        val updated = getAllCustomAliases(context).map { rule ->
+            if (rule.id == ruleId) rule.copy(enabled = enabled) else rule
+        }
+        persistCustomAliases(context, updated)
+    }
+
     fun deleteCustomAlias(context: Context, ruleId: String) {
-        val existing = getAllCustomAliases(context).filterNot { it.id == ruleId }
-        persistCustomAliases(context, existing)
+        val remaining = getAllCustomAliases(context).filterNot { it.id == ruleId }
+        persistCustomAliases(context, remaining)
     }
 
     private fun persistCustomAliases(context: Context, rules: List<CallerSpokenAlias>) {
         val prefs = prefsContext(context).getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
         val editor = prefs.edit()
 
-        // Clear old fast-lookup keys and rebuild from the structured list
         prefs.all.keys
             .filter { it != KEY_ENABLED && it != KEY_ALIAS_RULES_JSON }
             .forEach { editor.remove(it) }
@@ -278,23 +337,30 @@ object CallerAnnouncementManager {
             array.put(
                 JSONObject().apply {
                     put("id", rule.id)
+                    put("contactId", rule.contactId)
                     put("contactName", rule.contactName)
-                    put("phoneNumber", rule.phoneNumber)
+                    put("phoneNumbers", JSONArray(rule.phoneNumbers))
                     put("spokenAlias", rule.spokenAlias)
+                    put("enabled", rule.enabled)
                 }
             )
-            if (rule.phoneNumber.isNotBlank()) {
-                val snapshot = buildP2PNumberSnapshot(rule.phoneNumber)
-                editor.putString(rule.phoneNumber.trim(), rule.spokenAlias)
-                snapshot.lookupKeys.forEach { key ->
-                    if (key.isNotBlank()) editor.putString(key, rule.spokenAlias)
+            // Only index active/enabled rules into fast lookup keys
+            if (rule.enabled) {
+                rule.phoneNumbers.forEach { rawNum ->
+                    if (rawNum.isNotBlank()) {
+                        val snapshot = buildP2PNumberSnapshot(rawNum)
+                        editor.putString(rawNum.trim(), rule.spokenAlias)
+                        snapshot.lookupKeys.forEach { key ->
+                            if (key.isNotBlank()) editor.putString(key, rule.spokenAlias)
+                        }
+                    }
                 }
-            }
-            if (rule.contactName.isNotBlank()) {
-                editor.putString(
-                    NAME_KEY_PREFIX + rule.contactName.lowercase(Locale.ROOT),
-                    rule.spokenAlias
-                )
+                if (rule.contactName.isNotBlank()) {
+                    editor.putString(
+                        NAME_KEY_PREFIX + rule.contactName.lowercase(Locale.ROOT),
+                        rule.spokenAlias
+                    )
+                }
             }
         }
         editor.putString(KEY_ALIAS_RULES_JSON, array.toString())
@@ -307,7 +373,6 @@ object CallerAnnouncementManager {
     fun getAlias(context: Context, rawOrNormalizedNumber: String, contactName: String? = null): String {
         val prefs = prefsContext(context).getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
 
-        // 1. Check phone number lookup keys (+91, 0, 10-digit)
         if (rawOrNormalizedNumber.isNotBlank()) {
             val snapshot = buildP2PNumberSnapshot(rawOrNormalizedNumber)
             val candidateKeys = LinkedHashSet<String>().apply {
@@ -321,7 +386,6 @@ object CallerAnnouncementManager {
             }
         }
 
-        // 2. Check contact name match (exact match or first-name match, e.g. "Hamsa" or "Hamsa Nagaraj")
         val cleanContact = contactName?.trim().orEmpty()
         if (cleanContact.isNotBlank() && !cleanContact.equals("Unknown", ignoreCase = true)) {
             val lowerFull = cleanContact.lowercase(Locale.ROOT)
@@ -340,26 +404,38 @@ object CallerAnnouncementManager {
     }
 
     fun setAlias(context: Context, rawOrNormalizedNumber: String, alias: String) {
-        saveCustomAlias(
+        saveCustomContactRule(
             context = context,
+            contactId = "",
             contactName = "",
-            phoneNumber = rawOrNormalizedNumber,
-            spokenAlias = alias
+            phoneNumbers = listOf(rawOrNormalizedNumber),
+            spokenAlias = alias,
+            enabled = true
         )
     }
 
     fun removeAlias(context: Context, rawOrNormalizedNumber: String) {
         val snapshot = buildP2PNumberSnapshot(rawOrNormalizedNumber)
         val remaining = getAllCustomAliases(context).filterNot { rule ->
-            rule.phoneNumber == rawOrNormalizedNumber.trim() ||
-                buildP2PNumberSnapshot(rule.phoneNumber).lookupKeys.intersect(snapshot.lookupKeys.toSet()).isNotEmpty()
+            rule.phoneNumbers.any { num ->
+                num == rawOrNormalizedNumber.trim() ||
+                    buildP2PNumberSnapshot(num).lookupKeys.intersect(snapshot.lookupKeys.toSet()).isNotEmpty()
+            }
         }
         persistCustomAliases(context, remaining)
     }
 
+    private fun buildIncomingCallAnnouncementPhrase(nameOrAlias: String): String {
+        val cleaned = nameOrAlias.trim()
+        if (cleaned.startsWith("Incoming call", ignoreCase = true)) {
+            return cleaned
+        }
+        return "Incoming call from $cleaned"
+    }
+
     /**
      * Resolves Custom Spoken Alias ("Amma") -> Saved Contact Name ("Hamsa") -> Spoken Phone Number,
-     * and announces "<Name> is calling".
+     * and announces "Incoming call from <Name>".
      */
     fun announceIncomingCaller(
         context: Context,
@@ -382,15 +458,11 @@ object CallerAnnouncementManager {
     }
 
     /**
-     * Plays a single preview announcement immediately when the user tests an alias in Settings.
+     * Plays a single preview ("Incoming call from Amma") when testing in Settings.
      */
     fun testAnnouncementPreview(context: Context, spokenAlias: String) {
         val cleaned = spokenAlias.trim().ifBlank { "Amma" }
-        val text = if (cleaned.endsWith("calling", ignoreCase = true)) {
-            cleaned
-        } else {
-            "$cleaned is calling"
-        }
+        val text = buildIncomingCallAnnouncementPhrase(cleaned)
         val appCtx = context.applicationContext
         appContextRef = appCtx
         pendingTextToSpeak = text
@@ -415,15 +487,11 @@ object CallerAnnouncementManager {
         if (cleaned.isEmpty()) return
 
         if (!isRingerAudible(appCtx)) {
-            Log.w(TAG, "Skipping caller announcement: device is in silent/vibrate mode")
+            Log.w(TAG, "Skipping caller announcement: silent/vibrate mode")
             return
         }
 
-        val fullText = if (cleaned.endsWith("calling", ignoreCase = true)) {
-            cleaned
-        } else {
-            "$cleaned is calling"
-        }
+        val fullText = buildIncomingCallAnnouncementPhrase(cleaned)
 
         val isSameTextAlreadyRunning = shouldKeepAnnouncing && pendingTextToSpeak == fullText && isPlaying
         pendingTextToSpeak = fullText
@@ -559,12 +627,76 @@ object CallerAnnouncementManager {
     }
 }
 
+private fun groupSavedContactsForPicker(rawContacts: List<Contact>): List<SelectableSavedContact> {
+    val grouped = linkedMapOf<String, MutableList<Contact>>()
+    rawContacts.forEach { contact ->
+        val nameKey = contact.name.trim().takeIf { it.isNotEmpty() && !it.equals("Unknown", ignoreCase = true) }
+            ?: return@forEach
+        val groupKey = nameKey.lowercase(Locale.ROOT)
+        grouped.getOrPut(groupKey) { mutableListOf() }.add(contact)
+    }
+    return grouped.values.mapNotNull { list ->
+        val first = list.firstOrNull() ?: return@mapNotNull null
+        val distinctNumbers = list.map { it.phoneNumber.trim() }
+            .filter { it.isNotEmpty() }
+            .distinctBy { buildP2PNumberSnapshot(it).normalized.ifBlank { it } }
+        if (distinctNumbers.isEmpty()) return@mapNotNull null
+        SelectableSavedContact(
+            contactId = first.id,
+            name = first.name.trim(),
+            phoneNumbers = distinctNumbers
+        )
+    }.sortedBy { it.name.lowercase(Locale.ROOT) }
+}
+
+private fun queryDeviceContactsFallback(context: Context): List<Contact> {
+    if (ContextCompat.checkSelfPermission(context, Manifest.permission.READ_CONTACTS) != PackageManager.PERMISSION_GRANTED) {
+        return emptyList()
+    }
+    val list = mutableListOf<Contact>()
+    val projection = arrayOf(
+        ContactsContract.CommonDataKinds.Phone.CONTACT_ID,
+        ContactsContract.CommonDataKinds.Phone.DISPLAY_NAME_PRIMARY,
+        ContactsContract.CommonDataKinds.Phone.NUMBER
+    )
+    runCatching {
+        context.contentResolver.query(
+            ContactsContract.CommonDataKinds.Phone.CONTENT_URI,
+            projection,
+            null,
+            null,
+            "${ContactsContract.CommonDataKinds.Phone.DISPLAY_NAME_PRIMARY} ASC"
+        )?.use { cursor ->
+            val idIdx = cursor.getColumnIndex(ContactsContract.CommonDataKinds.Phone.CONTACT_ID)
+            val nameIdx = cursor.getColumnIndex(ContactsContract.CommonDataKinds.Phone.DISPLAY_NAME_PRIMARY)
+            val numIdx = cursor.getColumnIndex(ContactsContract.CommonDataKinds.Phone.NUMBER)
+            while (cursor.moveToNext()) {
+                val id = if (idIdx >= 0) cursor.getString(idIdx).orEmpty() else ""
+                val name = if (nameIdx >= 0) cursor.getString(nameIdx).orEmpty().trim() else ""
+                val number = if (numIdx >= 0) cursor.getString(numIdx).orEmpty().trim() else ""
+                if (name.isNotEmpty() && number.isNotEmpty()) {
+                    list.add(Contact(id = id, name = name, phoneNumber = number))
+                }
+            }
+        }
+    }
+    return list
+}
+
+private val QUICK_SPOKEN_PRESETS = listOf(
+    "Amma", "Appa", "Akka", "Anna", "Ajji", "Home", "Boss"
+)
+
 /**
- * Drop-in Settings card for enabling/disabling Caller Announcements and configuring
- * custom spoken names (e.g., Contact "Hamsa" -> Announces "Amma is calling").
+ * Settings Card:
+ * - Master Enable/Disable Switch
+ * - Multiple Saved Contacts with individual custom spoken names & per-contact ON/OFF toggles
+ * - Tap-to-Select Saved Contact Picker (no typing contact names or phone numbers)
  */
+@OptIn(ExperimentalLayoutApi::class)
 @Composable
 fun CallerAnnouncementSettingsCard(
+    contacts: List<Contact> = emptyList(),
     modifier: Modifier = Modifier
 ) {
     val context = LocalContext.current
@@ -574,7 +706,22 @@ fun CallerAnnouncementSettingsCard(
     var customAliases by remember {
         mutableStateOf(CallerAnnouncementManager.getAllCustomAliases(context))
     }
-    var showAddDialog by remember { mutableStateOf(false) }
+    var loadedFallbackContacts by remember { mutableStateOf<List<Contact>>(emptyList()) }
+
+    LaunchedEffect(contacts) {
+        if (contacts.isEmpty()) {
+            loadedFallbackContacts = withContext(Dispatchers.IO) {
+                queryDeviceContactsFallback(context)
+            }
+        }
+    }
+
+    val allAvailableContacts = remember(contacts, loadedFallbackContacts) {
+        groupSavedContactsForPicker(if (contacts.isNotEmpty()) contacts else loadedFallbackContacts)
+    }
+
+    var isDialogOpen by remember { mutableStateOf(false) }
+    var editingRule by remember { mutableStateOf<CallerSpokenAlias?>(null) }
 
     Card(
         modifier = modifier.fillMaxWidth(),
@@ -604,7 +751,7 @@ fun CallerAnnouncementSettingsCard(
             ) {
                 Column(modifier = Modifier.weight(1f).padding(end = 12.dp)) {
                     Text(
-                        text = "Announce Caller Name",
+                        text = "Announce Incoming Calls",
                         style = MaterialTheme.typography.bodyLarge,
                         fontWeight = FontWeight.SemiBold,
                         color = MaterialTheme.colorScheme.onSurface
@@ -612,7 +759,7 @@ fun CallerAnnouncementSettingsCard(
                     Spacer(modifier = Modifier.height(2.dp))
                     Text(
                         text = if (announcementsEnabled) {
-                            "Speaks caller name or custom nickname out loud when ringing"
+                            "Says \"Incoming call from [Name]\" out loud while ringing"
                         } else {
                             "Disabled — incoming calls will only play your ringtone"
                         },
@@ -652,7 +799,10 @@ fun CallerAnnouncementSettingsCard(
                     )
                 }
                 Button(
-                    onClick = { showAddDialog = true },
+                    onClick = {
+                        editingRule = null
+                        isDialogOpen = true
+                    },
                     shape = RoundedCornerShape(14.dp)
                 ) {
                     Icon(
@@ -670,9 +820,15 @@ fun CallerAnnouncementSettingsCard(
                 Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
                     customAliases.forEach { rule ->
                         Surface(
-                            modifier = Modifier.fillMaxWidth(),
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .clip(RoundedCornerShape(16.dp))
+                                .clickable {
+                                    editingRule = rule
+                                    isDialogOpen = true
+                                },
                             shape = RoundedCornerShape(16.dp),
-                            color = MaterialTheme.colorScheme.surface.copy(alpha = 0.7f)
+                            color = MaterialTheme.colorScheme.surface.copy(alpha = 0.72f)
                         ) {
                             Row(
                                 modifier = Modifier
@@ -681,28 +837,51 @@ fun CallerAnnouncementSettingsCard(
                                 verticalAlignment = Alignment.CenterVertically
                             ) {
                                 Column(modifier = Modifier.weight(1f)) {
-                                    val label = buildString {
-                                        if (rule.contactName.isNotBlank()) append(rule.contactName)
-                                        if (rule.phoneNumber.isNotBlank()) {
-                                            if (isNotEmpty()) append(" • ")
-                                            append(rule.phoneNumber)
-                                        }
-                                    }
                                     Text(
-                                        text = label,
+                                        text = rule.contactName.ifBlank {
+                                            formatPhoneNumberForDisplay(rule.primaryNumber)
+                                        },
                                         style = MaterialTheme.typography.bodyMedium,
-                                        fontWeight = FontWeight.SemiBold,
+                                        fontWeight = FontWeight.Bold,
                                         color = MaterialTheme.colorScheme.onSurface,
                                         maxLines = 1,
                                         overflow = TextOverflow.Ellipsis
                                     )
+                                    if (rule.phoneNumbers.isNotEmpty()) {
+                                        Text(
+                                            text = rule.phoneNumbers.joinToString(", ") {
+                                                formatPhoneNumberForDisplay(it)
+                                            },
+                                            style = MaterialTheme.typography.bodySmall,
+                                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                            maxLines = 1,
+                                            overflow = TextOverflow.Ellipsis
+                                        )
+                                    }
+                                    Spacer(modifier = Modifier.height(2.dp))
                                     Text(
-                                        text = "Says: \"${rule.spokenAlias} is calling\"",
+                                        text = if (rule.enabled) {
+                                            "Says: \"Incoming call from ${rule.spokenAlias}\""
+                                        } else {
+                                            "Custom announcement paused (uses default name)"
+                                        },
                                         style = MaterialTheme.typography.bodySmall,
-                                        color = MaterialTheme.colorScheme.primary,
+                                        color = if (rule.enabled) {
+                                            MaterialTheme.colorScheme.primary
+                                        } else {
+                                            MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.6f)
+                                        },
                                         fontWeight = FontWeight.Medium
                                     )
                                 }
+
+                                Switch(
+                                    checked = rule.enabled,
+                                    onCheckedChange = { enabled ->
+                                        CallerAnnouncementManager.setCustomRuleEnabled(context, rule.id, enabled)
+                                        customAliases = CallerAnnouncementManager.getAllCustomAliases(context)
+                                    }
+                                )
 
                                 IconButton(
                                     onClick = {
@@ -727,7 +906,7 @@ fun CallerAnnouncementSettingsCard(
                                 ) {
                                     Icon(
                                         imageVector = Icons.Default.Delete,
-                                        contentDescription = "Delete custom name",
+                                        contentDescription = "Remove",
                                         tint = MaterialTheme.colorScheme.error
                                     )
                                 }
@@ -739,88 +918,304 @@ fun CallerAnnouncementSettingsCard(
         }
     }
 
-    if (showAddDialog) {
-        var contactQueryOrName by remember { mutableStateOf("") }
-        var phoneNumberInput by remember { mutableStateOf("") }
-        var spokenAliasInput by remember { mutableStateOf("") }
+    if (isDialogOpen) {
+        val initialSelectedContact = remember(editingRule) {
+            editingRule?.let { rule ->
+                SelectableSavedContact(
+                    contactId = rule.contactId,
+                    name = rule.contactName,
+                    phoneNumbers = rule.phoneNumbers
+                )
+            }
+        }
+        var selectedContact by remember(editingRule) { mutableStateOf(initialSelectedContact) }
+        var searchFilter by remember { mutableStateOf("") }
+        var spokenAliasInput by remember(editingRule) {
+            mutableStateOf(editingRule?.spokenAlias.orEmpty())
+        }
+
+        val filteredContacts = remember(allAvailableContacts, searchFilter) {
+            val q = searchFilter.trim()
+            if (q.isEmpty()) {
+                allAvailableContacts
+            } else {
+                allAvailableContacts.filter { c ->
+                    c.name.contains(q, ignoreCase = true) ||
+                        c.phoneNumbers.any { it.contains(q) }
+                }
+            }
+        }
 
         AlertDialog(
-            onDismissRequest = { showAddDialog = false },
+            onDismissRequest = { isDialogOpen = false },
             title = {
-                Text("Custom Caller Announcement", fontWeight = FontWeight.Bold)
+                Text(
+                    text = if (selectedContact == null) {
+                        "Select Saved Contact"
+                    } else if (editingRule != null) {
+                        "Edit Contact Announcement"
+                    } else {
+                        "Set Spoken Name"
+                    },
+                    fontWeight = FontWeight.Bold
+                )
             },
             text = {
-                Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
-                    Text(
-                        text = "Pick a saved contact (like Hamsa) or enter their name/number, then set what the voice should announce (like Amma).",
-                        style = MaterialTheme.typography.bodySmall,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant
-                    )
+                Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
+                    val chosen = selectedContact
+                    if (chosen == null) {
+                        // STEP 1: Tap to select directly from saved contacts (no manual typing of contact details)
+                        OutlinedTextField(
+                            value = searchFilter,
+                            onValueChange = { searchFilter = it },
+                            placeholder = { Text("Search saved contacts...") },
+                            leadingIcon = {
+                                Icon(Icons.Default.Search, contentDescription = null)
+                            },
+                            trailingIcon = {
+                                if (searchFilter.isNotEmpty()) {
+                                    IconButton(onClick = { searchFilter = "" }) {
+                                        Icon(Icons.Default.Close, contentDescription = "Clear")
+                                    }
+                                }
+                            },
+                            singleLine = true,
+                            modifier = Modifier.fillMaxWidth(),
+                            shape = RoundedCornerShape(14.dp)
+                        )
 
-                    OutlinedTextField(
-                        value = contactQueryOrName,
-                        onValueChange = { contactQueryOrName = it },
-                        label = { Text("Saved Contact Name (e.g. Hamsa)") },
-                        singleLine = true,
-                        modifier = Modifier.fillMaxWidth()
-                    )
-
-                    OutlinedTextField(
-                        value = phoneNumberInput,
-                        onValueChange = { phoneNumberInput = it },
-                        label = { Text("Phone Number (optional if name set)") },
-                        singleLine = true,
-                        modifier = Modifier.fillMaxWidth()
-                    )
-
-                    OutlinedTextField(
-                        value = spokenAliasInput,
-                        onValueChange = { spokenAliasInput = it },
-                        label = { Text("Announce As (e.g. Amma)") },
-                        singleLine = true,
-                        modifier = Modifier.fillMaxWidth()
-                    )
-
-                    if (spokenAliasInput.isNotBlank()) {
-                        TextButton(
-                            onClick = {
-                                CallerAnnouncementManager.testAnnouncementPreview(
-                                    context,
-                                    spokenAliasInput
+                        if (filteredContacts.isEmpty()) {
+                            Box(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .padding(vertical = 24.dp),
+                                contentAlignment = Alignment.Center
+                            ) {
+                                Text(
+                                    text = "No matching saved contacts found",
+                                    style = MaterialTheme.typography.bodyMedium,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant
                                 )
                             }
+                        } else {
+                            LazyColumn(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .heightIn(max = 280.dp)
+                                    .clip(RoundedCornerShape(14.dp))
+                                    .background(MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.35f))
+                            ) {
+                                items(
+                                    items = filteredContacts,
+                                    key = { "${it.contactId}_${it.name}" }
+                                ) { contactItem ->
+                                    Row(
+                                        modifier = Modifier
+                                            .fillMaxWidth()
+                                            .clickable {
+                                                selectedContact = contactItem
+                                                // Pre-fill existing alias if this contact already has a rule
+                                                val existingForContact = customAliases.firstOrNull {
+                                                    it.contactName.equals(contactItem.name, ignoreCase = true)
+                                                }
+                                                if (existingForContact != null && spokenAliasInput.isBlank()) {
+                                                    spokenAliasInput = existingForContact.spokenAlias
+                                                }
+                                            }
+                                            .padding(horizontal = 12.dp, vertical = 10.dp),
+                                        verticalAlignment = Alignment.CenterVertically
+                                    ) {
+                                        Box(
+                                            modifier = Modifier
+                                                .size(36.dp)
+                                                .clip(CircleShape)
+                                                .background(MaterialTheme.colorScheme.primary.copy(alpha = 0.15f)),
+                                            contentAlignment = Alignment.Center
+                                        ) {
+                                            Icon(
+                                                imageVector = Icons.Default.Person,
+                                                contentDescription = null,
+                                                tint = MaterialTheme.colorScheme.primary,
+                                                modifier = Modifier.size(20.dp)
+                                            )
+                                        }
+                                        Spacer(modifier = Modifier.width(10.dp))
+                                        Column(modifier = Modifier.weight(1f)) {
+                                            Text(
+                                                text = contactItem.name,
+                                                style = MaterialTheme.typography.bodyLarge,
+                                                fontWeight = FontWeight.SemiBold,
+                                                maxLines = 1,
+                                                overflow = TextOverflow.Ellipsis
+                                            )
+                                            Text(
+                                                text = contactItem.phoneNumbers.joinToString(", ") {
+                                                    formatPhoneNumberForDisplay(it)
+                                                },
+                                                style = MaterialTheme.typography.bodySmall,
+                                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                                maxLines = 1,
+                                                overflow = TextOverflow.Ellipsis
+                                            )
+                                        }
+                                    }
+                                    Divider(color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.06f))
+                                }
+                            }
+                        }
+                    } else {
+                        // STEP 2: Saved contact is selected -> Choose preset chip or enter spoken name
+                        Surface(
+                            modifier = Modifier.fillMaxWidth(),
+                            shape = RoundedCornerShape(14.dp),
+                            color = MaterialTheme.colorScheme.primary.copy(alpha = 0.12f)
                         ) {
-                            Icon(
-                                imageVector = Icons.Default.VolumeUp,
-                                contentDescription = null,
-                                modifier = Modifier.size(18.dp)
-                            )
-                            Spacer(modifier = Modifier.width(6.dp))
-                            Text("Preview: \"${spokenAliasInput.trim()} is calling\"")
+                            Row(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .padding(horizontal = 12.dp, vertical = 10.dp),
+                                verticalAlignment = Alignment.CenterVertically
+                            ) {
+                                Icon(
+                                    imageVector = Icons.Default.Person,
+                                    contentDescription = null,
+                                    tint = MaterialTheme.colorScheme.primary,
+                                    modifier = Modifier.size(22.dp)
+                                )
+                                Spacer(modifier = Modifier.width(10.dp))
+                                Column(modifier = Modifier.weight(1f)) {
+                                    Text(
+                                        text = chosen.name,
+                                        style = MaterialTheme.typography.bodyLarge,
+                                        fontWeight = FontWeight.Bold,
+                                        color = MaterialTheme.colorScheme.onSurface
+                                    )
+                                    Text(
+                                        text = chosen.phoneNumbers.joinToString(", ") {
+                                            formatPhoneNumberForDisplay(it)
+                                        },
+                                        style = MaterialTheme.typography.bodySmall,
+                                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                                    )
+                                }
+                                TextButton(onClick = { selectedContact = null }) {
+                                    Icon(
+                                        imageVector = Icons.Default.Edit,
+                                        contentDescription = null,
+                                        modifier = Modifier.size(16.dp)
+                                    )
+                                    Spacer(modifier = Modifier.width(4.dp))
+                                    Text("Change")
+                                }
+                            }
+                        }
+
+                        Text(
+                            text = "Quick Select Spoken Name:",
+                            style = MaterialTheme.typography.labelMedium,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+
+                        FlowRow(
+                            horizontalArrangement = Arrangement.spacedBy(8.dp),
+                            verticalArrangement = Arrangement.spacedBy(8.dp)
+                        ) {
+                            QUICK_SPOKEN_PRESETS.forEach { preset ->
+                                val isSelected = spokenAliasInput.trim().equals(preset, ignoreCase = true)
+                                Surface(
+                                    shape = RoundedCornerShape(999.dp),
+                                    color = if (isSelected) {
+                                        MaterialTheme.colorScheme.primary
+                                    } else {
+                                        MaterialTheme.colorScheme.surfaceVariant
+                                    },
+                                    modifier = Modifier.clickable {
+                                        spokenAliasInput = preset
+                                    }
+                                ) {
+                                    Row(
+                                        modifier = Modifier.padding(horizontal = 12.dp, vertical = 6.dp),
+                                        verticalAlignment = Alignment.CenterVertically
+                                    ) {
+                                        if (isSelected) {
+                                            Icon(
+                                                imageVector = Icons.Default.Check,
+                                                contentDescription = null,
+                                                tint = MaterialTheme.colorScheme.onPrimary,
+                                                modifier = Modifier.size(14.dp)
+                                            )
+                                            Spacer(modifier = Modifier.width(4.dp))
+                                        }
+                                        Text(
+                                            text = preset,
+                                            fontSize = 13.sp,
+                                            fontWeight = FontWeight.SemiBold,
+                                            color = if (isSelected) {
+                                                MaterialTheme.colorScheme.onPrimary
+                                            } else {
+                                                MaterialTheme.colorScheme.onSurfaceVariant
+                                            }
+                                        )
+                                    }
+                                }
+                            }
+                        }
+
+                        OutlinedTextField(
+                            value = spokenAliasInput,
+                            onValueChange = { spokenAliasInput = it },
+                            label = { Text("Spoken Name (e.g. Amma)") },
+                            singleLine = true,
+                            modifier = Modifier.fillMaxWidth(),
+                            shape = RoundedCornerShape(14.dp)
+                        )
+
+                        if (spokenAliasInput.isNotBlank()) {
+                            TextButton(
+                                onClick = {
+                                    CallerAnnouncementManager.testAnnouncementPreview(
+                                        context,
+                                        spokenAliasInput
+                                    )
+                                }
+                            ) {
+                                Icon(
+                                    imageVector = Icons.Default.VolumeUp,
+                                    contentDescription = null,
+                                    modifier = Modifier.size(18.dp)
+                                )
+                                Spacer(modifier = Modifier.width(6.dp))
+                                Text("Test: \"Incoming call from ${spokenAliasInput.trim()}\"")
+                            }
                         }
                     }
                 }
             },
             confirmButton = {
-                Button(
-                    enabled = spokenAliasInput.isNotBlank() &&
-                        (contactQueryOrName.isNotBlank() || phoneNumberInput.isNotBlank()),
-                    onClick = {
-                        CallerAnnouncementManager.saveCustomAlias(
-                            context = context,
-                            contactName = contactQueryOrName,
-                            phoneNumber = phoneNumberInput,
-                            spokenAlias = spokenAliasInput
-                        )
-                        customAliases = CallerAnnouncementManager.getAllCustomAliases(context)
-                        showAddDialog = false
+                if (selectedContact != null) {
+                    Button(
+                        enabled = spokenAliasInput.isNotBlank(),
+                        onClick = {
+                            val chosen = selectedContact ?: return@Button
+                            CallerAnnouncementManager.saveCustomContactRule(
+                                context = context,
+                                contactId = chosen.contactId,
+                                contactName = chosen.name,
+                                phoneNumbers = chosen.phoneNumbers,
+                                spokenAlias = spokenAliasInput,
+                                enabled = editingRule?.enabled ?: true,
+                                editingRuleId = editingRule?.id
+                            )
+                            customAliases = CallerAnnouncementManager.getAllCustomAliases(context)
+                            isDialogOpen = false
+                        }
+                    ) {
+                        Text("Save")
                     }
-                ) {
-                    Text("Save")
                 }
             },
             dismissButton = {
-                TextButton(onClick = { showAddDialog = false }) {
+                TextButton(onClick = { isDialogOpen = false }) {
                     Text("Cancel")
                 }
             }
