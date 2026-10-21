@@ -55,6 +55,7 @@ import androidx.compose.foundation.clickable
 import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.gestures.detectHorizontalDragGestures
 import androidx.compose.foundation.gestures.detectVerticalDragGestures
+import android.view.WindowInsets
 import androidx.compose.foundation.isSystemInDarkTheme
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -1013,21 +1014,14 @@ class MainActivity : ComponentActivity() {
         syncContactsObserverRegistration()
 
         setContent {
-            val isDark = isSystemInDarkTheme()
+            val palette = UnifiedUiSystem.rememberPalette()
             val view = LocalView.current
 
-            CallerTheme(darkTheme = isDark) {
-                if (!view.isInEditMode) {
-                    SideEffect {
-                        val window = (view.context as Activity).window
-                        WindowCompat.getInsetsController(window, view)
-                            .isAppearanceLightStatusBars = !isDark
-                    }
-                }
+            CallerTheme(darkTheme = palette.isDark) {
 
                 Surface(
                     modifier = Modifier.fillMaxSize(),
-                    color = MaterialTheme.colorScheme.background
+                    color = palette.bgMid
                 ) {
                     if (!uiState.isDefaultDialer) {
                         WelcomeScreen(onSetDefaultDialer = { requestDefaultDialerRole() })
@@ -4891,7 +4885,7 @@ class MainActivity : ComponentActivity() {
                                 if (shouldCall) {
                                     onSwipeCall()
                                 } else if (shouldDelete) {
-                                    onSwipeDelete?.invoke()
+                                    onSwipeDelete   ?.invoke()
                                 }
                                 scope.launch {
                                     dragOffsetX = 0f

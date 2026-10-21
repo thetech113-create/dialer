@@ -1758,9 +1758,20 @@ class CallActivity : ComponentActivity() {
         seededCallState.value = resolvedSeed
     }
     
+    private fun isTerminalHint(intent: Intent?): Boolean {
+        val hint = intent?.getStringExtra(CALL_UI_EXTRA_STATE_HINT).orEmpty()
+        return hint.equals("DISCONNECTED", ignoreCase = true) ||
+            hint.equals("DISCONNECTING", ignoreCase = true) ||
+            hint.equals("IDLE", ignoreCase = true)
+    }
+
     override fun onNewIntent(intent: Intent?) {
         super.onNewIntent(intent)
         logCallActivityLifecycle("onNewIntent", "action=${intent?.action.orEmpty()}")
+        if (isTerminalHint(intent) || !hasLiveCall()) {
+            finishCallUiAfterCall("new_intent_no_live_call")
+            return
+        }
         // Update activity's intent so action checks in CallingScreen work
         setIntent(intent) 
         updateSeededCallState(intent)
@@ -1795,6 +1806,10 @@ class CallActivity : ComponentActivity() {
             CALL_UI_FORENSIC_TAG,
             "call_activity_onCreate directBootPhase=${!isUserUnlocked} action=${intent?.action} seedNumber=${maskP2PNumberForLog(intent?.getStringExtra(CALL_UI_EXTRA_PHONE_NUMBER_HINT).orEmpty())}"
         )
+        if (isTerminalHint(intent) && !hasLiveCall()) {
+            finishCallUiAfterCall("create_terminal_intent")
+            return
+        }
         updateSeededCallState(intent)
 
         try {
@@ -1837,14 +1852,14 @@ class CallActivity : ComponentActivity() {
             this,
             object : OnBackPressedCallback(true) {
                 override fun handleOnBackPressed() {
-                    if (hasLiveCall()) {
+                    if (hasLiveCall() && !isFinishingCallUi) {
                         CallBubbleOverlay.showFromCallActivityExit(this@CallActivity)
                         MyInCallService.getInstance()?.showCallBubbleIfNeeded()
                         if (!isFinishing && !isDestroyed) {
                             finish()
                         }
                     } else {
-                        openInAppMainUi("dispatcher_back")
+                        finishCallUiAfterCall("dispatcher_back")
                     }
                 }
             }
@@ -2135,7 +2150,7 @@ class CallActivity : ComponentActivity() {
         super.onUserLeaveHint()
         logCall("InCallActivity.onUserLeaveHint hasActiveCall=${hasLiveCall()}")
         logCallActivityLifecycle("onUserLeaveHint")
-        if (hasLiveCall()) {
+        if (!isFinishing && !isFinishingCallUi && hasLiveCall()) {
             CallBubbleOverlay.showFromCallActivityExit(this)
             MyInCallService.getInstance()?.showCallBubbleIfNeeded()
         }
@@ -2146,28 +2161,27 @@ class CallActivity : ComponentActivity() {
         logCallActivityLifecycle("onStop")
         CallBubbleOverlay.isCallActivityVisible = false
         super.onStop()
-        if (hasLiveCall()) {
+        if (!isFinishing && !isFinishingCallUi && hasLiveCall()) {
             CallBubbleOverlay.showFromCallActivityExit(this)
             MyInCallService.getInstance()?.showCallBubbleIfNeeded()
         }
     }
 
-    override fun onConfigurationChanged(newConfig: Configuration) {
-        super.onConfigurationChanged(newConfig)
-        logCallActivityLifecycle("onConfigurationChanged", "uiMode=${newConfig.uiMode} orientation=${newConfig.orientation}")
-        MyInCallService.getInstance()?.forceUpdateUI()
-    }
-    
     override fun onBackPressed() {
-        if (hasLiveCall()) {
+        if (hasLiveCall() && !isFinishingCallUi) {
             CallBubbleOverlay.showFromCallActivityExit(this)
             MyInCallService.getInstance()?.showCallBubbleIfNeeded()
             if (!isFinishing && !isDestroyed) {
                 finish()
             }
         } else {
-            openInAppMainUi("back_press")
+            finishCallUiAfterCall("back_press")
         }
+    }
+    override fun onConfigurationChanged(newConfig: Configuration) {
+        super.onConfigurationChanged(newConfig)
+        logCallActivityLifecycle("onConfigurationChanged", "uiMode=${newConfig.uiMode} orientation=${newConfig.orientation}")
+        MyInCallService.getInstance()?.forceUpdateUI()
     }
 }
 
