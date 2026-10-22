@@ -132,7 +132,9 @@ object AccountDeviceHistoryManager {
     private const val KEY_MERGE_TO_NATIVE_LOG = "merge_synced_to_native_call_log"
     private const val KEY_LAST_ACCOUNT_SYNC_MS = "last_account_sync_ms"
 
-    private const val ACCOUNT_CLOUD_BUCKET_URL = "https://kvdb.io/A9xK3mP7vR2qL8nW4jY6tB"
+    // UDP/TCP can make a same-Wi-Fi sync faster, but the Worker is the source of truth
+    // when the phones are on mobile data or separate Wi-Fi networks.
+    private const val ACCOUNT_SYNC_PATH = "/account-sync"
     private const val TCP_SYNC_PORT = 8902
     private const val UDP_DISCOVERY_PORT = 8903
     private const val MAX_STORED_SYNCED_CALLS = 300
@@ -429,7 +431,9 @@ object AccountDeviceHistoryManager {
                 if (showToast) {
                     val peerCount = getPeerDevices(appCtx).size
                     val callCount = getSyncedCallHistory(appCtx).size
-                    if (cloudSuccess || peerCount > 0) {
+                    if (p2pServerToken(appCtx).isNullOrBlank()) {
+                        toast(appCtx, "Verify this phone first, then sync linked devices from Recents")
+                    } else if (cloudSuccess || peerCount > 0) {
                         toast(appCtx, "Account synced! $peerCount linked device(s), $callCount synced calls.")
                     } else {
                         toast(appCtx, "Account state updated. Sign in with the same Account ID on your other phone.")
@@ -444,44 +448,34 @@ object AccountDeviceHistoryManager {
     }
 
     private fun performCloudAccountSync(context: Context): Boolean {
+        val token = p2pServerToken(context)
+        if (token.isNullOrBlank() || !isP2PServerEnabled()) {
+            Log.w(TAG, "Cloud account sync skipped: this phone has not verified its account")
+            return false
+        }
+
         return runCatching {
-            val accountKey = getCanonicalAccountKey(context)
-            val endpoint = "$ACCOUNT_CLOUD_BUCKET_URL/$accountKey"
-
-            val getReq = Request.Builder()
-                .url(endpoint)
-                .header("Accept", "application/json")
+            val snapshot = buildFullAccountSnapshotJson(context, previousRemote = null).apply {
+                put("accountKey", getCanonicalAccountKey(context))
+            }
+            val request = Request.Builder()
+                .url(P2P_SERVER_URL.trimEnd('/') + ACCOUNT_SYNC_PATH)
+                .header("Authorization", "Bearer $token")
                 .header("User-Agent", "Caller-Account-Sync")
-                .get()
+                .post(snapshot.toString().toRequestBody("application/json; charset=utf-8".toMediaType()))
                 .build()
 
-            var remoteAccountObj: JSONObject? = null
-            http.newCall(getReq).execute().use { resp ->
-                if (resp.isSuccessful) {
-                    val bodyStr = resp.body?.string()?.trim().orEmpty()
-                    if (bodyStr.startsWith("{")) {
-                        remoteAccountObj = JSONObject(bodyStr)
-                    }
+            serverHttpClient.newCall(request).execute().use { response ->
+                val body = response.body?.string().orEmpty()
+                if (!response.isSuccessful) {
+                    Log.w(TAG, "Cloud account sync failed: HTTP ${response.code}")
+                    return@use false
                 }
-            }
-
-            if (remoteAccountObj != null) {
-                ingestAccountSnapshotJson(context, remoteAccountObj!!)
-            }
-
-            val mergedSnapshot = buildFullAccountSnapshotJson(context, remoteAccountObj)
-            val postBody = mergedSnapshot.toString().toRequestBody("application/json; charset=utf-8".toMediaType())
-            val putReq = Request.Builder()
-                .url(endpoint)
-                .header("User-Agent", "Caller-Account-Sync")
-                .post(postBody)
-                .build()
-
-            http.newCall(putReq).execute().use { resp ->
-                resp.isSuccessful
+                ingestAccountSnapshotJson(context, JSONObject(body))
+                true
             }
         }.onFailure { e ->
-            Log.w(TAG, "Cloud account sync skipped/failed: ${e.message}")
+            Log.w(TAG, "Cloud account sync failed: ${e.message}")
         }.getOrDefault(false)
     }
 
@@ -520,8 +514,9 @@ object AccountDeviceHistoryManager {
         }
 
         val combinedCalls = mutableListOf<SyncedCallRecord>()
+        // Never republish calls received from another phone. The old code copied them into
+        // Android's call log and then uploaded them again as if they had happened here.
         combinedCalls.addAll(queryLocalDeviceCallLog(context, maxCount = 120))
-        combinedCalls.addAll(getSyncedCallHistory(context))
 
         val deduplicatedCalls = mutableListOf<SyncedCallRecord>()
         for (call in combinedCalls.sortedByDescending { it.timestamp }) {
@@ -627,9 +622,8 @@ object AccountDeviceHistoryManager {
                     if (!isDup) {
                         existingCalls.add(record)
                         newlyMergedCount++
-                        if (isMergeToNativeCallLogEnabled(context)) {
-                            insertIntoNativeCallLogIfMissing(context, record)
-                        }
+                        // Peer calls stay in this app's Recents storage. Android's shared call
+                        // log cannot retain the source device, so writing there loses attribution.
                     }
                 }
             }

@@ -5,6 +5,7 @@
 // POST /verify/confirm {number, code}      -> {token}   the SMS arrived on that phone: number verified
 // POST /profile        {name}   (Bearer)   -> {ok}      save my profile name
 // GET  /name?number=…           (Bearer)   -> {name}    caller name for a number (used during calls)
+// POST /account-sync    {accountKey, devices, calls} (Bearer) -> merged account history
 
 const CODE_TTL_MS = 10 * 60 * 1000;
 const MAX_CODE_ATTEMPTS = 5;
@@ -21,6 +22,7 @@ export default {
         case "POST /verify/confirm": return await verifyConfirm(request, env);
         case "POST /profile": return await saveProfile(request, env);
         case "GET /name": return await lookupName(url, request, env);
+        case "POST /account-sync": return await syncAccountHistory(request, env);
         default: return json({ error: "not_found" }, 404);
       }
     } catch (e) {
@@ -148,4 +150,75 @@ async function lookupName(url, request, env) {
   const row = await env.DB.prepare("SELECT name FROM users WHERE number = ? AND name != ''")
     .bind(key).first();
   return row ? json({ name: row.name }) : json({ error: "not_found" }, 404);
+}
+
+/**
+ * Account history uses a cloud transaction rather than LAN discovery. Devices submit only their
+ * own call log; D1 keys each event by the originating device so an OPPO record never turns into
+ * a Redmi record (or gets reflected back to OPPO as a new local call).
+ */
+async function syncAccountHistory(request, env) {
+  const user = await authUser(request, env);
+  if (!user) return json({ error: "unauthorized" }, 401);
+
+  const payload = await readJson(request);
+  const accountKey = String(payload.accountKey || "").trim();
+  if (!/^[a-f0-9]{32,64}$/i.test(accountKey)) return json({ error: "bad_account" }, 400);
+
+  const devices = Array.isArray(payload.devices) ? payload.devices.slice(0, 20) : [];
+  const calls = Array.isArray(payload.calls) ? payload.calls.slice(0, 200) : [];
+  const now = Date.now();
+  const statements = [];
+
+  for (const device of devices) {
+    const deviceId = String(device?.deviceId || "").trim().slice(0, 120);
+    const deviceName = cleanName(device?.deviceName || "Account phone") || "Account phone";
+    if (!deviceId) continue;
+    statements.push(env.DB.prepare(
+      "INSERT INTO account_devices (account_key, device_id, device_name, updated_at) VALUES (?, ?, ?, ?) " +
+      "ON CONFLICT(account_key, device_id) DO UPDATE SET device_name = excluded.device_name, updated_at = excluded.updated_at"
+    ).bind(accountKey, deviceId, deviceName, now));
+  }
+
+  for (const call of calls) {
+    const sourceDeviceId = String(call?.sourceDeviceId || "").trim().slice(0, 120);
+    const remoteNumber = numberKey(call?.remoteNumber);
+    const timestamp = Number(call?.timestamp);
+    if (!sourceDeviceId || !remoteNumber || !Number.isFinite(timestamp) || timestamp <= 0) continue;
+    const sourceDeviceName = cleanName(call?.sourceDeviceName || "Linked device") || "Linked device";
+    const contactName = cleanName(call?.contactName || "");
+    const callType = Number.isInteger(Number(call?.callTypeInt)) ? Number(call.callTypeInt) : 1;
+    const duration = Math.max(0, Math.floor(Number(call?.durationSec) || 0));
+    const eventId = await sha256Hex([sourceDeviceId, remoteNumber, Math.floor(timestamp), callType, duration].join("|"));
+    statements.push(env.DB.prepare(
+      "INSERT INTO account_calls (account_key, event_id, source_device_id, source_device_name, remote_number, contact_name, call_type, timestamp, duration_sec, updated_at) " +
+      "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT(account_key, event_id) DO UPDATE SET " +
+      "source_device_name = excluded.source_device_name, contact_name = excluded.contact_name, updated_at = excluded.updated_at"
+    ).bind(accountKey, eventId, sourceDeviceId, sourceDeviceName, remoteNumber, contactName, callType, Math.floor(timestamp), duration, now));
+  }
+  if (statements.length) await env.DB.batch(statements);
+
+  const [deviceRows, callRows] = await Promise.all([
+    env.DB.prepare("SELECT device_id, device_name, updated_at FROM account_devices WHERE account_key = ? ORDER BY updated_at DESC LIMIT 20")
+      .bind(accountKey).all(),
+    env.DB.prepare("SELECT source_device_id, source_device_name, remote_number, contact_name, call_type, timestamp, duration_sec FROM account_calls WHERE account_key = ? ORDER BY timestamp DESC LIMIT 300")
+      .bind(accountKey).all(),
+  ]);
+  return json({
+    devices: (deviceRows.results || []).map((d) => ({
+      deviceId: d.device_id,
+      deviceName: d.device_name,
+      verifiedNumbers: [],
+      lastSyncTimestamp: d.updated_at,
+    })),
+    calls: (callRows.results || []).map((c) => ({
+      sourceDeviceId: c.source_device_id,
+      sourceDeviceName: c.source_device_name,
+      remoteNumber: c.remote_number,
+      contactName: c.contact_name,
+      callTypeInt: c.call_type,
+      timestamp: c.timestamp,
+      durationSec: c.duration_sec,
+    })),
+  });
 }

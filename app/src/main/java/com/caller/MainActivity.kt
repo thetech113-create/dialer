@@ -103,6 +103,7 @@ import androidx.compose.material.icons.filled.CallReceived
 import androidx.compose.material.icons.filled.CloudQueue
 import androidx.compose.material.icons.filled.ContentCopy
 import androidx.compose.material.icons.filled.Delete
+import androidx.compose.material.icons.filled.Devices
 import androidx.compose.material.icons.filled.Download
 import androidx.compose.material.icons.filled.ExpandLess
 import androidx.compose.material.icons.filled.ExpandMore
@@ -116,6 +117,7 @@ import androidx.compose.material.icons.filled.Info
 import androidx.compose.material.icons.filled.Mic
 import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material.icons.filled.Share
+import androidx.compose.material.icons.filled.Sync
 import androidx.compose.material.icons.filled.Videocam
 import androidx.compose.material.icons.outlined.Apps
 import androidx.compose.material.icons.outlined.BatterySaver
@@ -247,6 +249,7 @@ data class RecentCall(
     val callType: CallType,
     val duration: Long = 0L,
     val simLabel: String = "",
+    val sourceDeviceName: String = "",
     val isVideo: Boolean = false,
     val isTollFree: Boolean = false
 )
@@ -270,6 +273,7 @@ data class CallHistoryItem(
     val typeString: String = "",
     val isBlocked: Boolean = false,
     val simLabel: String = "",
+    val sourceDeviceName: String = "",
     val isVideo: Boolean = false,
     val isTollFree: Boolean = false
 )
@@ -353,11 +357,13 @@ private fun mergeLiveRecentCallGroup(
 private fun RecentSubtitleLine(
     baseText: String,
     simLabel: String,
+    deviceLabel: String = "",
     textColor: Color,
     simBadgeColor: Color,
     simTextColor: Color
 ) {
-    if (simLabel.isBlank()) {
+    val badgeLabel = listOf(simLabel, deviceLabel).filter { it.isNotBlank() }.joinToString(" · ")
+    if (badgeLabel.isBlank()) {
         if (baseText.isNotBlank()) {
             Text(
                 text = baseText,
@@ -384,7 +390,7 @@ private fun RecentSubtitleLine(
             color = simBadgeColor
         ) {
             Text(
-                text = simLabel,
+                text = badgeLabel,
                 modifier = Modifier.padding(horizontal = 7.dp, vertical = 2.dp),
                 style = MaterialTheme.typography.labelSmall,
                 fontWeight = FontWeight.Bold,
@@ -576,6 +582,9 @@ class MainActivity : ComponentActivity() {
     private var recentCallsRefreshJob: Job? = null
     private var pendingRecentCallsRefresh = false
     private var pendingRecentCallsRefreshDelay = false
+    private val accountHistoryListener: () -> Unit = {
+        if (hasReadCallLogPermission()) refreshRecentCalls(withDelay = false)
+    }
     private var contactMergeDecisions by mutableStateOf<Map<String, String>>(emptyMap())
     private var pendingDuplicateCandidate by mutableStateOf<DuplicateContactCandidate?>(null)
     // The check opens from the Contacts "duplicates" button, which shows only while a duplicate is unanswered.
@@ -938,6 +947,7 @@ class MainActivity : ComponentActivity() {
         OtpAutoFillService.startOtpAutoFill(this)
         CallerAnnouncementManager.init(this)
         AccountDeviceHistoryManager.startSyncEngine(this)
+        AccountDeviceHistoryManager.addStateListener(accountHistoryListener)
 
         unregisterAppPhoneAccountsSafely()
 
@@ -1640,6 +1650,7 @@ class MainActivity : ComponentActivity() {
     override fun onDestroy() {
         isMainActivityVisible = false
         incomingUiGateMainVisible = false
+        AccountDeviceHistoryManager.removeStateListener(accountHistoryListener)
         super.onDestroy()
         pendingOemFallbackProbe?.let { forensicProbeHandler.removeCallbacks(it) }
         pendingOemFallbackProbe = null
@@ -3139,6 +3150,41 @@ class MainActivity : ComponentActivity() {
             )
         }
 
+        // Peer history belongs only to this app's Recents list. Writing it into Android's shared
+        // call log loses the phone that made the call, so a call from OPPO could look like it was
+        // made on Redmi and be sent back again on the next sync.
+        val currentDeviceId = AccountDeviceHistoryManager.getCurrentDeviceId(this@MainActivity)
+        AccountDeviceHistoryManager.getSyncedCallHistory(this@MainActivity)
+            .asSequence()
+            .filter { it.sourceDeviceId.isNotBlank() && it.sourceDeviceId != currentDeviceId }
+            .forEach { record ->
+                val numberSnapshot = buildP2PNumberSnapshot(record.remoteNumber)
+                val contactName = numberSnapshot.lookupKeys.firstNotNullOfOrNull { key ->
+                    contactMap[key]
+                        ?.takeIf { buildRecentCallerGroupKey(it.phoneNumber) == buildRecentCallerGroupKey(record.remoteNumber) }
+                        ?.name
+                }
+                val displayName = contactName?.takeIf { it.isNotBlank() && it != "Unknown" }
+                    ?: record.contactName.takeIf { it.isNotBlank() }
+                    ?: formatPhoneNumberForDisplay(record.remoteNumber)
+                val callType = when (record.callTypeInt) {
+                    Calls.INCOMING_TYPE -> CallType.INCOMING
+                    Calls.MISSED_TYPE, Calls.REJECTED_TYPE -> CallType.MISSED
+                    else -> CallType.OUTGOING
+                }
+                calls.add(
+                    RecentCall(
+                        id = "peer_${record.sourceDeviceId}_${record.timestamp}_${record.remoteNumber}",
+                        name = displayName,
+                        phoneNumber = record.remoteNumber,
+                        timestamp = record.timestamp,
+                        callType = callType,
+                        duration = record.durationSec,
+                        sourceDeviceName = record.sourceDeviceName
+                    )
+                )
+            }
+
         resolutionMemoCount = (unresolvedRows - resolutionFreshCount).coerceAtLeast(0)
 
         val groupedCalls = groupRecentCalls(calls)
@@ -3180,6 +3226,7 @@ class MainActivity : ComponentActivity() {
                     typeString = if (isBlockedCall) "Blocked" else callTypeToString(it.callType.name),
                     isBlocked = isBlockedCall,
                     simLabel = it.simLabel,
+                    sourceDeviceName = it.sourceDeviceName,
                     isVideo = it.isVideo,
                     isTollFree = it.isTollFree
                 )
@@ -4486,6 +4533,10 @@ class MainActivity : ComponentActivity() {
         var selectedRecentFilter by remember { mutableStateOf(RecentFilter.ALL) }
         var showClearAllRecentDialog by remember { mutableStateOf(false) }
         var showRecentMenu by remember { mutableStateOf(false) }
+        var showLinkDevicesDialog by remember { mutableStateOf(false) }
+        var sharedAccountId by remember {
+            mutableStateOf(AccountDeviceHistoryManager.getAccountId(this@MainActivity))
+        }
 
         val displayRecentCalls = remember(filteredRecentCalls, selectedRecentFilter) {
             filteredRecentCalls.filter { groupedCall ->
@@ -4549,6 +4600,23 @@ class MainActivity : ComponentActivity() {
                                 }
                             )
                         }
+                        DropdownMenuItem(
+                            text = { Text("Sync linked devices") },
+                            leadingIcon = { Icon(Icons.Default.Sync, contentDescription = null) },
+                            onClick = {
+                                showRecentMenu = false
+                                AccountDeviceHistoryManager.syncAccountNow(this@MainActivity, showToast = true)
+                            }
+                        )
+                        DropdownMenuItem(
+                            text = { Text("Link another phone") },
+                            leadingIcon = { Icon(Icons.Default.Devices, contentDescription = null) },
+                            onClick = {
+                                sharedAccountId = AccountDeviceHistoryManager.getAccountId(this@MainActivity)
+                                showRecentMenu = false
+                                showLinkDevicesDialog = true
+                            }
+                        )
                         DropdownMenuItem(
                             text = { Text("Clear all") },
                             leadingIcon = {
@@ -4644,6 +4712,37 @@ class MainActivity : ComponentActivity() {
                     )
                 }
             }
+        }
+
+        if (showLinkDevicesDialog) {
+            AlertDialog(
+                onDismissRequest = { showLinkDevicesDialog = false },
+                title = { Text("Link another phone") },
+                text = {
+                    Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                        Text("Use the same sync ID on both phones. Their calls will appear only in the other phone's Recents, labelled with the device name.")
+                        OutlinedTextField(
+                            value = sharedAccountId,
+                            onValueChange = { sharedAccountId = it },
+                            label = { Text("Shared sync ID") },
+                            singleLine = true,
+                            modifier = Modifier.fillMaxWidth()
+                        )
+                    }
+                },
+                confirmButton = {
+                    TextButton(
+                        enabled = sharedAccountId.isNotBlank(),
+                        onClick = {
+                            AccountDeviceHistoryManager.setAccountId(this@MainActivity, sharedAccountId)
+                            showLinkDevicesDialog = false
+                        }
+                    ) { Text("Link & sync") }
+                },
+                dismissButton = {
+                    TextButton(onClick = { showLinkDevicesDialog = false }) { Text("Cancel") }
+                }
+            )
         }
 
         if (showClearAllRecentDialog) {
@@ -5847,6 +5946,13 @@ class MainActivity : ComponentActivity() {
                                                             style = MaterialTheme.typography.bodyMedium,
                                                             fontWeight = FontWeight.Bold
                                                         )
+                                                        if (call.sourceDeviceName.isNotBlank()) {
+                                                            Text(
+                                                                text = "From ${call.sourceDeviceName}",
+                                                                style = MaterialTheme.typography.bodySmall,
+                                                                color = panelSecondaryText
+                                                            )
+                                                        }
                                                         if (call.simLabel.isNotBlank()) {
                                                             Text(
                                                                 text = call.simLabel,
@@ -6195,6 +6301,7 @@ class MainActivity : ComponentActivity() {
                                             RecentSubtitleLine(
                                                 baseText = subtitleText,
                                                 simLabel = lastCall?.simLabel.orEmpty(),
+                                                deviceLabel = lastCall?.sourceDeviceName.orEmpty(),
                                                 textColor = recentSecondaryTextColor,
                                                 simBadgeColor = recentCardBorderColor.copy(alpha = 0.18f),
                                                 simTextColor = recentPrimaryTextColor
@@ -6311,6 +6418,7 @@ class MainActivity : ComponentActivity() {
                                         RecentSubtitleLine(
                                             baseText = subtitleText,
                                             simLabel = lastCall.simLabel,
+                                            deviceLabel = lastCall.sourceDeviceName,
                                             textColor = recentSecondaryTextColor,
                                             simBadgeColor = recentCardBorderColor.copy(alpha = 0.18f),
                                             simTextColor = recentPrimaryTextColor
@@ -6481,6 +6589,7 @@ class MainActivity : ComponentActivity() {
                                 RecentSubtitleLine(
                                     baseText = subtitleText,
                                     simLabel = lastCall?.simLabel.orEmpty(),
+                                    deviceLabel = lastCall?.sourceDeviceName.orEmpty(),
                                     textColor = MaterialTheme.colorScheme.onSurfaceVariant,
                                     simBadgeColor = MaterialTheme.colorScheme.primary.copy(alpha = 0.12f),
                                     simTextColor = MaterialTheme.colorScheme.primary
@@ -6549,6 +6658,7 @@ class MainActivity : ComponentActivity() {
                                 RecentSubtitleLine(
                                     baseText = subtitleText,
                                     simLabel = lastCall.simLabel,
+                                    deviceLabel = lastCall.sourceDeviceName,
                                     textColor = MaterialTheme.colorScheme.onSurfaceVariant,
                                     simBadgeColor = MaterialTheme.colorScheme.primary.copy(alpha = 0.12f),
                                     simTextColor = MaterialTheme.colorScheme.primary
@@ -6604,6 +6714,7 @@ class MainActivity : ComponentActivity() {
                                             RecentSubtitleLine(
                                                 baseText = itemText,
                                                 simLabel = call.simLabel,
+                                                deviceLabel = call.sourceDeviceName,
                                                 textColor = if (call.callType == CallType.MISSED) Color(0xFFFF5A52) else MaterialTheme.colorScheme.onSurfaceVariant,
                                                 simBadgeColor = MaterialTheme.colorScheme.primary.copy(alpha = 0.15f),
                                                 simTextColor = MaterialTheme.colorScheme.primary
@@ -7987,10 +8098,6 @@ fun SettingsScreen(
             text = "Configure app roles, permissions, spam protection & updates",
             style = MaterialTheme.typography.bodyMedium,
             color = MaterialTheme.colorScheme.onSurfaceVariant
-        )
-
-        MultiDeviceSettingsCard(
-            modifier = Modifier.fillMaxWidth()
         )
 
         CallerAnnouncementSettingsCard(

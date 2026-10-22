@@ -25,3 +25,9 @@ Put it in the app: `P2P_SERVER_URL` in `app/src/main/java/com/caller/P2PServerCl
 ## Update later
 
 Edit `src/index.js`, then `npx wrangler deploy` again.
+
+## Multi-device Recents
+
+The Worker also provides the cloud endpoint used by the app's multi-device Recents. It works when
+phones are on different networks. After updating an already deployed Worker, run the schema command
+above once to create the `account_devices` and `account_calls` tables, then deploy the Worker.

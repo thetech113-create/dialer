@@ -23,3 +23,30 @@ CREATE TABLE IF NOT EXISTS lookups (
   count      INTEGER NOT NULL DEFAULT 0,
   PRIMARY KEY (token_hash, day)
 );
+
+-- Cloud-backed multi-device Recents. Calls are keyed by their original device and event identity,
+-- never by the device that happens to download them.
+CREATE TABLE IF NOT EXISTS account_devices (
+  account_key TEXT NOT NULL,
+  device_id TEXT NOT NULL,
+  device_name TEXT NOT NULL,
+  updated_at INTEGER NOT NULL,
+  PRIMARY KEY (account_key, device_id)
+);
+
+CREATE TABLE IF NOT EXISTS account_calls (
+  account_key TEXT NOT NULL,
+  event_id TEXT NOT NULL,
+  source_device_id TEXT NOT NULL,
+  source_device_name TEXT NOT NULL,
+  remote_number TEXT NOT NULL,
+  contact_name TEXT NOT NULL DEFAULT '',
+  call_type INTEGER NOT NULL,
+  timestamp INTEGER NOT NULL,
+  duration_sec INTEGER NOT NULL DEFAULT 0,
+  updated_at INTEGER NOT NULL,
+  PRIMARY KEY (account_key, event_id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_account_calls_recent
+  ON account_calls (account_key, timestamp DESC);
