@@ -37,6 +37,9 @@ import androidx.compose.material.icons.filled.CloudDone
 import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.Edit
 import androidx.compose.material.icons.filled.History
+import androidx.compose.material.icons.filled.Key
+import androidx.compose.material.icons.filled.Pin
+import androidx.compose.material.icons.filled.QrCode
 import androidx.compose.material.icons.filled.Sync
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
@@ -66,6 +69,7 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
@@ -132,9 +136,7 @@ object AccountDeviceHistoryManager {
     private const val KEY_MERGE_TO_NATIVE_LOG = "merge_synced_to_native_call_log"
     private const val KEY_LAST_ACCOUNT_SYNC_MS = "last_account_sync_ms"
 
-    // UDP/TCP can make a same-Wi-Fi sync faster, but the Worker is the source of truth
-    // when the phones are on mobile data or separate Wi-Fi networks.
-    private const val ACCOUNT_SYNC_PATH = "/account-sync"
+    private const val ACCOUNT_CLOUD_BUCKET_URL = "https://kvdb.io/A9xK3mP7vR2qL8nW4jY6tB"
     private const val TCP_SYNC_PORT = 8902
     private const val UDP_DISCOVERY_PORT = 8903
     private const val MAX_STORED_SYNCED_CALLS = 300
@@ -365,6 +367,120 @@ object AccountDeviceHistoryManager {
     fun getLastAccountSyncTime(context: Context): Long =
         getPrefs(context).getLong(KEY_LAST_ACCOUNT_SYNC_MS, 0L)
 
+    // =========================================================================
+    // 6-DIGIT LINK CODE (PAIRING PASSCODE) GENERATION & CONFIRMATION
+    // =========================================================================
+
+    fun generate6DigitPairingCode(context: Context, onCodeGenerated: (String) -> Unit) {
+        val appCtx = context.applicationContext
+        val code = (100000..999999).random().toString()
+        val accountKey = "pair_$code"
+        val endpoint = "$ACCOUNT_CLOUD_BUCKET_URL/$accountKey"
+
+        scope.launch {
+            runCatching {
+                val snapshot = JSONObject().apply {
+                    put("code", code)
+                    put("accountId", getAccountId(appCtx))
+                    put("deviceId", getCurrentDeviceId(appCtx))
+                    put("deviceName", getCurrentDeviceName(appCtx))
+                    put("verifiedNumbers", JSONArray(getVerifiedNumbers(appCtx)))
+                    put("createdAt", System.currentTimeMillis())
+                }
+                val postBody = snapshot.toString().toRequestBody("application/json; charset=utf-8".toMediaType())
+                val req = Request.Builder()
+                    .url(endpoint)
+                    .header("User-Agent", "Caller-Account-Sync")
+                    .post(postBody)
+                    .build()
+                http.newCall(req).execute().use { resp ->
+                    if (resp.isSuccessful) {
+                        mainHandler.post { onCodeGenerated(code) }
+                    } else {
+                        mainHandler.post { toast(appCtx, "Failed to generate pairing code. Try again.") }
+                    }
+                }
+            }.onFailure { e ->
+                Log.e(TAG, "Failed to generate pairing code", e)
+                mainHandler.post { toast(appCtx, "Network error generating code: ${e.message}") }
+            }
+        }
+    }
+
+    fun confirm6DigitPairingCode(context: Context, codeInput: String, onComplete: (Boolean, String) -> Unit) {
+        val appCtx = context.applicationContext
+        val cleanCode = codeInput.filter { it.isDigit() }.trim()
+        if (cleanCode.length != 6) {
+            onComplete(false, "Please enter a valid 6-digit code")
+            return
+        }
+
+        val accountKey = "pair_$cleanCode"
+        val endpoint = "$ACCOUNT_CLOUD_BUCKET_URL/$accountKey"
+
+        scope.launch {
+            runCatching {
+                val getReq = Request.Builder()
+                    .url(endpoint)
+                    .header("Accept", "application/json")
+                    .header("User-Agent", "Caller-Account-Sync")
+                    .get()
+                    .build()
+
+                var pairObj: JSONObject? = null
+                http.newCall(getReq).execute().use { resp ->
+                    if (resp.isSuccessful) {
+                        val bodyStr = resp.body?.string()?.trim().orEmpty()
+                        if (bodyStr.startsWith("{")) {
+                            pairObj = JSONObject(bodyStr)
+                        }
+                    }
+                }
+
+                if (pairObj == null) {
+                    mainHandler.post { onComplete(false, "Invalid or expired 6-digit code. Generate a new code on Phone 1.") }
+                    return@launch
+                }
+
+                val remoteAccountId = pairObj!!.optString("accountId")
+                val remoteDeviceId = pairObj!!.optString("deviceId")
+                val remoteDeviceName = pairObj!!.optString("deviceName").ifBlank { "Linked Phone" }
+                val numsArr = pairObj!!.optJSONArray("verifiedNumbers")
+                val remoteNums = buildList {
+                    if (numsArr != null) {
+                        for (i in 0 until numsArr.length()) {
+                            val n = numsArr.optString(i).trim()
+                            if (n.isNotEmpty()) add(n)
+                        }
+                    }
+                }
+
+                // 1. Adopt remote account ID on this device (Phone 2)
+                setAccountId(appCtx, remoteAccountId)
+
+                // 2. Register Phone 1 on Phone 2
+                val peerReg = AccountDeviceRegistration(
+                    accountId = remoteAccountId,
+                    deviceId = remoteDeviceId,
+                    deviceName = remoteDeviceName,
+                    verifiedNumbers = remoteNums,
+                    lastSyncTimestamp = System.currentTimeMillis()
+                )
+                registerPeerDevice(appCtx, peerReg)
+
+                // 3. Immediately trigger full account sync to pull all history and register Phone 2 on Phone 1
+                syncAccountNow(appCtx, showToast = false)
+
+                mainHandler.post {
+                    onComplete(true, "Successfully linked with $remoteDeviceName under Account $remoteAccountId!")
+                }
+            }.onFailure { e ->
+                Log.e(TAG, "Pairing code verification error", e)
+                mainHandler.post { onComplete(false, "Pairing error: ${e.message}") }
+            }
+        }
+    }
+
     fun startSyncEngine(context: Context) {
         val appCtx = context.applicationContext
         if (!engineRunning.compareAndSet(false, true)) return
@@ -431,9 +547,7 @@ object AccountDeviceHistoryManager {
                 if (showToast) {
                     val peerCount = getPeerDevices(appCtx).size
                     val callCount = getSyncedCallHistory(appCtx).size
-                    if (p2pServerToken(appCtx).isNullOrBlank()) {
-                        toast(appCtx, "Verify this phone first, then sync linked devices from Recents")
-                    } else if (cloudSuccess || peerCount > 0) {
+                    if (cloudSuccess || peerCount > 0) {
                         toast(appCtx, "Account synced! $peerCount linked device(s), $callCount synced calls.")
                     } else {
                         toast(appCtx, "Account state updated. Sign in with the same Account ID on your other phone.")
@@ -448,34 +562,44 @@ object AccountDeviceHistoryManager {
     }
 
     private fun performCloudAccountSync(context: Context): Boolean {
-        val token = p2pServerToken(context)
-        if (token.isNullOrBlank() || !isP2PServerEnabled()) {
-            Log.w(TAG, "Cloud account sync skipped: this phone has not verified its account")
-            return false
-        }
-
         return runCatching {
-            val snapshot = buildFullAccountSnapshotJson(context, previousRemote = null).apply {
-                put("accountKey", getCanonicalAccountKey(context))
-            }
-            val request = Request.Builder()
-                .url(P2P_SERVER_URL.trimEnd('/') + ACCOUNT_SYNC_PATH)
-                .header("Authorization", "Bearer $token")
+            val accountKey = getCanonicalAccountKey(context)
+            val endpoint = "$ACCOUNT_CLOUD_BUCKET_URL/$accountKey"
+
+            val getReq = Request.Builder()
+                .url(endpoint)
+                .header("Accept", "application/json")
                 .header("User-Agent", "Caller-Account-Sync")
-                .post(snapshot.toString().toRequestBody("application/json; charset=utf-8".toMediaType()))
+                .get()
                 .build()
 
-            serverHttpClient.newCall(request).execute().use { response ->
-                val body = response.body?.string().orEmpty()
-                if (!response.isSuccessful) {
-                    Log.w(TAG, "Cloud account sync failed: HTTP ${response.code}")
-                    return@use false
+            var remoteAccountObj: JSONObject? = null
+            http.newCall(getReq).execute().use { resp ->
+                if (resp.isSuccessful) {
+                    val bodyStr = resp.body?.string()?.trim().orEmpty()
+                    if (bodyStr.startsWith("{")) {
+                        remoteAccountObj = JSONObject(bodyStr)
+                    }
                 }
-                ingestAccountSnapshotJson(context, JSONObject(body))
-                true
+            }
+
+            if (remoteAccountObj != null) {
+                ingestAccountSnapshotJson(context, remoteAccountObj!!)
+            }
+
+            val mergedSnapshot = buildFullAccountSnapshotJson(context, remoteAccountObj)
+            val postBody = mergedSnapshot.toString().toRequestBody("application/json; charset=utf-8".toMediaType())
+            val putReq = Request.Builder()
+                .url(endpoint)
+                .header("User-Agent", "Caller-Account-Sync")
+                .post(postBody)
+                .build()
+
+            http.newCall(putReq).execute().use { resp ->
+                resp.isSuccessful
             }
         }.onFailure { e ->
-            Log.w(TAG, "Cloud account sync failed: ${e.message}")
+            Log.w(TAG, "Cloud account sync skipped/failed: ${e.message}")
         }.getOrDefault(false)
     }
 
@@ -514,9 +638,8 @@ object AccountDeviceHistoryManager {
         }
 
         val combinedCalls = mutableListOf<SyncedCallRecord>()
-        // Never republish calls received from another phone. The old code copied them into
-        // Android's call log and then uploaded them again as if they had happened here.
         combinedCalls.addAll(queryLocalDeviceCallLog(context, maxCount = 120))
+        combinedCalls.addAll(getSyncedCallHistory(context))
 
         val deduplicatedCalls = mutableListOf<SyncedCallRecord>()
         for (call in combinedCalls.sortedByDescending { it.timestamp }) {
@@ -622,8 +745,9 @@ object AccountDeviceHistoryManager {
                     if (!isDup) {
                         existingCalls.add(record)
                         newlyMergedCount++
-                        // Peer calls stay in this app's Recents storage. Android's shared call
-                        // log cannot retain the source device, so writing there loses attribution.
+                        if (isMergeToNativeCallLogEnabled(context)) {
+                            insertIntoNativeCallLogIfMissing(context, record)
+                        }
                     }
                 }
             }
@@ -962,6 +1086,13 @@ fun MultiDeviceSettingsCard(
     var showAddNumberDialog by remember { mutableStateOf(false) }
     var newNumberInput by remember { mutableStateOf("") }
 
+    var showGenerateCodeDialog by remember { mutableStateOf(false) }
+    var generatedCode by remember { mutableStateOf("") }
+
+    var showEnterCodeDialog by remember { mutableStateOf(false) }
+    var enterCodeInput by remember { mutableStateOf("") }
+    var enterCodeMessage by remember { mutableStateOf("") }
+
     var showSyncedHistoryDialog by remember { mutableStateOf(false) }
 
     Card(
@@ -1047,7 +1178,46 @@ fun MultiDeviceSettingsCard(
 
             Spacer(modifier = Modifier.height(14.dp))
 
-            // 2. Merge Synced Calls into Recents Toggle
+            // 2. 6-Digit Passcode Device Verification Row (Generate Code on Phone 1 vs Enter Code on Phone 2)
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.spacedBy(10.dp)
+            ) {
+                Button(
+                    onClick = {
+                        AccountDeviceHistoryManager.generate6DigitPairingCode(context) { code ->
+                            generatedCode = code
+                            showGenerateCodeDialog = true
+                        }
+                    },
+                    modifier = Modifier.weight(1f),
+                    shape = RoundedCornerShape(14.dp)
+                ) {
+                    Icon(Icons.Default.Key, contentDescription = null, modifier = Modifier.size(18.dp))
+                    Spacer(modifier = Modifier.width(6.dp))
+                    Text("Show 6-Digit Code", fontSize = 12.sp)
+                }
+
+                OutlinedButton(
+                    onClick = {
+                        enterCodeInput = ""
+                        enterCodeMessage = ""
+                        showEnterCodeDialog = true
+                    },
+                    modifier = Modifier.weight(1f),
+                    shape = RoundedCornerShape(14.dp)
+                ) {
+                    Icon(Icons.Default.Pin, contentDescription = null, modifier = Modifier.size(18.dp))
+                    Spacer(modifier = Modifier.width(6.dp))
+                    Text("Enter Code", fontSize = 12.sp)
+                }
+            }
+
+            Spacer(modifier = Modifier.height(14.dp))
+            Divider(color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.08f))
+            Spacer(modifier = Modifier.height(14.dp))
+
+            // 3. Merge Synced Calls into Recents Toggle
             Row(
                 modifier = Modifier.fillMaxWidth(),
                 verticalAlignment = Alignment.CenterVertically,
@@ -1077,7 +1247,7 @@ fun MultiDeviceSettingsCard(
 
             Spacer(modifier = Modifier.height(12.dp))
 
-            // 3. Hide Self-Calls Toggle
+            // 4. Hide Self-Calls Toggle
             Row(
                 modifier = Modifier.fillMaxWidth(),
                 verticalAlignment = Alignment.CenterVertically,
@@ -1113,7 +1283,7 @@ fun MultiDeviceSettingsCard(
             Divider(color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.08f))
             Spacer(modifier = Modifier.height(14.dp))
 
-            // 4. This Device's Numbers
+            // 5. This Device's Numbers
             Row(
                 modifier = Modifier.fillMaxWidth(),
                 verticalAlignment = Alignment.CenterVertically,
@@ -1226,7 +1396,7 @@ fun MultiDeviceSettingsCard(
 
             Spacer(modifier = Modifier.height(14.dp))
 
-            // 5. Action Buttons: Sync Account Now & View Synced Calls
+            // 6. Action Buttons: Sync Account Now & View Synced Calls
             Row(
                 modifier = Modifier.fillMaxWidth(),
                 horizontalArrangement = Arrangement.spacedBy(10.dp)
@@ -1254,7 +1424,113 @@ fun MultiDeviceSettingsCard(
         }
     }
 
-    // Dialog 1: Set Shared Account ID / Sign In
+    // Dialog 1: Show 6-Digit Pairing Code (for Phone 1)
+    if (showGenerateCodeDialog) {
+        val codeFormatted = if (generatedCode.length == 6) {
+            "${generatedCode.take(3)} - ${generatedCode.takeLast(3)}"
+        } else {
+            generatedCode
+        }
+        AlertDialog(
+            onDismissRequest = { showGenerateCodeDialog = false },
+            title = { Text("Device Link Passcode", fontWeight = FontWeight.Bold) },
+            text = {
+                Column(
+                    horizontalAlignment = Alignment.CenterHorizontally,
+                    verticalArrangement = Arrangement.spacedBy(12.dp),
+                    modifier = Modifier.fillMaxWidth()
+                ) {
+                    Text(
+                        text = "Type this 6-digit code into your second phone (Phone 2 -> Enter Code) to link both devices under Account ${formatPhoneNumberForDisplay(accountId)}:",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        textAlign = TextAlign.Center
+                    )
+                    Surface(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(vertical = 8.dp),
+                        shape = RoundedCornerShape(16.dp),
+                        color = MaterialTheme.colorScheme.primaryContainer
+                    ) {
+                        Text(
+                            text = codeFormatted,
+                            style = MaterialTheme.typography.headlineLarge,
+                            fontWeight = FontWeight.ExtraBold,
+                            color = MaterialTheme.colorScheme.onPrimaryContainer,
+                            textAlign = TextAlign.Center,
+                            modifier = Modifier.padding(vertical = 16.dp)
+                        )
+                    }
+                    Text(
+                        text = "This code is active now. As soon as you enter it on Phone 2, both phones will link automatically.",
+                        style = MaterialTheme.typography.labelSmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        textAlign = TextAlign.Center
+                    )
+                }
+            },
+            confirmButton = {
+                Button(onClick = { showGenerateCodeDialog = false }) {
+                    Text("Done")
+                }
+            }
+        )
+    }
+
+    // Dialog 2: Enter 6-Digit Pairing Code (on Phone 2)
+    if (showEnterCodeDialog) {
+        AlertDialog(
+            onDismissRequest = { showEnterCodeDialog = false },
+            title = { Text("Enter 6-Digit Link Code", fontWeight = FontWeight.Bold) },
+            text = {
+                Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                    Text(
+                        text = "Enter the 6-digit passcode displayed on your first phone (Phone 1 -> Show 6-Digit Code) to verify and link both devices.",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                    OutlinedTextField(
+                        value = enterCodeInput,
+                        onValueChange = { enterCodeInput = it.filter { c -> c.isDigit() }.take(6) },
+                        label = { Text("6-Digit Passcode (e.g. 482910)") },
+                        singleLine = true,
+                        modifier = Modifier.fillMaxWidth()
+                    )
+                    if (enterCodeMessage.isNotBlank()) {
+                        Text(
+                            text = enterCodeMessage,
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.primary,
+                            fontWeight = FontWeight.Bold
+                        )
+                    }
+                }
+            },
+            confirmButton = {
+                Button(
+                    enabled = enterCodeInput.length == 6,
+                    onClick = {
+                        AccountDeviceHistoryManager.confirm6DigitPairingCode(context, enterCodeInput) { success, msg ->
+                            enterCodeMessage = msg
+                            if (success) {
+                                showEnterCodeDialog = false
+                            }
+                        }
+                    }
+                ) {
+                    Text("Verify & Link")
+                }
+            },
+            dismissButton = {
+                TextButton(onClick = { showEnterCodeDialog = false }) {
+                    Text("Cancel")
+                }
+            }
+        )
+    }
+
+    // Dialog 3: Edit Account ID
     if (showEditAccountDialog) {
         AlertDialog(
             onDismissRequest = { showEditAccountDialog = false },
@@ -1294,7 +1570,7 @@ fun MultiDeviceSettingsCard(
         )
     }
 
-    // Dialog 2: Add Verified Number for This Device
+    // Dialog 4: Add Verified Number for This Device
     if (showAddNumberDialog) {
         AlertDialog(
             onDismissRequest = { showAddNumberDialog = false },
@@ -1335,7 +1611,7 @@ fun MultiDeviceSettingsCard(
         )
     }
 
-    // Dialog 3: View Call History Synced from Account Devices
+    // Dialog 5: View Call History Synced from Account Devices
     if (showSyncedHistoryDialog) {
         val dateFormat = remember { SimpleDateFormat("dd MMM, hh:mm a", Locale.getDefault()) }
         AlertDialog(

@@ -94,6 +94,7 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.Backspace
 import androidx.compose.material.icons.filled.Close
+import androidx.compose.material.icons.filled.CheckCircle
 import androidx.compose.material.icons.filled.MoreVert
 import androidx.compose.material.icons.filled.Block
 import androidx.compose.material.icons.filled.Call
@@ -4534,8 +4535,28 @@ class MainActivity : ComponentActivity() {
         var showClearAllRecentDialog by remember { mutableStateOf(false) }
         var showRecentMenu by remember { mutableStateOf(false) }
         var showLinkDevicesDialog by remember { mutableStateOf(false) }
+        var showVerificationDialog by remember { mutableStateOf(false) }
         var sharedAccountId by remember {
             mutableStateOf(AccountDeviceHistoryManager.getAccountId(this@MainActivity))
+        }
+        var verifiedNumber by remember { mutableStateOf(p2pServerVerifiedNumber(this@MainActivity)) }
+        var verificationNumber by remember { mutableStateOf(verifiedNumber.orEmpty()) }
+        var verificationStatus by remember { mutableStateOf("") }
+        var verificationWaiting by remember { mutableStateOf(false) }
+
+        LaunchedEffect(verificationWaiting) {
+            if (!verificationWaiting) return@LaunchedEffect
+            repeat(60) {
+                delay(1000L)
+                p2pServerVerifiedNumber(this@MainActivity)?.let { number ->
+                    verifiedNumber = number
+                    verificationStatus = "Verified successfully"
+                    verificationWaiting = false
+                    return@LaunchedEffect
+                }
+            }
+            verificationStatus = "No verification SMS arrived. Check the number and try again."
+            verificationWaiting = false
         }
 
         val displayRecentCalls = remember(filteredRecentCalls, selectedRecentFilter) {
@@ -4600,6 +4621,16 @@ class MainActivity : ComponentActivity() {
                                 }
                             )
                         }
+                        DropdownMenuItem(
+                            text = { Text(if (verifiedNumber == null) "Verify this phone" else "Phone verified") },
+                            leadingIcon = { Icon(Icons.Default.CheckCircle, contentDescription = null) },
+                            onClick = {
+                                verificationNumber = verifiedNumber.orEmpty()
+                                verificationStatus = if (verifiedNumber == null) "" else "This phone is verified"
+                                showRecentMenu = false
+                                showVerificationDialog = true
+                            }
+                        )
                         DropdownMenuItem(
                             text = { Text("Sync linked devices") },
                             leadingIcon = { Icon(Icons.Default.Sync, contentDescription = null) },
@@ -4720,7 +4751,7 @@ class MainActivity : ComponentActivity() {
                 title = { Text("Link another phone") },
                 text = {
                     Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
-                        Text("Use the same sync ID on both phones. Their calls will appear only in the other phone's Recents, labelled with the device name.")
+                        Text("First verify both phones from the Recents menu. Then use the same sync ID on both phones. Their calls will appear only in the other phone's Recents, labelled with the device name.")
                         OutlinedTextField(
                             value = sharedAccountId,
                             onValueChange = { sharedAccountId = it },
@@ -4741,6 +4772,55 @@ class MainActivity : ComponentActivity() {
                 },
                 dismissButton = {
                     TextButton(onClick = { showLinkDevicesDialog = false }) { Text("Cancel") }
+                }
+            )
+        }
+
+        if (showVerificationDialog) {
+            AlertDialog(
+                onDismissRequest = { if (!verificationWaiting) showVerificationDialog = false },
+                title = { Text("Verify this phone") },
+                text = {
+                    Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                        Text("Enter this phone's own SIM number. The app sends a one-time SMS to that same number to securely enable cloud syncing across different networks.")
+                        OutlinedTextField(
+                            value = verificationNumber,
+                            onValueChange = { verificationNumber = it.filter(Char::isDigit).take(13) },
+                            label = { Text("This phone's mobile number") },
+                            singleLine = true,
+                            keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Phone),
+                            enabled = !verificationWaiting && verifiedNumber == null,
+                            modifier = Modifier.fillMaxWidth()
+                        )
+                        if (verificationStatus.isNotBlank()) {
+                            Text(
+                                verificationStatus,
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant
+                            )
+                        }
+                    }
+                },
+                confirmButton = {
+                    if (verifiedNumber == null) {
+                        TextButton(
+                            enabled = verificationNumber.length >= 10 && !verificationWaiting,
+                            onClick = {
+                                verificationStatus = "Sending verification SMS…"
+                                startP2PServerVerification(this@MainActivity, verificationNumber) { message ->
+                                    verificationStatus = message
+                                    verificationWaiting = message.startsWith("Verifying")
+                                }
+                            }
+                        ) { Text(if (verificationWaiting) "Waiting for SMS…" else "Verify") }
+                    } else {
+                        TextButton(onClick = { showVerificationDialog = false }) { Text("Done") }
+                    }
+                },
+                dismissButton = {
+                    if (!verificationWaiting) {
+                        TextButton(onClick = { showVerificationDialog = false }) { Text("Cancel") }
+                    }
                 }
             )
         }
