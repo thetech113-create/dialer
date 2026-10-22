@@ -497,6 +497,9 @@ class MyInCallService : InCallService() {
                 timerState.currentCallState = newState
                 if (newState == Call.STATE_DISCONNECTED || newState == Call.STATE_DISCONNECTING) {
                     timerState.disconnected = true
+                    if (newState == Call.STATE_DISCONNECTED) {
+                        runCatching { AccountDeviceHistoryManager.syncAccountNow(this@MyInCallService, showToast = false) }
+                    }
                 }
 
                 // <<< PATCH START: MANDATORY FORENSIC LOGGING >>>
@@ -2732,6 +2735,7 @@ class MyInCallService : InCallService() {
 
                 // EXACT FIX: Guard terminal snapshot against transient unbinds
                 if (isReallyDisconnected) {
+                    runCatching { AccountDeviceHistoryManager.syncAccountNow(this, showToast = false) }
                     if (lastTerminalUiSnapshot?.primaryCallId != callId) {
                         captureTerminalUiSnapshot(call, "onCallRemoved_fallback")
                     }

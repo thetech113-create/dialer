@@ -1674,6 +1674,7 @@ class CallActivity : ComponentActivity() {
         MyInCallService.appWasOnScreenAtCallStart = false
         CallBubbleOverlay.isCallActivityVisible = false
         CallBubbleOverlay.hide(this)
+        runCatching { AccountDeviceHistoryManager.syncAccountNow(this, showToast = false) }
         Log.w(CALL_UI_FORENSIC_TAG, "call_ui_finish reason=$reason finishAndRemoveTask")
         if (!isFinishing && !isDestroyed) {
             finishAndRemoveTask()
