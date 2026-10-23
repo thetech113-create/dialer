@@ -135,6 +135,12 @@ object AccountDeviceHistoryManager {
     private const val KEY_FILTERING_ENABLED = "multi_device_filtering_enabled"
     private const val KEY_MERGE_TO_NATIVE_LOG = "merge_synced_to_native_call_log"
     private const val KEY_LAST_ACCOUNT_SYNC_MS = "last_account_sync_ms"
+    private const val KEY_LAST_CLOUD_STATUS = "last_cloud_status"
+    private const val KEY_LAST_CLOUD_OK_MS = "last_cloud_ok_ms"
+    private const val KEY_NATIVE_LOG_CLEANED = "native_log_peer_cleanup_v1"
+    // kvdb.io rejects values larger than ~16 KB by default, so every cloud document stays well under it.
+    private const val CLOUD_MAX_BODY_BYTES = 14_000
+    private const val CLOUD_MAX_OWN_CALLS = 80
 
     private const val ACCOUNT_CLOUD_BUCKET_URL = "https://kvdb.io/A9xK3mP7vR2qL8nW4jY6tB"
     private const val TCP_SYNC_PORT = 8902
@@ -147,13 +153,18 @@ object AccountDeviceHistoryManager {
     private val syncInProgress = AtomicBoolean(false)
     private val stateListeners = CopyOnWriteArrayList<() -> Unit>()
 
-    private val http = OkHttpClient.Builder()
-        .connectTimeout(15, TimeUnit.SECONDS)
-        .readTimeout(20, TimeUnit.SECONDS)
-        .writeTimeout(20, TimeUnit.SECONDS)
-        .followRedirects(true)
-        .followSslRedirects(true)
-        .build()
+    // Reuses the app's own client (P2PServerClient.kt) so cloud sync gets the same DNS fallback
+    // (system DNS, then Cloudflare/Google DNS-over-HTTPS) as the name server. Without it, a network
+    // that can't or won't resolve kvdb.io silently breaks sync on that network only.
+    private val http: OkHttpClient by lazy {
+        serverHttpClient.newBuilder()
+            .connectTimeout(15, TimeUnit.SECONDS)
+            .readTimeout(20, TimeUnit.SECONDS)
+            .writeTimeout(20, TimeUnit.SECONDS)
+            .followRedirects(true)
+            .followSslRedirects(true)
+            .build()
+    }
 
     private fun getPrefs(context: Context) =
         p2pContext(context).getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
@@ -181,7 +192,7 @@ object AccountDeviceHistoryManager {
     }
 
     fun isMergeToNativeCallLogEnabled(context: Context): Boolean =
-        getPrefs(context).getBoolean(KEY_MERGE_TO_NATIVE_LOG, true)
+        getPrefs(context).getBoolean(KEY_MERGE_TO_NATIVE_LOG, false)
 
     fun setMergeToNativeCallLogEnabled(context: Context, enabled: Boolean) {
         getPrefs(context).edit().putBoolean(KEY_MERGE_TO_NATIVE_LOG, enabled).apply()
@@ -194,7 +205,7 @@ object AccountDeviceHistoryManager {
         if (accId.isNullOrBlank()) {
             accId = p2pServerVerifiedNumber(context)
                 ?: detectSimPhoneNumbers(context).firstOrNull()
-                ?: "default_account"
+                        ?: "default_account"
             prefs.edit().putString(KEY_ACCOUNT_ID, accId).apply()
         }
         return accId
@@ -243,7 +254,7 @@ object AccountDeviceHistoryManager {
         runCatching {
             if (ContextCompat.checkSelfPermission(context, Manifest.permission.READ_PHONE_STATE) == PackageManager.PERMISSION_GRANTED ||
                 (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R &&
-                    ContextCompat.checkSelfPermission(context, Manifest.permission.READ_PHONE_NUMBERS) == PackageManager.PERMISSION_GRANTED)
+                        ContextCompat.checkSelfPermission(context, Manifest.permission.READ_PHONE_NUMBERS) == PackageManager.PERMISSION_GRANTED)
             ) {
                 val subMgr = context.getSystemService(SubscriptionManager::class.java)
                 subMgr?.activeSubscriptionInfoList?.forEach { info ->
@@ -486,6 +497,7 @@ object AccountDeviceHistoryManager {
         if (!engineRunning.compareAndSet(false, true)) return
 
         purgeLegacySyncSmsIfPresent(appCtx)
+        cleanupInjectedPeerCallsFromNativeLog(appCtx)
 
         scope.launch {
             runCatching {
@@ -561,46 +573,215 @@ object AccountDeviceHistoryManager {
         }
     }
 
+    private class CloudResult(val code: Int, val body: String?, val error: String?) {
+        val ok: Boolean get() = error == null && code in 200..299
+    }
+
+    private fun cloudGet(endpoint: String): CloudResult = try {
+        val req = Request.Builder()
+            .url(endpoint)
+            .header("Accept", "application/json")
+            .header("User-Agent", "Caller-Account-Sync")
+            .get()
+            .build()
+        http.newCall(req).execute().use { resp ->
+            CloudResult(resp.code, resp.body?.string()?.trim(), null)
+        }
+    } catch (e: Exception) {
+        CloudResult(-1, null, "${e.javaClass.simpleName}: ${e.message}")
+    }
+
+    private fun cloudPost(endpoint: String, json: String): CloudResult = try {
+        val req = Request.Builder()
+            .url(endpoint)
+            .header("User-Agent", "Caller-Account-Sync")
+            .post(json.toRequestBody("application/json; charset=utf-8".toMediaType()))
+            .build()
+        http.newCall(req).execute().use { resp ->
+            CloudResult(resp.code, resp.body?.string()?.trim()?.take(120), null)
+        }
+    } catch (e: Exception) {
+        CloudResult(-1, null, "${e.javaClass.simpleName}: ${e.message}")
+    }
+
+    private fun describeCloud(label: String, r: CloudResult): String =
+        if (r.error != null) "$label: ${r.error}" else "$label: HTTP ${r.code} ${r.body.orEmpty().take(80)}"
+
+    private fun cloudDeviceKey(accountKey: String, deviceId: String): String =
+        accountKey + "_" + deviceId.replace(Regex("[^A-Za-z0-9_-]"), "_")
+
+    fun getLastCloudStatus(context: Context): String =
+        getPrefs(context).getString(KEY_LAST_CLOUD_STATUS, null) ?: "no cloud sync attempted yet"
+
+    private fun recordCloudStatus(context: Context, ok: Boolean, text: String) {
+        val stamp = SimpleDateFormat("dd MMM hh:mm:ss a", Locale.getDefault()).format(Date())
+        val edit = getPrefs(context).edit()
+            .putString(KEY_LAST_CLOUD_STATUS, "${if (ok) "OK" else "FAILED"} $stamp - $text")
+        if (ok) edit.putLong(KEY_LAST_CLOUD_OK_MS, System.currentTimeMillis())
+        edit.apply()
+        Log.w(TAG, "cloud sync ${if (ok) "ok" else "FAILED"}: $text")
+        notifyStateChanged()
+    }
+
+    /**
+     * Cloud sync v2.
+     * - "<accountKey>"               : tiny shared roster (device list only, no calls).
+     * - "<accountKey>_<deviceId>"    : this device's own recent calls. Only this device writes it,
+     *                                  so two phones can never overwrite each other.
+     * Every document stays far below kvdb's 16 KB value limit, and every HTTP failure is recorded.
+     */
     private fun performCloudAccountSync(context: Context): Boolean {
-        return runCatching {
-            val accountKey = getCanonicalAccountKey(context)
-            val endpoint = "$ACCOUNT_CLOUD_BUCKET_URL/$accountKey"
+        val accountKey = getCanonicalAccountKey(context)
+        val myDeviceId = getCurrentDeviceId(context)
+        val problems = mutableListOf<String>()
+        val notes = mutableListOf<String>()
 
-            val getReq = Request.Builder()
-                .url(endpoint)
-                .header("Accept", "application/json")
-                .header("User-Agent", "Caller-Account-Sync")
-                .get()
-                .build()
+        // 1) Roster
+        val rosterUrl = "$ACCOUNT_CLOUD_BUCKET_URL/$accountKey"
+        val rosterGet = cloudGet(rosterUrl)
+        var remoteRoster: JSONObject? = null
+        if (rosterGet.ok && rosterGet.body.orEmpty().startsWith("{")) {
+            remoteRoster = runCatching { JSONObject(rosterGet.body!!) }.getOrNull()
+        } else if (rosterGet.code != 404) {
+            problems += describeCloud("GET roster", rosterGet)
+        }
+        remoteRoster?.let { ingestAccountSnapshotJson(context, it) }
 
-            var remoteAccountObj: JSONObject? = null
-            http.newCall(getReq).execute().use { resp ->
-                if (resp.isSuccessful) {
-                    val bodyStr = resp.body?.string()?.trim().orEmpty()
-                    if (bodyStr.startsWith("{")) {
-                        remoteAccountObj = JSONObject(bodyStr)
+        val rosterPost = cloudPost(rosterUrl, buildRosterJson(context, remoteRoster).toString())
+        if (!rosterPost.ok) problems += describeCloud("POST roster", rosterPost)
+
+        // 2) My own calls
+        val ownBody = buildOwnCallsJson(context)
+        val ownPost = cloudPost("$ACCOUNT_CLOUD_BUCKET_URL/${cloudDeviceKey(accountKey, myDeviceId)}", ownBody)
+        if (!ownPost.ok) problems += describeCloud("POST own calls (${ownBody.length} bytes)", ownPost)
+
+        // 3) Pull every known peer's calls
+        val peers = getPeerDevices(context).filter { it.deviceId.isNotBlank() && it.deviceId != myDeviceId }
+        if (peers.isEmpty()) notes += "no linked devices known yet"
+        peers.forEach { peer ->
+            val r = cloudGet("$ACCOUNT_CLOUD_BUCKET_URL/${cloudDeviceKey(accountKey, peer.deviceId)}")
+            if (r.ok && r.body.orEmpty().startsWith("{")) {
+                runCatching {
+                    val doc = JSONObject(r.body!!)
+                    val arr = doc.optJSONArray("calls")
+                    if (arr != null) {
+                        val peerName = doc.optString("deviceName").ifBlank { peer.deviceName }
+                        for (i in 0 until arr.length()) {
+                            arr.optJSONObject(i)?.apply {
+                                put("sourceDeviceId", peer.deviceId)
+                                put("sourceDeviceName", peerName)
+                            }
+                        }
+                        ingestAccountSnapshotJson(context, JSONObject().put("calls", arr))
                     }
+                }.onFailure { e -> problems += "parse ${peer.deviceName}: ${e.message}" }
+            } else if (r.code == 404) {
+                notes += "${peer.deviceName} has not uploaded yet"
+            } else {
+                problems += describeCloud("GET ${peer.deviceName}", r)
+            }
+        }
+
+        val ok = problems.isEmpty()
+        val text = (if (ok) "uploaded ${ownBody.length} B, checked ${peers.size} peer(s)" else problems.joinToString(" | ")) +
+                (if (notes.isNotEmpty()) " [" + notes.joinToString("; ") + "]" else "")
+        recordCloudStatus(context, ok, text)
+        return ok
+    }
+
+    private fun buildOwnCallsJson(context: Context): String {
+        val own = queryLocalDeviceCallLog(context, maxCount = CLOUD_MAX_OWN_CALLS)
+        fun build(n: Int): String {
+            val arr = JSONArray()
+            own.take(n).forEach { c ->
+                arr.put(JSONObject().apply {
+                    put("remoteNumber", c.remoteNumber)
+                    put("contactName", c.contactName.take(30))
+                    put("callTypeInt", c.callTypeInt)
+                    put("timestamp", c.timestamp)
+                    put("durationSec", c.durationSec)
+                })
+            }
+            return JSONObject().apply {
+                put("accountId", getAccountId(context))
+                put("deviceId", getCurrentDeviceId(context))
+                put("deviceName", getCurrentDeviceName(context))
+                put("updatedAt", System.currentTimeMillis())
+                put("calls", arr)
+            }.toString()
+        }
+        var count = own.size
+        var body = build(count)
+        while (body.toByteArray(Charsets.UTF_8).size > CLOUD_MAX_BODY_BYTES && count > 10) {
+            count -= 10
+            body = build(count)
+        }
+        return body
+    }
+
+    private fun buildRosterJson(context: Context, previousRemote: JSONObject?): JSONObject {
+        val myDeviceId = getCurrentDeviceId(context)
+        val myAccountId = getAccountId(context)
+        val now = System.currentTimeMillis()
+        val devicesMap = linkedMapOf<String, JSONObject>()
+        previousRemote?.optJSONArray("devices")?.let { arr ->
+            for (i in 0 until arr.length()) {
+                val d = arr.optJSONObject(i) ?: continue
+                val id = d.optString("deviceId")
+                if (id.isNotBlank()) devicesMap[id] = d
+            }
+        }
+        getPeerDevices(context).forEach { peer ->
+            if (peer.deviceId.isNotBlank()) {
+                devicesMap[peer.deviceId] = JSONObject().apply {
+                    put("accountId", myAccountId)
+                    put("deviceId", peer.deviceId)
+                    put("deviceName", peer.deviceName)
+                    put("verifiedNumbers", JSONArray(peer.verifiedNumbers))
+                    put("lastSyncTimestamp", peer.lastSyncTimestamp)
                 }
             }
+        }
+        devicesMap[myDeviceId] = JSONObject().apply {
+            put("accountId", myAccountId)
+            put("deviceId", myDeviceId)
+            put("deviceName", getCurrentDeviceName(context))
+            put("verifiedNumbers", JSONArray(getVerifiedNumbers(context)))
+            put("lastSyncTimestamp", now)
+        }
+        return JSONObject().apply {
+            put("accountId", myAccountId)
+            put("updatedAt", now)
+            put("devices", JSONArray(devicesMap.values.toList()))
+        }
+    }
 
-            if (remoteAccountObj != null) {
-                ingestAccountSnapshotJson(context, remoteAccountObj!!)
+    /**
+     * Earlier versions inserted other phones' calls into Android's shared call log. Remove those
+     * rows once (exact number + exact timestamp of a peer call) and switch the feature off.
+     */
+    private fun cleanupInjectedPeerCallsFromNativeLog(context: Context) {
+        val prefs = getPrefs(context)
+        if (prefs.getBoolean(KEY_NATIVE_LOG_CLEANED, false)) return
+        prefs.edit().putBoolean(KEY_MERGE_TO_NATIVE_LOG, false).apply()
+        if (ContextCompat.checkSelfPermission(context, Manifest.permission.WRITE_CALL_LOG) != PackageManager.PERMISSION_GRANTED) return
+        scope.launch {
+            runCatching {
+                val myDeviceId = getCurrentDeviceId(context)
+                var removed = 0
+                getSyncedCallHistory(context)
+                    .filter { it.sourceDeviceId.isNotBlank() && it.sourceDeviceId != myDeviceId }
+                    .forEach { rec ->
+                        removed += context.contentResolver.delete(
+                            CallLog.Calls.CONTENT_URI,
+                            "${CallLog.Calls.DATE} = ? AND ${CallLog.Calls.NUMBER} = ?",
+                            arrayOf(rec.timestamp.toString(), rec.remoteNumber)
+                        )
+                    }
+                Log.w(TAG, "Removed $removed peer calls that were injected into the native call log")
+                prefs.edit().putBoolean(KEY_NATIVE_LOG_CLEANED, true).apply()
             }
-
-            val mergedSnapshot = buildFullAccountSnapshotJson(context, remoteAccountObj)
-            val postBody = mergedSnapshot.toString().toRequestBody("application/json; charset=utf-8".toMediaType())
-            val putReq = Request.Builder()
-                .url(endpoint)
-                .header("User-Agent", "Caller-Account-Sync")
-                .post(postBody)
-                .build()
-
-            http.newCall(putReq).execute().use { resp ->
-                resp.isSuccessful
-            }
-        }.onFailure { e ->
-            Log.w(TAG, "Cloud account sync skipped/failed: ${e.message}")
-        }.getOrDefault(false)
+        }
     }
 
     private fun buildFullAccountSnapshotJson(context: Context, previousRemote: JSONObject?): JSONObject {
@@ -647,7 +828,7 @@ object AccountDeviceHistoryManager {
             if (isEmergency) continue
             val exists = deduplicatedCalls.any {
                 buildP2PNumberSnapshot(it.remoteNumber).last10 == buildP2PNumberSnapshot(call.remoteNumber).last10 &&
-                    kotlin.math.abs(it.timestamp - call.timestamp) < 5000L
+                        kotlin.math.abs(it.timestamp - call.timestamp) < 5000L
             }
             if (!exists) {
                 deduplicatedCalls.add(call)
@@ -740,7 +921,7 @@ object AccountDeviceHistoryManager {
                 if (srcDevId != myDeviceId) {
                     val isDup = existingCalls.any {
                         buildP2PNumberSnapshot(it.remoteNumber).last10 == buildP2PNumberSnapshot(record.remoteNumber).last10 &&
-                            kotlin.math.abs(it.timestamp - record.timestamp) < 5000L
+                                kotlin.math.abs(it.timestamp - record.timestamp) < 5000L
                     }
                     if (!isDup) {
                         existingCalls.add(record)
@@ -898,6 +1079,10 @@ object AccountDeviceHistoryManager {
         val list = mutableListOf<SyncedCallRecord>()
         val myDeviceId = getCurrentDeviceId(context)
         val myDeviceName = getCurrentDeviceName(context)
+        val peerCallKeys = getSyncedCallHistory(context)
+            .filter { it.sourceDeviceId != myDeviceId }
+            .map { "${it.timestamp}|${it.remoteNumber}" }
+            .toHashSet()
         runCatching {
             context.contentResolver.query(
                 CallLog.Calls.CONTENT_URI,
@@ -926,7 +1111,7 @@ object AccountDeviceHistoryManager {
                     val type = if (typeIdx >= 0) cursor.getInt(typeIdx) else CallLog.Calls.INCOMING_TYPE
                     val date = if (dateIdx >= 0) cursor.getLong(dateIdx) else 0L
                     val duration = if (durIdx >= 0) cursor.getLong(durIdx) else 0L
-                    if (date > 0L) {
+                    if (date > 0L && "$date|$number" !in peerCallKeys) {
                         list.add(
                             SyncedCallRecord(
                                 remoteNumber = number,
@@ -1159,11 +1344,20 @@ fun MultiDeviceSettingsCard(
                         if (lastSyncTime > 0L) {
                             val fmtTime = SimpleDateFormat("hh:mm a", Locale.getDefault()).format(Date(lastSyncTime))
                             Text(
-                                text = "Cloud & Local Sync Active • Last: $fmtTime",
+                                text = "Last sync attempt: $fmtTime",
                                 style = MaterialTheme.typography.labelSmall,
-                                color = Color(0xFF4CAF50)
+                                color = MaterialTheme.colorScheme.onSurfaceVariant
                             )
                         }
+                        val cloudStatus = remember(refreshTick) {
+                            AccountDeviceHistoryManager.getLastCloudStatus(context)
+                        }
+                        Text(
+                            text = "Cloud: $cloudStatus",
+                            style = MaterialTheme.typography.labelSmall,
+                            color = if (cloudStatus.startsWith("OK")) Color(0xFF4CAF50) else MaterialTheme.colorScheme.error,
+                            maxLines = 5
+                        )
                     }
                     TextButton(onClick = {
                         accountInput = accountId
@@ -1700,8 +1894,7 @@ fun MultiDeviceSettingsCard(
                                             style = MaterialTheme.typography.bodySmall,
                                             color = MaterialTheme.colorScheme.onSurfaceVariant,
                                             maxLines = 1,
-                                            overflow = TextOverflow.Ellipsis
-                                        )
+                                            overflow = TextOverflow.Ellipsis)
                                         Text(
                                             text = "${dateFormat.format(Date(record.timestamp))} (${record.durationSec}s)",
                                             style = MaterialTheme.typography.labelSmall,
