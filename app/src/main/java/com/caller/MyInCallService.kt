@@ -158,13 +158,11 @@ class MyInCallService : InCallService() {
             }
 
     override fun onBringToForeground(showDialpad: Boolean) {
-        android.util.Log.e("OEM_FALLBACK_TRACE", "=====================================================================")
-        android.util.Log.e("OEM_FALLBACK_TRACE", "ULTRA SUPREME FORENSIC INFLOP PROFESSION LOGGING")
-        android.util.Log.e("OEM_FALLBACK_TRACE", "MyInCallService: onBringToForeground() invoked by TelecomManager.")
-        android.util.Log.e("OEM_FALLBACK_TRACE", "The OS demands we show our UI NOW because of the power mode transition.")
-        android.util.Log.e("OEM_FALLBACK_TRACE", "If startActivity() fails here due to background restrictions, OEM takes over!")
-        android.util.Log.e("OEM_FALLBACK_TRACE", "=====================================================================")
-        
+        val activeCalls = getLiveCalls().filter { it.state != Call.STATE_DISCONNECTED && it.state != Call.STATE_DISCONNECTING }
+        if (activeCalls.isEmpty()) {
+            Log.w(P2P_FORENSIC_TAG, "onBringToForeground blocked: zero active calls")
+            return
+        }
         super.onBringToForeground(showDialpad)
         logOemDialerFallbackServiceEvent("onBringToForeground", showDialpad)
         val currentState = runCatching { getCurrentCallStateFromSync() }.getOrNull()
@@ -3630,8 +3628,9 @@ class MyInCallService : InCallService() {
                 initialNameHint: String = "",
                 isConferenceHint: Boolean = false
             ) {
-                if (!hasActiveCall() && getLiveCalls().isEmpty() && (initialStateHint == "DISCONNECTED" || initialStateHint == "DISCONNECTING" || initialStateHint == "IDLE" || initialStateHint.isBlank())) {
-                    Log.w(P2P_FORENSIC_TAG, "ui_launch_request blocked reason=$reason (no live call & terminal state)")
+                val activeCalls = getLiveCalls().filter { it.state != Call.STATE_DISCONNECTED && it.state != Call.STATE_DISCONNECTING }
+                if (activeCalls.isEmpty()) {
+                    Log.w(P2P_FORENSIC_TAG, "ui_launch_request blocked reason=$reason (zero active connected calls)")
                     return
                 }
                 val numberSnapshot = buildP2PNumberSnapshot(rawNumber)

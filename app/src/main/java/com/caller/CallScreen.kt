@@ -1771,8 +1771,13 @@ class CallActivity : ComponentActivity() {
 
     override fun onNewIntent(intent: Intent?) {
         super.onNewIntent(intent)
-        isFinishingCallUi = false
         logCallActivityLifecycle("onNewIntent", "action=${intent?.action.orEmpty()}")
+        if (isTerminalHint(intent) || !hasLiveCall()) {
+            Log.w(CALL_UI_FORENSIC_TAG, "onNewIntent blocked: terminal hint or no live call")
+            finishCallUiAfterCall("new_intent_terminal_or_no_live_call")
+            return
+        }
+        isFinishingCallUi = false
         // Update activity's intent so action checks in CallingScreen work
         setIntent(intent)
         updateSeededCallState(intent)
@@ -1792,9 +1797,14 @@ class CallActivity : ComponentActivity() {
         requestWindowFeature(android.view.Window.FEATURE_NO_TITLE)
 
         super.onCreate(savedInstanceState)
-        isFinishingCallUi = false
         logCall("InCallActivity.onCreate hasActiveCall=${hasLiveCall()}")
         logCallActivityLifecycle("onCreate", "action=${intent?.action.orEmpty()}")
+        if (isTerminalHint(intent) && !hasLiveCall()) {
+            Log.w(CALL_UI_FORENSIC_TAG, "onCreate blocked: terminal hint and no live call")
+            finishCallUiAfterCall("onCreate_terminal_no_live_call")
+            return
+        }
+        isFinishingCallUi = false
         @Suppress("DEPRECATION")
         overridePendingTransition(0, 0)
 

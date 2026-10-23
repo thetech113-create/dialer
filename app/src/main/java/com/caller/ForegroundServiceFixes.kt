@@ -18,6 +18,10 @@ object ForegroundServiceFixes {
 
     fun safeStartForegroundService(context: Context, call: Call) {
         if (isForegroundServiceStarted) return
+        if (call.state == Call.STATE_DISCONNECTED || call.state == Call.STATE_DISCONNECTING) {
+            Log.w(TAG, "safeStartForegroundService blocked: call is disconnected")
+            return
+        }
 
         try {
             createNotificationChannel(context)
@@ -47,13 +51,17 @@ object ForegroundServiceFixes {
 
     fun delayedForegroundServiceStart(context: Context, call: Call, delayMs: Long = 1000) {
         android.os.Handler(android.os.Looper.getMainLooper()).postDelayed({
-            if (!isForegroundServiceStarted) {
+            if (!isForegroundServiceStarted && call.state != Call.STATE_DISCONNECTED && call.state != Call.STATE_DISCONNECTING) {
                 safeStartForegroundService(context, call)
             }
         }, delayMs)
     }
 
     private fun startCallActivityDirectly(context: Context, call: Call) {
+        if (call.state == Call.STATE_DISCONNECTED || call.state == Call.STATE_DISCONNECTING) {
+            Log.w(TAG, "startCallActivityDirectly blocked: call is disconnected")
+            return
+        }
         try {
             val phoneNumber = call.details.handle?.schemeSpecificPart ?: "Unknown"
             val stateHint = if (call.state == Call.STATE_RINGING) "RINGING" else "DIALING"
