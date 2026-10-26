@@ -110,7 +110,9 @@ data class AccountDeviceRegistration(
     val deviceName: String,
     val verifiedNumbers: List<String>,
     val lastSyncTimestamp: Long = 0L,
-    val isCurrentDevice: Boolean = false
+    val isCurrentDevice: Boolean = false,
+    // Peer's current Tailscale IPv4 (100.64.0.0/10), learned automatically; empty if unknown.
+    val tailscaleIp: String = ""
 )
 
 data class SyncedCallRecord(
@@ -145,6 +147,9 @@ object AccountDeviceHistoryManager {
     private const val ACCOUNT_CLOUD_BUCKET_URL = "https://kvdb.io/A9xK3mP7vR2qL8nW4jY6tB"
     private const val TCP_SYNC_PORT = 8902
     private const val UDP_DISCOVERY_PORT = 8903
+    // Direct sync over Tailscale crosses the internet (possibly via a DERP relay), so allow more time than LAN.
+    private const val TAILSCALE_CONNECT_TIMEOUT_MS = 6000
+    private const val TAILSCALE_READ_TIMEOUT_MS = 8000
     private const val MAX_STORED_SYNCED_CALLS = 300
 
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
@@ -242,6 +247,49 @@ object AccountDeviceHistoryManager {
         return devId
     }
 
+    // =========================================================================
+    // Tailscale peer addressing
+    // =========================================================================
+
+    /** True only for IPv4 addresses in Tailscale's CGNAT range 100.64.0.0/10 (strict dotted-quad). */
+    private fun isTailscaleIpv4(ip: String): Boolean {
+        val parts = ip.trim().split(".")
+        if (parts.size != 4) return false
+        val octets = IntArray(4)
+        for (i in 0 until 4) {
+            val v = parts[i].toIntOrNull() ?: return false
+            if (v !in 0..255 || v.toString() != parts[i]) return false
+            octets[i] = v
+        }
+        return octets[0] == 100 && octets[1] in 64..127
+    }
+
+    /** This phone's current Tailscale IPv4, read from its own network interfaces; empty if Tailscale is not up. */
+    private fun getOwnTailscaleIp(): String = runCatching {
+        val interfaces = NetworkInterface.getNetworkInterfaces()
+        while (interfaces != null && interfaces.hasMoreElements()) {
+            val intf = interfaces.nextElement()
+            if (!intf.isUp || intf.isLoopback) continue
+            for (addr in java.util.Collections.list(intf.inetAddresses)) {
+                val host = (addr as? java.net.Inet4Address)?.hostAddress ?: continue
+                if (isTailscaleIpv4(host)) return@runCatching host
+            }
+        }
+        ""
+    }.getOrDefault("")
+
+    /** Updates the stored Tailscale address of an already-linked peer. Ignores anything outside the Tailscale range. */
+    private fun updatePeerTailscaleIp(context: Context, deviceId: String, ip: String) {
+        val clean = ip.trim()
+        if (deviceId.isBlank() || !isTailscaleIpv4(clean)) return
+        val peers = getPeerDevices(context)
+        val existing = peers.firstOrNull { it.deviceId == deviceId } ?: return
+        if (existing.tailscaleIp == clean) return
+        Log.i(TAG, "Peer '${existing.deviceName}' Tailscale address: ${existing.tailscaleIp.ifBlank { "(none)" }} -> $clean")
+        savePeersList(getPrefs(context), peers.map { if (it.deviceId == deviceId) it.copy(tailscaleIp = clean) else it })
+        notifyStateChanged()
+    }
+
     fun getCurrentDeviceName(context: Context): String {
         val prefs = getPrefs(context)
         return prefs.getString(KEY_DEVICE_NAME, null)
@@ -316,8 +364,9 @@ object AccountDeviceHistoryManager {
         if (peer.deviceId == getCurrentDeviceId(context)) return
         val prefs = getPrefs(context)
         val peers = getPeerDevices(context).toMutableList()
+        val previous = peers.firstOrNull { it.deviceId == peer.deviceId }
         peers.removeAll { it.deviceId == peer.deviceId || it.deviceName.equals(peer.deviceName, ignoreCase = true) }
-        peers.add(0, peer)
+        peers.add(0, if (peer.tailscaleIp.isBlank() && previous != null) peer.copy(tailscaleIp = previous.tailscaleIp) else peer)
         savePeersList(prefs, peers)
         notifyStateChanged()
     }
@@ -331,6 +380,7 @@ object AccountDeviceHistoryManager {
                 put("deviceName", p.deviceName)
                 put("verifiedNumbers", JSONArray(p.verifiedNumbers))
                 put("lastSyncTimestamp", p.lastSyncTimestamp)
+                put("tailscaleIp", p.tailscaleIp)
             })
         }
         prefs.edit().putString(KEY_PEER_DEVICES_JSON, array.toString()).apply()
@@ -367,7 +417,8 @@ object AccountDeviceHistoryManager {
                             deviceId = obj.optString("deviceId"),
                             deviceName = obj.optString("deviceName"),
                             verifiedNumbers = nums,
-                            lastSyncTimestamp = obj.optLong("lastSyncTimestamp", 0L)
+                            lastSyncTimestamp = obj.optLong("lastSyncTimestamp", 0L),
+                            tailscaleIp = obj.optString("tailscaleIp").trim().takeIf { isTailscaleIpv4(it) }.orEmpty()
                         )
                     )
                 }
@@ -500,31 +551,52 @@ object AccountDeviceHistoryManager {
         cleanupInjectedPeerCallsFromNativeLog(appCtx)
 
         scope.launch {
-            runCatching {
-                val server = ServerSocket()
-                server.reuseAddress = true
-                server.bind(InetSocketAddress(TCP_SYNC_PORT))
-                while (engineRunning.get()) {
-                    val client = server.accept()
-                    scope.launch { handleTcpAccountPeer(appCtx, client) }
+            while (engineRunning.get()) {
+                var server: ServerSocket? = null
+                try {
+                    server = ServerSocket()
+                    server.reuseAddress = true
+                    server.bind(InetSocketAddress(TCP_SYNC_PORT))
+                    val tsIp = getOwnTailscaleIp().ifBlank { "not detected" }
+                    Log.i(TAG, "TCP sync listener bound on port $TCP_SYNC_PORT (own Tailscale IP: $tsIp)")
+                    while (engineRunning.get()) {
+                        val client = server.accept()
+                        scope.launch { handleTcpAccountPeer(appCtx, client) }
+                    }
+                } catch (e: Exception) {
+                    Log.e(TAG, "TCP sync listener on port $TCP_SYNC_PORT failed: ${e.javaClass.simpleName}: ${e.message}; retrying in 15s")
+                } finally {
+                    runCatching { server?.close() }
                 }
+                if (engineRunning.get()) delay(15_000L)
             }
         }
 
         scope.launch {
-            runCatching {
-                val udpSocket = DatagramSocket(null).apply {
-                    reuseAddress = true
-                    bind(InetSocketAddress(UDP_DISCOVERY_PORT))
+            while (engineRunning.get()) {
+                var udpSocket: DatagramSocket? = null
+                try {
+                    udpSocket = DatagramSocket(null).apply {
+                        reuseAddress = true
+                        bind(InetSocketAddress(UDP_DISCOVERY_PORT))
+                    }
+                    Log.i(TAG, "UDP discovery listener bound on port $UDP_DISCOVERY_PORT")
+                    val buffer = ByteArray(1024)
+                    while (engineRunning.get()) {
+                        val packet = DatagramPacket(buffer, buffer.size)
+                        udpSocket.receive(packet)
+                        runCatching {
+                            val msg = String(packet.data, 0, packet.length, Charsets.UTF_8).trim()
+                            val senderIp = packet.address?.hostAddress.orEmpty()
+                            handleUdpDiscoveryBeacon(appCtx, senderIp, msg)
+                        }.onFailure { e -> Log.w(TAG, "Bad discovery beacon ignored: ${e.javaClass.simpleName}: ${e.message}") }
+                    }
+                } catch (e: Exception) {
+                    Log.e(TAG, "UDP discovery listener on port $UDP_DISCOVERY_PORT failed: ${e.javaClass.simpleName}: ${e.message}; retrying in 15s")
+                } finally {
+                    runCatching { udpSocket?.close() }
                 }
-                val buffer = ByteArray(1024)
-                while (engineRunning.get()) {
-                    val packet = DatagramPacket(buffer, buffer.size)
-                    udpSocket.receive(packet)
-                    val msg = String(packet.data, 0, packet.length, Charsets.UTF_8).trim()
-                    val senderIp = packet.address?.hostAddress.orEmpty()
-                    handleUdpDiscoveryBeacon(appCtx, senderIp, msg)
-                }
+                if (engineRunning.get()) delay(15_000L)
             }
         }
 
@@ -551,7 +623,23 @@ object AccountDeviceHistoryManager {
         scope.launch {
             try {
                 broadcastUdpAccountBeacon(appCtx)
+
+                // Direct Tailscale sync first, using cached peer addresses: does not depend on the cloud result.
+                runCatching { syncWithTailscalePeers(appCtx) }
+                    .onFailure { e -> Log.w(TAG, "Tailscale sync pass error: ${e.message}") }
+                val addressesBeforeCloud = getPeerDevices(appCtx).associate { it.deviceId to it.tailscaleIp }
+
                 val cloudSuccess = performCloudAccountSync(appCtx)
+
+                // The cloud step may have just learned (or refreshed) a peer's Tailscale address: try those peers now.
+                val newlyAddressed = getPeerDevices(appCtx)
+                    .filter { it.tailscaleIp.isNotBlank() && addressesBeforeCloud[it.deviceId] != it.tailscaleIp }
+                    .map { it.deviceId }
+                    .toSet()
+                if (newlyAddressed.isNotEmpty()) {
+                    runCatching { syncWithTailscalePeers(appCtx, newlyAddressed) }
+                        .onFailure { e -> Log.w(TAG, "Tailscale sync pass error: ${e.message}") }
+                }
 
                 getPrefs(appCtx).edit().putLong(KEY_LAST_ACCOUNT_SYNC_MS, System.currentTimeMillis()).apply()
                 notifyStateChanged()
@@ -663,6 +751,7 @@ object AccountDeviceHistoryManager {
             if (r.ok && r.body.orEmpty().startsWith("{")) {
                 runCatching {
                     val doc = JSONObject(r.body!!)
+                    updatePeerTailscaleIp(context, peer.deviceId, doc.optString("tailscaleIp"))
                     val arr = doc.optJSONArray("calls")
                     if (arr != null) {
                         val peerName = doc.optString("deviceName").ifBlank { peer.deviceName }
@@ -707,6 +796,7 @@ object AccountDeviceHistoryManager {
                 put("deviceId", getCurrentDeviceId(context))
                 put("deviceName", getCurrentDeviceName(context))
                 put("updatedAt", System.currentTimeMillis())
+                getOwnTailscaleIp().takeIf { it.isNotBlank() }?.let { put("tailscaleIp", it) }
                 put("calls", arr)
             }.toString()
         }
@@ -884,7 +974,8 @@ object AccountDeviceHistoryManager {
                     deviceId = devId,
                     deviceName = devName,
                     verifiedNumbers = nums,
-                    lastSyncTimestamp = System.currentTimeMillis()
+                    lastSyncTimestamp = System.currentTimeMillis(),
+                    tailscaleIp = currentPeers.firstOrNull { it.deviceId == devId }?.tailscaleIp.orEmpty()
                 )
                 currentPeers.removeAll { it.deviceId == devId || it.deviceName.equals(devName, ignoreCase = true) }
                 currentPeers.add(0, peerReg)
@@ -934,6 +1025,7 @@ object AccountDeviceHistoryManager {
             }
 
             if (newlyMergedCount > 0) {
+                Log.i(TAG, "Merged $newlyMergedCount new synced call record(s)")
                 val sorted = existingCalls.sortedByDescending { it.timestamp }.take(MAX_STORED_SYNCED_CALLS)
                 val saveArr = JSONArray()
                 sorted.forEach { c ->
@@ -957,7 +1049,9 @@ object AccountDeviceHistoryManager {
         runCatching {
             val accountKey = getCanonicalAccountKey(context)
             val myDeviceId = getCurrentDeviceId(context)
-            val beacon = "CALLER_ACCT_SYNC|$accountKey|$myDeviceId|$TCP_SYNC_PORT"
+            val tsIp = getOwnTailscaleIp()
+            val beacon = "CALLER_ACCT_SYNC|$accountKey|$myDeviceId|$TCP_SYNC_PORT" +
+                    if (tsIp.isNotBlank()) "|$tsIp" else ""
             val bytes = beacon.toByteArray(Charsets.UTF_8)
 
             DatagramSocket().use { socket ->
@@ -997,52 +1091,144 @@ object AccountDeviceHistoryManager {
         if (remoteDeviceId == getCurrentDeviceId(context)) return
         if (remoteAccountKey != getCanonicalAccountKey(context)) return
 
+        parts.getOrNull(4)?.let { updatePeerTailscaleIp(context, remoteDeviceId, it) }
+
         scope.launch {
             syncViaTcpWithSameAccountPeer(context, senderIp, remotePort)
         }
     }
 
-    private fun syncViaTcpWithSameAccountPeer(context: Context, host: String, port: Int) {
-        runCatching {
+    /** Direct TCP sync with every linked peer whose Tailscale address is known. Needs no LAN broadcast and no cloud. */
+    private fun syncWithTailscalePeers(context: Context, onlyDeviceIds: Set<String>? = null) {
+        val myDeviceId = getCurrentDeviceId(context)
+        val peers = getPeerDevices(context).filter {
+            it.deviceId.isNotBlank() && it.deviceId != myDeviceId &&
+                    isTailscaleIpv4(it.tailscaleIp) &&
+                    (onlyDeviceIds == null || it.deviceId in onlyDeviceIds)
+        }
+        if (peers.isEmpty()) return
+        if (getOwnTailscaleIp().isBlank()) {
+            Log.d(TAG, "Tailscale not detected on this phone; skipping direct sync with ${peers.size} peer(s)")
+            return
+        }
+        peers.forEach { peer ->
+            syncViaTcpWithSameAccountPeer(
+                context,
+                peer.tailscaleIp,
+                TCP_SYNC_PORT,
+                expectedDeviceId = peer.deviceId,
+                via = "tailscale",
+                connectTimeoutMs = TAILSCALE_CONNECT_TIMEOUT_MS,
+                readTimeoutMs = TAILSCALE_READ_TIMEOUT_MS
+            )
+        }
+    }
+
+    private fun syncViaTcpWithSameAccountPeer(
+        context: Context,
+        host: String,
+        port: Int,
+        expectedDeviceId: String? = null,
+        via: String = "lan",
+        connectTimeoutMs: Int = 2500,
+        readTimeoutMs: Int = 4000
+    ): Boolean {
+        val startedAt = System.currentTimeMillis()
+        // LAN attempts happen on every beacon, so keep their failures at debug level; Tailscale failures are warnings.
+        fun logFail(msg: String) { if (via == "lan") Log.d(TAG, msg) else Log.w(TAG, msg) }
+        try {
             Socket().use { socket ->
-                socket.connect(InetSocketAddress(host, port), 2500)
-                socket.soTimeout = 4000
+                socket.connect(InetSocketAddress(host, port), connectTimeoutMs)
+                socket.soTimeout = readTimeoutMs
                 val writer = PrintWriter(OutputStreamWriter(socket.getOutputStream(), Charsets.UTF_8), true)
                 val reader = BufferedReader(InputStreamReader(socket.getInputStream(), Charsets.UTF_8))
 
                 val mySnapshot = buildFullAccountSnapshotJson(context, null)
                 mySnapshot.put("accountKey", getCanonicalAccountKey(context))
+                mySnapshot.put("senderDeviceId", getCurrentDeviceId(context))
+                getOwnTailscaleIp().takeIf { it.isNotBlank() }?.let { mySnapshot.put("tailscaleIp", it) }
                 writer.println(mySnapshot.toString())
 
                 val replyLine = reader.readLine()
-                if (!replyLine.isNullOrBlank()) {
-                    val replyObj = JSONObject(replyLine)
-                    if (replyObj.optString("accountKey") == getCanonicalAccountKey(context)) {
-                        ingestAccountSnapshotJson(context, replyObj)
-                    }
+                if (replyLine.isNullOrBlank()) {
+                    logFail("Direct sync ($via) with $host:$port: empty reply")
+                    return false
+                }
+                val replyObj = JSONObject(replyLine)
+                if (replyObj.optString("accountKey") != getCanonicalAccountKey(context)) {
+                    logFail("Direct sync ($via) with $host:$port: reply rejected (account mismatch)")
+                    return false
+                }
+                val replyDeviceId = replyObj.optString("senderDeviceId").trim()
+                if (expectedDeviceId != null && replyDeviceId != expectedDeviceId) {
+                    logFail("Direct sync ($via) with $host:$port: reply rejected (unexpected device identity)")
+                    return false
+                }
+                ingestAccountSnapshotJson(context, replyObj)
+                if (replyDeviceId.isNotBlank()) {
+                    updatePeerTailscaleIp(context, replyDeviceId, replyObj.optString("tailscaleIp"))
                 }
             }
+            val elapsed = System.currentTimeMillis() - startedAt
+            if (via == "lan") Log.d(TAG, "Direct sync (lan) with $host:$port OK in ${elapsed}ms")
+            else Log.i(TAG, "Direct sync ($via) with $host:$port OK in ${elapsed}ms")
+            return true
+        } catch (e: java.net.SocketTimeoutException) {
+            logFail("Direct sync ($via) with $host:$port timed out after ${System.currentTimeMillis() - startedAt}ms")
+            return false
+        } catch (e: Exception) {
+            logFail("Direct sync ($via) with $host:$port failed: ${e.javaClass.simpleName}: ${e.message}")
+            return false
         }
     }
 
     private fun handleTcpAccountPeer(context: Context, socket: Socket) {
-        runCatching {
+        val remoteIp = socket.inetAddress?.hostAddress.orEmpty()
+        val viaTailscale = isTailscaleIpv4(remoteIp)
+        Log.i(TAG, "Incoming sync connection from $remoteIp (${if (viaTailscale) "tailscale" else "lan/other"})")
+        try {
             socket.use { client ->
                 client.soTimeout = 4000
                 val reader = BufferedReader(InputStreamReader(client.getInputStream(), Charsets.UTF_8))
                 val writer = PrintWriter(OutputStreamWriter(client.getOutputStream(), Charsets.UTF_8), true)
 
-                val line = reader.readLine() ?: return@use
-                val incomingObj = JSONObject(line)
-                if (incomingObj.optString("accountKey") != getCanonicalAccountKey(context)) {
+                val line = reader.readLine()
+                if (line == null) {
+                    Log.w(TAG, "Incoming sync from $remoteIp: connection closed without a request")
                     return@use
                 }
+                val incomingObj = JSONObject(line)
+                if (incomingObj.optString("accountKey") != getCanonicalAccountKey(context)) {
+                    Log.w(TAG, "Rejected incoming sync from $remoteIp: account mismatch")
+                    return@use
+                }
+
+                // Tailscale peers must also be a device already linked to this account (identity check).
+                // LAN behaviour is unchanged.
+                if (viaTailscale) {
+                    val senderDeviceId = incomingObj.optString("senderDeviceId").trim()
+                    val linked = senderDeviceId.isNotBlank() &&
+                            senderDeviceId != getCurrentDeviceId(context) &&
+                            getPeerDevices(context).any { it.deviceId == senderDeviceId }
+                    if (!linked) {
+                        Log.w(TAG, "Rejected incoming sync from $remoteIp (tailscale): sender is not a linked device")
+                        return@use
+                    }
+                    // The connection's real source address is the most reliable current address for this peer.
+                    updatePeerTailscaleIp(context, senderDeviceId, remoteIp)
+                }
+
                 ingestAccountSnapshotJson(context, incomingObj)
 
                 val replySnapshot = buildFullAccountSnapshotJson(context, incomingObj)
                 replySnapshot.put("accountKey", getCanonicalAccountKey(context))
+                replySnapshot.put("senderDeviceId", getCurrentDeviceId(context))
+                getOwnTailscaleIp().takeIf { it.isNotBlank() }?.let { replySnapshot.put("tailscaleIp", it) }
                 writer.println(replySnapshot.toString())
+                Log.i(TAG, "Incoming sync from $remoteIp completed")
             }
+        } catch (e: Exception) {
+            Log.w(TAG, "Incoming sync from $remoteIp failed: ${e.javaClass.simpleName}: ${e.message}")
         }
     }
 
