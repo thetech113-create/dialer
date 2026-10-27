@@ -4831,32 +4831,118 @@ class MainActivity : ComponentActivity() {
         }
 
         if (showLinkDevicesDialog) {
+            var isEnterCodeMode by remember { mutableStateOf(false) }
+            var enterCodeInput by remember { mutableStateOf("") }
+            var pairingStatusMsg by remember { mutableStateOf("") }
+            var generatedCode by remember { mutableStateOf("") }
+
             AlertDialog(
                 onDismissRequest = { showLinkDevicesDialog = false },
-                title = { Text("Link another phone") },
+                title = { Text("Link Another Phone (6-Digit Pairing)", fontWeight = FontWeight.Bold) },
                 text = {
-                    Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
-                        Text("First verify both phones from the Recents menu. Then use the same sync ID on both phones. Their calls will appear only in the other phone's Recents, labelled with the device name.")
-                        OutlinedTextField(
-                            value = sharedAccountId,
-                            onValueChange = { sharedAccountId = it },
-                            label = { Text("Shared sync ID") },
-                            singleLine = true,
-                            modifier = Modifier.fillMaxWidth()
+                    Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
+                        Text(
+                            "Pair phones securely using a 6-digit passcode and explicit device approval.",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
                         )
+
+                        if (generatedCode.isNotEmpty()) {
+                            Surface(
+                                modifier = Modifier.fillMaxWidth(),
+                                shape = RoundedCornerShape(12.dp),
+                                color = MaterialTheme.colorScheme.primaryContainer
+                            ) {
+                                Column(
+                                    modifier = Modifier.padding(14.dp),
+                                    horizontalAlignment = Alignment.CenterHorizontally
+                                ) {
+                                    Text("6-Digit Pairing Passcode:", style = MaterialTheme.typography.labelSmall)
+                                    Spacer(modifier = Modifier.height(4.dp))
+                                    Text(
+                                        generatedCode,
+                                        style = MaterialTheme.typography.headlineMedium,
+                                        fontWeight = FontWeight.Bold,
+                                        color = MaterialTheme.colorScheme.primary
+                                    )
+                                    Spacer(modifier = Modifier.height(4.dp))
+                                    Text("Enter this code on Phone 2", style = MaterialTheme.typography.bodySmall)
+                                }
+                            }
+                        }
+
+                        if (isEnterCodeMode) {
+                            OutlinedTextField(
+                                value = enterCodeInput,
+                                onValueChange = { enterCodeInput = it.filter { c -> c.isDigit() }.take(6) },
+                                label = { Text("Enter 6-digit code from Phone 1") },
+                                singleLine = true,
+                                modifier = Modifier.fillMaxWidth()
+                            )
+                        }
+
+                        if (pairingStatusMsg.isNotEmpty()) {
+                            Text(
+                                pairingStatusMsg,
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.primary,
+                                fontWeight = FontWeight.Medium
+                            )
+                        }
+
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.spacedBy(8.dp)
+                        ) {
+                            Button(
+                                onClick = {
+                                    isEnterCodeMode = false
+                                    AccountDeviceHistoryManager.generate6DigitPairingCode(this@MainActivity) { code ->
+                                        generatedCode = code
+                                        pairingStatusMsg = "Passcode generated! Enter this code on Phone 2."
+                                    }
+                                },
+                                modifier = Modifier.weight(1f),
+                                shape = RoundedCornerShape(12.dp)
+                            ) {
+                                Text("Show Code", fontSize = 11.sp)
+                            }
+
+                            OutlinedButton(
+                                onClick = {
+                                    generatedCode = ""
+                                    isEnterCodeMode = true
+                                },
+                                modifier = Modifier.weight(1f),
+                                shape = RoundedCornerShape(12.dp)
+                            ) {
+                                Text("Enter Code", fontSize = 11.sp)
+                            }
+                        }
                     }
                 },
                 confirmButton = {
-                    TextButton(
-                        enabled = sharedAccountId.isNotBlank(),
-                        onClick = {
-                            AccountDeviceHistoryManager.setAccountId(this@MainActivity, sharedAccountId)
-                            showLinkDevicesDialog = false
+                    if (isEnterCodeMode) {
+                        Button(
+                            enabled = enterCodeInput.length == 6,
+                            onClick = {
+                                pairingStatusMsg = "Sending pairing request..."
+                                AccountDeviceHistoryManager.confirm6DigitPairingCode(this@MainActivity, enterCodeInput) { success, msg ->
+                                    pairingStatusMsg = msg
+                                    if (success) {
+                                        showLinkDevicesDialog = false
+                                    }
+                                }
+                            }
+                        ) {
+                            Text("Verify & Link")
                         }
-                    ) { Text("Link & sync") }
+                    }
                 },
                 dismissButton = {
-                    TextButton(onClick = { showLinkDevicesDialog = false }) { Text("Cancel") }
+                    TextButton(onClick = { showLinkDevicesDialog = false }) {
+                        Text("Close")
+                    }
                 }
             )
         }
@@ -8292,6 +8378,10 @@ fun SettingsScreen(
         )
 
         CallerAnnouncementSettingsCard(
+            modifier = Modifier.fillMaxWidth()
+        )
+
+        MultiDeviceSettingsCard(
             modifier = Modifier.fillMaxWidth()
         )
 

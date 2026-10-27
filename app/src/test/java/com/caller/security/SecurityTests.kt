@@ -178,4 +178,16 @@ class PairingSecurityTests {
         val h2 = SyncAuth.sign(joiner, hostId2.id, "GET", "/sync/calls", ByteArray(0), now())
         assertTrue(auth3.authenticate("GET", "/sync/calls", h2, ByteArray(0)) is AuthResult.Denied)
     }
+
+    @Test fun sixDigitPasscodePairingFlow() {
+        val f = Fixture()
+        val code6 = "482916"
+        f.host.createOfferWithCode(code6)
+        val link = PairingLink(code6, f.hostId.id)
+        val r = f.host.handleRequest(f.joiner.buildRequest(link)) as PairingHost.RequestResult.Accepted
+        assertEquals("PENDING", f.host.status(r.pairingId).state)
+        assertTrue(f.host.approve(r.pairingId))
+        val dev = f.joiner.verifyApproval(link, r.pairingId, f.host.status(r.pairingId))
+        assertNotNull(dev)
+    }
 }

@@ -50,7 +50,7 @@ data class PairingLink(val code: String, val ownerId: String) {
             val p = s.trim().split(':')
             if (p.size != 3 || p[0] != "dialerpair") return null
             val code = Pairing.normalizeCode(p[1])
-            if (code.length != Pairing.CODE_LENGTH || !code.all { it in Pairing.ALPHABET }) return null
+            if (code.length !in 6..10 || !code.all { it.isLetterOrDigit() }) return null
             if (!Regex("[0-9a-f]{64}").matches(p[2])) return null
             return PairingLink(code, p[2])
         }
@@ -164,6 +164,13 @@ class PairingHost(
     @Synchronized
     fun createOffer(): PairingOffer {
         val o = ActiveOffer(Pairing.newCode(), clock() + offerTtlMs)
+        offer = o
+        return PairingOffer(o.code, identity.id, o.expiresAt)
+    }
+
+    @Synchronized
+    fun createOfferWithCode(customCode: String): PairingOffer {
+        val o = ActiveOffer(customCode, clock() + offerTtlMs)
         offer = o
         return PairingOffer(o.code, identity.id, o.expiresAt)
     }

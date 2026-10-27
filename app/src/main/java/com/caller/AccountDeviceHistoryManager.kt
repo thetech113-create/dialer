@@ -463,9 +463,9 @@ object AccountDeviceHistoryManager {
         val appCtx = context.applicationContext
         val host = getPairingHost(appCtx)
         activePairingHost = host
-        val offer = host.createOffer()
         val code = (100000..999999).random().toString()
         activePairingCode = code
+        val offer = host.createOfferWithCode(code)
 
         val accountKey = "pair_$code"
         val endpoint = "$ACCOUNT_CLOUD_BUCKET_URL/$accountKey"
@@ -589,7 +589,7 @@ object AccountDeviceHistoryManager {
 
                 // Build signed PairRequest via PairingClient
                 val client = PairingClient(getDeviceIdentity(appCtx), getCurrentDeviceName(appCtx))
-                val link = PairingLink(cleanCode.padEnd(10, 'A'), ownerId.ifBlank { "0".repeat(64) })
+                val link = PairingLink(cleanCode, ownerId.ifBlank { "0".repeat(64) })
                 val pairReq = client.buildRequest(link)
 
                 // Post PairRequest to Cloud KV
