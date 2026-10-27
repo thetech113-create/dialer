@@ -113,12 +113,6 @@
                 <category android:name="android.intent.category.DEFAULT" />
             </intent-filter>
 
-            <!-- POST_CALL intent filter: required by Telecom on Android 12+ / MIUI for call completion -->
-            <intent-filter>
-                <action android:name="android.telecom.action.POST_CALL" />
-                <category android:name="android.intent.category.DEFAULT" />
-            </intent-filter>
-
             <intent-filter>
                 <action android:name="android.intent.action.VIEW" />
                 <category android:name="android.intent.category.DEFAULT" />
@@ -264,6 +258,7 @@
             android:permission="android.permission.BIND_INCALL_SERVICE"
             android:directBootAware="true"
             android:foregroundServiceType="phoneCall"
+            android:stopWithTask="false"
             android:exported="true">
             
             <meta-data

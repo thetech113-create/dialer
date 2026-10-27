@@ -3716,12 +3716,13 @@ class MainActivity : ComponentActivity() {
         }
 
         Column(modifier = modifier.fillMaxSize()) {
-            if (isInCall) {
+            val isTerminationSuppressed by CallBubbleOverlay.isTerminationSuppressed.collectAsState()
+            if (isInCall && !isTerminationSuppressed) {
                 Surface(
                     modifier = Modifier.fillMaxWidth().height(48.dp).clickable {
                         // The banner can remain composed briefly while Telecom is disconnecting.
                         // Do not reopen the call UI unless the service confirms a live call.
-                        if (MyInCallService.getInstance()?.isOngoingCallForBubble() != true) {
+                        if (!CallBubbleOverlay.isOngoingCallUiActionAllowed()) {
                             Log.d(P2P_FORENSIC_TAG, "ongoing_call_banner_tap skipped: no ongoing non-terminating call")
                             return@clickable
                         }

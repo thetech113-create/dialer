@@ -1818,6 +1818,23 @@ class MyInCallService : InCallService() {
                 return super.onUnbind(intent)
             }
 
+            override fun onTaskRemoved(rootIntent: Intent?) {
+                super.onTaskRemoved(rootIntent)
+                val liveCalls = getLiveCalls()
+                Log.w(
+                    P2P_FORENSIC_TAG,
+                    "call_task_removed liveCalls=${liveCalls.size} terminationSuppressed=$bubbleSuppressedForTermination"
+                )
+                if (liveCalls.isEmpty()) return
+
+                // Swiping the launcher task away must not hand an active call back to the
+                // preinstalled dialer. Keep our foreground call surface alive without forcing
+                // the full-screen activity back over whatever the user was doing.
+                CallBubbleOverlay.isCallActivityVisible = false
+                syncCalls()
+                showCallBubbleIfNeeded(launchFullScreenWhenOverlayUnavailable = false)
+            }
+
             override fun onDestroy() {
                 logCall("InCallService.onDestroy called. Service is dying.")
                 android.util.Log.e("OEM_FALLBACK_TRACE", "=====================================================================")

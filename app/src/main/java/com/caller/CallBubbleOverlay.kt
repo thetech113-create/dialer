@@ -19,6 +19,8 @@ import android.view.WindowManager
 import android.widget.LinearLayout
 import android.widget.TextView
 import androidx.core.content.ContextCompat
+import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.asStateFlow
 import kotlin.math.abs
 
 object CallBubbleOverlay {
@@ -41,26 +43,26 @@ object CallBubbleOverlay {
      * state while it tears the call down, so that state alone is not safe to use for showing
      * the overlay.
      */
-    @Volatile
-    private var isSuppressedForTermination: Boolean = false
+    private val terminationSuppression = MutableStateFlow(false)
+    val isTerminationSuppressed = terminationSuppression.asStateFlow()
 
     private val handler = android.os.Handler(android.os.Looper.getMainLooper())
 
     fun isShowing(): Boolean = view != null
 
     fun suppressForTermination(context: Context) {
-        isSuppressedForTermination = true
+        terminationSuppression.value = true
         Log.d(TAG, "hide: call termination was requested")
         hide(context)
     }
 
     /** Called only when Telecom reports a new call to the in-call service. */
     fun allowForNewOngoingCall() {
-        isSuppressedForTermination = false
+        terminationSuppression.value = false
     }
 
-    private fun canShowForOngoingCall(): Boolean {
-        if (isSuppressedForTermination) {
+    fun isOngoingCallUiActionAllowed(): Boolean {
+        if (terminationSuppression.value) {
             Log.d(TAG, "skip: call termination is in progress")
             return false
         }
@@ -70,6 +72,8 @@ object CallBubbleOverlay {
         }
         return true
     }
+
+    private fun canShowForOngoingCall(): Boolean = isOngoingCallUiActionAllowed()
 
     private fun formatElapsed(ms: Long): String {
         val total = (ms / 1000L).coerceAtLeast(0L)
@@ -118,7 +122,7 @@ object CallBubbleOverlay {
                     hide(ctx)
                 }
                 "CALL_STATE_UPDATED" -> {
-                    if (isSuppressedForTermination) {
+                    if (terminationSuppression.value) {
                         hide(ctx)
                         return
                     }
