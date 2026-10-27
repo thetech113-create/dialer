@@ -77,7 +77,11 @@ import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.foundation.lazy.rememberLazyListState
+import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.rememberScrollState
+import androidx.compose.material3.FilterChip
+import androidx.compose.material.icons.filled.PhoneAndroid
+import androidx.compose.material.icons.filled.CloudDone
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.KeyboardOptions
@@ -4562,6 +4566,8 @@ class MainActivity : ComponentActivity() {
     ) {
         val palette = oneUiColors()
         var selectedRecentFilter by remember { mutableStateOf(RecentFilter.ALL) }
+        var selectedDeviceFilter by remember { mutableStateOf("ALL") }
+        val peerDevices = remember { AccountDeviceHistoryManager.getPeerDevices(this@MainActivity) }
         var showClearAllRecentDialog by remember { mutableStateOf(false) }
         var showRecentMenu by remember { mutableStateOf(false) }
         var showLinkDevicesDialog by remember { mutableStateOf(false) }
@@ -4589,15 +4595,22 @@ class MainActivity : ComponentActivity() {
             verificationWaiting = false
         }
 
-        val displayRecentCalls = remember(filteredRecentCalls, selectedRecentFilter) {
+        val displayRecentCalls = remember(filteredRecentCalls, selectedRecentFilter, selectedDeviceFilter) {
             filteredRecentCalls.filter { groupedCall ->
                 val lastCall = groupedCall.callHistory.firstOrNull() ?: return@filter false
-                when (selectedRecentFilter) {
+                val passesTypeFilter = when (selectedRecentFilter) {
                     RecentFilter.ALL -> true
                     RecentFilter.MISSED -> !lastCall.isBlocked && lastCall.callType == CallType.MISSED
                     RecentFilter.INCOMING -> !lastCall.isBlocked && lastCall.callType == CallType.INCOMING
                     RecentFilter.OUTGOING -> !lastCall.isBlocked && lastCall.callType == CallType.OUTGOING
                     RecentFilter.BLOCKED -> lastCall.isBlocked
+                }
+                if (!passesTypeFilter) return@filter false
+
+                when (selectedDeviceFilter) {
+                    "ALL" -> true
+                    "THIS_PHONE" -> groupedCall.sourceDeviceName.isBlank()
+                    else -> groupedCall.sourceDeviceName.equals(selectedDeviceFilter, ignoreCase = true)
                 }
             }
         }
@@ -4744,6 +4757,48 @@ class MainActivity : ComponentActivity() {
                                 )
                             )
                         }
+                    }
+                }
+
+                // TOP DEVICE FILTER SWITCHER CHIPS (ALL PHONES | THIS PHONE | LINKED DEVICE)
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .horizontalScroll(rememberScrollState())
+                        .padding(horizontal = 16.dp, vertical = 6.dp),
+                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    FilterChip(
+                        selected = selectedDeviceFilter == "ALL",
+                        onClick = { selectedDeviceFilter = "ALL" },
+                        label = { Text("All Phones", fontSize = 12.sp, fontWeight = FontWeight.SemiBold) },
+                        leadingIcon = {
+                            Icon(Icons.Default.Devices, contentDescription = null, modifier = Modifier.size(16.dp))
+                        },
+                        shape = RoundedCornerShape(20.dp)
+                    )
+
+                    FilterChip(
+                        selected = selectedDeviceFilter == "THIS_PHONE",
+                        onClick = { selectedDeviceFilter = "THIS_PHONE" },
+                        label = { Text("This Phone", fontSize = 12.sp, fontWeight = FontWeight.SemiBold) },
+                        leadingIcon = {
+                            Icon(Icons.Default.PhoneAndroid, contentDescription = null, modifier = Modifier.size(16.dp))
+                        },
+                        shape = RoundedCornerShape(20.dp)
+                    )
+
+                    peerDevices.forEach { peer ->
+                        FilterChip(
+                            selected = selectedDeviceFilter.equals(peer.deviceName, ignoreCase = true),
+                            onClick = { selectedDeviceFilter = peer.deviceName },
+                            label = { Text(peer.deviceName, fontSize = 12.sp, fontWeight = FontWeight.SemiBold) },
+                            leadingIcon = {
+                                Icon(Icons.Default.CloudDone, contentDescription = null, modifier = Modifier.size(16.dp), tint = Color(0xFF4CAF50))
+                            },
+                            shape = RoundedCornerShape(20.dp)
+                        )
                     }
                 }
 
