@@ -262,8 +262,17 @@ data class GroupedRecentCall(
     val groupKey: String = phoneNumber,
     val providerRowIds: List<String> = emptyList(),
     val isVideo: Boolean = callHistory.firstOrNull()?.isVideo == true,
-    val isTollFree: Boolean = callHistory.firstOrNull()?.isTollFree == true || !isNumberVideoCallCapable(phoneNumber)
+    val isTollFree: Boolean = callHistory.firstOrNull()?.isTollFree == true || !isNumberVideoCallCapable(phoneNumber),
+    // Empty for this phone's own calls; otherwise the linked phone's name. Synced calls exist only in this
+    // app's storage (never in Android's call log) and are shown in their own Recents section.
+    val sourceDeviceName: String = ""
 )
+
+// One entry of the Recents list: a section title or a call row.
+private sealed interface RecentListEntry {
+    data class Header(val key: String, val title: String) : RecentListEntry
+    data class Call(val group: GroupedRecentCall) : RecentListEntry
+}
 
 data class CallHistoryItem(
     val timestamp: Long,
@@ -3208,7 +3217,14 @@ class MainActivity : ComponentActivity() {
     }
 
     private fun groupRecentCalls(calls: List<RecentCall>): List<GroupedRecentCall> {
-        val grouped = calls.groupBy { buildRecentCallerGroupKey(it.phoneNumber) }
+        // This phone's calls and each linked phone's calls are grouped separately, so a number called from
+        // both phones shows once in each section. A linked phone's key is prefixed, so it can never match
+        // (or delete) one of this phone's own rows.
+        val grouped = calls.groupBy {
+            val numberKey = buildRecentCallerGroupKey(it.phoneNumber)
+            if (it.sourceDeviceName.isBlank()) numberKey
+            else "peer:${it.sourceDeviceName.trim().lowercase(Locale.ROOT)}:$numberKey"
+        }
         return grouped.map { (groupKey, callList) ->
             // The group's number is what Recents shows and dials, so it must stay the call-log number as
             // stored. normalizePhoneNumber() is a lookup key (it drops the leading 1 of 11-digit numbers),
@@ -3241,7 +3257,8 @@ class MainActivity : ComponentActivity() {
                 name = name,
                 callHistory = callHistory,
                 groupKey = groupKey,
-                providerRowIds = providerRowIds
+                providerRowIds = providerRowIds,
+                sourceDeviceName = callList.first().sourceDeviceName.trim()
             )
         }.sortedByDescending { it.callHistory.first().timestamp }
     }
@@ -3611,6 +3628,12 @@ class MainActivity : ComponentActivity() {
     }
 
     private fun showError(message: String) { runOnUiThread { Toast.makeText(this@MainActivity, message, Toast.LENGTH_LONG).show() } }
+
+    // Only this phone's own Recents rows exist in Android's call log, so only they can be deleted here.
+    private fun deleteRecentIfOwn(group: GroupedRecentCall, delete: (String) -> Unit) {
+        if (group.sourceDeviceName.isBlank()) delete(group.phoneNumber)
+        else showError("Calls synced from ${group.sourceDeviceName} can't be deleted here")
+    }
     @Deprecated("This method uses a deprecated member. Consider updating to a newer approach.")
     private fun showSuccess(message: String) { runOnUiThread { Toast.makeText(this@MainActivity, message, Toast.LENGTH_SHORT).show() } }
 
@@ -3664,7 +3687,7 @@ class MainActivity : ComponentActivity() {
         var pendingContactDelete by remember { mutableStateOf<Contact?>(null) }
         var pendingRecentDelete by remember { mutableStateOf<PendingRecentDeleteRequest?>(null) }
         val requestRecentDelete: (String) -> Unit = requestRecentDelete@{ phoneNumber ->
-            val groupedCall = groupedRecentCalls.firstOrNull { it.phoneNumber == phoneNumber }
+            val groupedCall = groupedRecentCalls.firstOrNull { it.phoneNumber == phoneNumber && it.sourceDeviceName.isBlank() }
             val providerRowIds = groupedCall?.providerRowIds?.filter { it.isNotBlank() }?.distinct().orEmpty()
             val targetRowId = providerRowIds.firstOrNull().orEmpty()
             if (groupedCall == null || targetRowId.isBlank()) {
@@ -4317,7 +4340,7 @@ class MainActivity : ComponentActivity() {
                     // keep the same newest call, so they never scroll.
                     // If the new call is with the person who is already on top, their row simply stays first
                     // (only its time changes), so there is nothing hidden above and no scroll.
-                    val newestRecentCall = groupedRecentCalls.firstOrNull()
+                    val newestRecentCall = groupedRecentCalls.firstOrNull { it.sourceDeviceName.isBlank() }
                     val newestRecentCallGroupKey = newestRecentCall?.groupKey.orEmpty()
                     val newestRecentCallTimestamp = newestRecentCall?.callHistory?.firstOrNull()?.timestamp ?: 0L
                     val currentTopEntryId = if (newestRecentCallGroupKey.isNotEmpty() && newestRecentCallTimestamp > 0L) {
@@ -4358,7 +4381,7 @@ class MainActivity : ComponentActivity() {
                             digitQuery = digitQuery,
                             matchedContacts = digitMatchedContacts,
                             matchedRecentCalls = digitMatchedRecentCalls,
-                            lastRecentNumber = groupedRecentCalls.firstOrNull()?.phoneNumber.orEmpty(),
+                            lastRecentNumber = groupedRecentCalls.firstOrNull { it.sourceDeviceName.isBlank() }?.phoneNumber.orEmpty(),
                             contacts = contacts,
                             listState = recentListState,
                             onRecentDialpadDigitsChange = onRecentDialpadDigitsChange,
@@ -6336,7 +6359,7 @@ class MainActivity : ComponentActivity() {
                         }
                         SwipeToCallContainer(
                             onSwipeCall = { onRecentCallClick(groupedCall.phoneNumber) },
-                            onSwipeDelete = { onDeleteRecentCall(groupedCall.phoneNumber) },
+                            onSwipeDelete = { deleteRecentIfOwn(groupedCall, onDeleteRecentCall) },
                             modifier = Modifier.fillMaxWidth(),
                             shape = RoundedCornerShape(26.dp),
                             backgroundPadding = PaddingValues(vertical = 6.dp)
@@ -6368,7 +6391,7 @@ class MainActivity : ComponentActivity() {
                                             onCopy = { copyNumberToClipboard(groupedCall.phoneNumber) },
                                             onShare = { sharePhoneNumber(groupedCall.phoneNumber, displayName) },
                                             onToggleBlock = { togglePhoneNumberBlockState(groupedCall.phoneNumber) },
-                                            onDelete = { onDeleteRecentCall(groupedCall.phoneNumber) }
+                                            onDelete = { deleteRecentIfOwn(groupedCall, onDeleteRecentCall) }
                                         )
                                         Spacer(modifier = Modifier.width(14.dp))
                                         Column(modifier = Modifier.weight(1f)) {
@@ -6411,10 +6434,36 @@ class MainActivity : ComponentActivity() {
                     }
                 }
             } else {
+                // Sections inside Recents: this phone first, then one section per linked phone, titled with
+                // that phone's name. Titles appear only when a linked phone has calls to show.
+                val ownRecentGroups = groupedRecentCalls.filter { it.sourceDeviceName.isBlank() }
+                val peerRecentSections = groupedRecentCalls
+                    .filter { it.sourceDeviceName.isNotBlank() }
+                    .groupBy { it.sourceDeviceName }
+                val recentListEntries: List<RecentListEntry> = buildList {
+                    if (peerRecentSections.isNotEmpty() && ownRecentGroups.isNotEmpty()) {
+                        add(RecentListEntry.Header("section_this_phone", "This phone"))
+                    }
+                    ownRecentGroups.forEach { add(RecentListEntry.Call(it)) }
+                    peerRecentSections.forEach { (deviceName, groups) ->
+                        add(RecentListEntry.Header("section_peer_$deviceName", deviceName))
+                        groups.forEach { add(RecentListEntry.Call(it)) }
+                    }
+                }
                 items(
-                    items = groupedRecentCalls,
-                    key = { it.groupKey }
-                ) { groupedCall ->
+                    items = recentListEntries,
+                    key = { entry ->
+                        when (entry) {
+                            is RecentListEntry.Header -> entry.key
+                            is RecentListEntry.Call -> entry.group.groupKey
+                        }
+                    }
+                ) { entry ->
+                    if (entry is RecentListEntry.Header) {
+                        RecentSectionLabel(entry.title)
+                        return@items
+                    }
+                    val groupedCall = (entry as RecentListEntry.Call).group
                     val groupKey = groupedCall.groupKey
                     val rowBucket = groupedCallsByKey[groupKey] ?: groupedCall
                     val rowPhoneNumber = rowBucket.phoneNumber
@@ -6452,7 +6501,7 @@ class MainActivity : ComponentActivity() {
 
                     SwipeToCallContainer(
                         onSwipeCall = { onRecentCallClick(rowPhoneNumber) },
-                        onSwipeDelete = { onDeleteRecentCall(rowPhoneNumber) },
+                        onSwipeDelete = { deleteRecentIfOwn(rowBucket, onDeleteRecentCall) },
                         modifier = Modifier.fillMaxWidth(),
                         shape = cardShape,
                         backgroundPadding = PaddingValues(vertical = 4.dp)
@@ -6484,7 +6533,7 @@ class MainActivity : ComponentActivity() {
                                         onCopy = { copyNumberToClipboard(rowPhoneNumber) },
                                         onShare = { sharePhoneNumber(rowPhoneNumber, titleText) },
                                         onToggleBlock = { togglePhoneNumberBlockState(rowPhoneNumber) },
-                                        onDelete = { onDeleteRecentCall(rowPhoneNumber) }
+                                        onDelete = { deleteRecentIfOwn(rowBucket, onDeleteRecentCall) }
                                     )
                                     Spacer(modifier = Modifier.width(14.dp))
                                     Column(modifier = Modifier.weight(1f)) {
@@ -6690,7 +6739,7 @@ class MainActivity : ComponentActivity() {
                                     tint = Color(0xFF4CAF50)
                                 )
                             }
-                            IconButton(onClick = { onDeleteRecentCall(groupedCall.phoneNumber) }) {
+                            IconButton(onClick = { deleteRecentIfOwn(groupedCall, onDeleteRecentCall) }) {
                                 Icon(
                                     Icons.Default.Delete,
                                     contentDescription = "Delete recent result",

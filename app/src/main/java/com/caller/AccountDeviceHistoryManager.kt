@@ -139,7 +139,7 @@ object AccountDeviceHistoryManager {
     private const val KEY_LAST_ACCOUNT_SYNC_MS = "last_account_sync_ms"
     private const val KEY_LAST_CLOUD_STATUS = "last_cloud_status"
     private const val KEY_LAST_CLOUD_OK_MS = "last_cloud_ok_ms"
-    private const val KEY_NATIVE_LOG_CLEANED = "native_log_peer_cleanup_v1"
+    private const val KEY_NATIVE_LOG_CLEANED = "native_log_peer_cleanup_v2"
     // kvdb.io rejects values larger than ~16 KB by default, so every cloud document stays well under it.
     private const val CLOUD_MAX_BODY_BYTES = 14_000
     private const val CLOUD_MAX_OWN_CALLS = 80
@@ -150,12 +150,19 @@ object AccountDeviceHistoryManager {
     // Direct sync over Tailscale crosses the internet (possibly via a DERP relay), so allow more time than LAN.
     private const val TAILSCALE_CONNECT_TIMEOUT_MS = 6000
     private const val TAILSCALE_READ_TIMEOUT_MS = 8000
+    // A peer counts as reachable through the cloud only if its own uploaded document is this fresh
+    // (its engine uploads every 45 s while the app is alive); an old document is just stale data.
+    private const val CLOUD_FRESH_WINDOW_MS = 180_000L
+    // Key used when a peer completed a direct sync but did not identify itself (older app build).
+    private const val UNKNOWN_PEER_KEY = "?"
     private const val MAX_STORED_SYNCED_CALLS = 300
 
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
     private val mainHandler = Handler(Looper.getMainLooper())
     private val engineRunning = AtomicBoolean(false)
     private val syncInProgress = AtomicBoolean(false)
+    // deviceId -> time of the last direct (LAN or Tailscale) TCP sync that actually completed, in either direction.
+    private val lastDirectSyncMs = java.util.concurrent.ConcurrentHashMap<String, Long>()
     private val stateListeners = CopyOnWriteArrayList<() -> Unit>()
 
     // Reuses the app's own client (P2PServerClient.kt) so cloud sync gets the same DNS fallback
@@ -193,14 +200,6 @@ object AccountDeviceHistoryManager {
 
     fun setFilteringEnabled(context: Context, enabled: Boolean) {
         getPrefs(context).edit().putBoolean(KEY_FILTERING_ENABLED, enabled).apply()
-        notifyStateChanged()
-    }
-
-    fun isMergeToNativeCallLogEnabled(context: Context): Boolean =
-        getPrefs(context).getBoolean(KEY_MERGE_TO_NATIVE_LOG, false)
-
-    fun setMergeToNativeCallLogEnabled(context: Context, enabled: Boolean) {
-        getPrefs(context).edit().putBoolean(KEY_MERGE_TO_NATIVE_LOG, enabled).apply()
         notifyStateChanged()
     }
 
@@ -608,6 +607,21 @@ object AccountDeviceHistoryManager {
         }
     }
 
+    private fun recordDirectSync(deviceId: String) {
+        lastDirectSyncMs[deviceId.trim().ifBlank { UNKNOWN_PEER_KEY }] = System.currentTimeMillis()
+    }
+
+    /**
+     * Number of linked devices a real sync reached since [runStart]: a completed direct TCP exchange, or a
+     * fresh document the peer itself uploaded to the cloud. Registration and stored call counts are not evidence.
+     */
+    private fun countReachedPeers(context: Context, runStart: Long, cloudFreshIds: Set<String>): Int {
+        val peerIds = getPeerDevices(context).map { it.deviceId }.filter { it.isNotBlank() }.toSet()
+        val directIds = lastDirectSyncMs.filterValues { it >= runStart }.keys
+        val reached = (directIds + cloudFreshIds).filter { it in peerIds }.toSet()
+        return if (reached.isEmpty() && UNKNOWN_PEER_KEY in directIds) 1 else reached.size
+    }
+
     fun syncAccountNow(context: Context, showToast: Boolean = true) {
         val appCtx = context.applicationContext
         startSyncEngine(appCtx)
@@ -622,6 +636,8 @@ object AccountDeviceHistoryManager {
 
         scope.launch {
             try {
+                val runStart = System.currentTimeMillis()
+                val cloudFreshIds = mutableSetOf<String>()
                 broadcastUdpAccountBeacon(appCtx)
 
                 // Direct Tailscale sync first, using cached peer addresses: does not depend on the cloud result.
@@ -629,7 +645,7 @@ object AccountDeviceHistoryManager {
                     .onFailure { e -> Log.w(TAG, "Tailscale sync pass error: ${e.message}") }
                 val addressesBeforeCloud = getPeerDevices(appCtx).associate { it.deviceId to it.tailscaleIp }
 
-                val cloudSuccess = performCloudAccountSync(appCtx)
+                val cloudSuccess = performCloudAccountSync(appCtx, cloudFreshIds)
 
                 // The cloud step may have just learned (or refreshed) a peer's Tailscale address: try those peers now.
                 val newlyAddressed = getPeerDevices(appCtx)
@@ -644,13 +660,29 @@ object AccountDeviceHistoryManager {
                 getPrefs(appCtx).edit().putLong(KEY_LAST_ACCOUNT_SYNC_MS, System.currentTimeMillis()).apply()
                 notifyStateChanged()
 
+                val peerCount = getPeerDevices(appCtx).size
+                var reachedCount = countReachedPeers(appCtx, runStart, cloudFreshIds)
+                // LAN sync is completed by the peers answering our broadcast, so give a manual sync a moment
+                // to finish before reporting that nobody was reached.
+                if (showToast && peerCount > 0) {
+                    var waitedMs = 0
+                    while (reachedCount == 0 && waitedMs < 3000) {
+                        delay(250L)
+                        waitedMs += 250
+                        reachedCount = countReachedPeers(appCtx, runStart, cloudFreshIds)
+                    }
+                }
+                Log.i(TAG, "Sync run finished: reached $reachedCount of $peerCount linked device(s) (cloud ok=$cloudSuccess)")
+
                 if (showToast) {
-                    val peerCount = getPeerDevices(appCtx).size
                     val callCount = getSyncedCallHistory(appCtx).size
-                    if (cloudSuccess || peerCount > 0) {
-                        toast(appCtx, "Account synced! $peerCount linked device(s), $callCount synced calls.")
-                    } else {
-                        toast(appCtx, "Account state updated. Sign in with the same Account ID on your other phone.")
+                    when {
+                        reachedCount > 0 ->
+                            toast(appCtx, "Account synced! $reachedCount of $peerCount linked device(s) reached, $callCount synced calls.")
+                        peerCount > 0 ->
+                            toast(appCtx, "Sync unavailable \u2014 other device unreachable.")
+                        else ->
+                            toast(appCtx, "Account state updated. Sign in with the same Account ID on your other phone.")
                     }
                 }
             } catch (e: Exception) {
@@ -718,7 +750,7 @@ object AccountDeviceHistoryManager {
      *                                  so two phones can never overwrite each other.
      * Every document stays far below kvdb's 16 KB value limit, and every HTTP failure is recorded.
      */
-    private fun performCloudAccountSync(context: Context): Boolean {
+    private fun performCloudAccountSync(context: Context, freshPeerIds: MutableSet<String>): Boolean {
         val accountKey = getCanonicalAccountKey(context)
         val myDeviceId = getCurrentDeviceId(context)
         val problems = mutableListOf<String>()
@@ -762,6 +794,11 @@ object AccountDeviceHistoryManager {
                             }
                         }
                         ingestAccountSnapshotJson(context, JSONObject().put("calls", arr))
+                    }
+                    // Only a recent upload by the peer itself shows it is online; an old document is stale data.
+                    val updatedAt = doc.optLong("updatedAt", 0L)
+                    if (updatedAt > 0L && kotlin.math.abs(System.currentTimeMillis() - updatedAt) <= CLOUD_FRESH_WINDOW_MS) {
+                        freshPeerIds += peer.deviceId
                     }
                 }.onFailure { e -> problems += "parse ${peer.deviceName}: ${e.message}" }
             } else if (r.code == 404) {
@@ -1015,11 +1052,10 @@ object AccountDeviceHistoryManager {
                                 kotlin.math.abs(it.timestamp - record.timestamp) < 5000L
                     }
                     if (!isDup) {
+                        // Synced calls stay in this app's own storage only; they are never written into
+                        // Android's call log (that loses which phone made the call and can echo it back).
                         existingCalls.add(record)
                         newlyMergedCount++
-                        if (isMergeToNativeCallLogEnabled(context)) {
-                            insertIntoNativeCallLogIfMissing(context, record)
-                        }
                     }
                 }
             }
@@ -1165,6 +1201,7 @@ object AccountDeviceHistoryManager {
                     return false
                 }
                 ingestAccountSnapshotJson(context, replyObj)
+                recordDirectSync(replyDeviceId.ifBlank { expectedDeviceId.orEmpty() })
                 if (replyDeviceId.isNotBlank()) {
                     updatePeerTailscaleIp(context, replyDeviceId, replyObj.optString("tailscaleIp"))
                 }
@@ -1225,6 +1262,7 @@ object AccountDeviceHistoryManager {
                 replySnapshot.put("senderDeviceId", getCurrentDeviceId(context))
                 getOwnTailscaleIp().takeIf { it.isNotBlank() }?.let { replySnapshot.put("tailscaleIp", it) }
                 writer.println(replySnapshot.toString())
+                recordDirectSync(incomingObj.optString("senderDeviceId"))
                 Log.i(TAG, "Incoming sync from $remoteIp completed")
             }
         } catch (e: Exception) {
@@ -1316,56 +1354,6 @@ object AccountDeviceHistoryManager {
         return list
     }
 
-    private fun insertIntoNativeCallLogIfMissing(context: Context, record: SyncedCallRecord) {
-        if (ContextCompat.checkSelfPermission(context, Manifest.permission.WRITE_CALL_LOG) != PackageManager.PERMISSION_GRANTED ||
-            ContextCompat.checkSelfPermission(context, Manifest.permission.READ_CALL_LOG) != PackageManager.PERMISSION_GRANTED
-        ) {
-            return
-        }
-        val ownNumbers = getVerifiedNumbers(context)
-        val recordKeys = buildP2PNumberSnapshot(record.remoteNumber).lookupKeys.toSet()
-        val isOwnNumber = ownNumbers.any {
-            buildP2PNumberSnapshot(it).lookupKeys.intersect(recordKeys).isNotEmpty()
-        }
-        if (isFilteringEnabled(context) && isOwnNumber) return
-
-        runCatching {
-            val minTs = record.timestamp - 10_000L
-            val maxTs = record.timestamp + 10_000L
-            var alreadyExists = false
-            context.contentResolver.query(
-                CallLog.Calls.CONTENT_URI,
-                arrayOf(CallLog.Calls.NUMBER, CallLog.Calls.DATE),
-                "${CallLog.Calls.DATE} BETWEEN ? AND ?",
-                arrayOf(minTs.toString(), maxTs.toString()),
-                null
-            )?.use { cursor ->
-                while (cursor.moveToNext()) {
-                    val existingNum = cursor.getString(0).orEmpty()
-                    if (buildP2PNumberSnapshot(existingNum).last10 == buildP2PNumberSnapshot(record.remoteNumber).last10) {
-                        alreadyExists = true
-                        break
-                    }
-                }
-            }
-
-            if (!alreadyExists) {
-                val values = ContentValues().apply {
-                    put(CallLog.Calls.NUMBER, record.remoteNumber)
-                    if (record.contactName.isNotBlank()) {
-                        put(CallLog.Calls.CACHED_NAME, record.contactName)
-                    }
-                    put(CallLog.Calls.TYPE, record.callTypeInt)
-                    put(CallLog.Calls.DATE, record.timestamp)
-                    put(CallLog.Calls.DURATION, record.durationSec)
-                    put(CallLog.Calls.NEW, 0)
-                    put(CallLog.Calls.IS_READ, 1)
-                }
-                context.contentResolver.insert(CallLog.Calls.CONTENT_URI, values)
-            }
-        }
-    }
-
     private fun purgeLegacySyncSmsIfPresent(context: Context) {
         scope.launch {
             runCatching {
@@ -1431,9 +1419,6 @@ fun MultiDeviceSettingsCard(
 
     val filteringEnabled = remember(refreshTick) {
         AccountDeviceHistoryManager.isFilteringEnabled(context)
-    }
-    val mergeToNativeEnabled = remember(refreshTick) {
-        AccountDeviceHistoryManager.isMergeToNativeCallLogEnabled(context)
     }
     val accountId = remember(refreshTick) {
         AccountDeviceHistoryManager.getAccountId(context)
@@ -1596,36 +1581,6 @@ fun MultiDeviceSettingsCard(
             Spacer(modifier = Modifier.height(14.dp))
             Divider(color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.08f))
             Spacer(modifier = Modifier.height(14.dp))
-
-            // 3. Merge Synced Calls into Recents Toggle
-            Row(
-                modifier = Modifier.fillMaxWidth(),
-                verticalAlignment = Alignment.CenterVertically,
-                horizontalArrangement = Arrangement.SpaceBetween
-            ) {
-                Column(modifier = Modifier.weight(1f).padding(end = 12.dp)) {
-                    Text(
-                        text = "Sync Peer Calls into Recents Tab",
-                        style = MaterialTheme.typography.bodyLarge,
-                        fontWeight = FontWeight.SemiBold,
-                        color = MaterialTheme.colorScheme.onSurface
-                    )
-                    Spacer(modifier = Modifier.height(2.dp))
-                    Text(
-                        text = "Automatically merges call history from your linked phones into this phone's Recents list",
-                        style = MaterialTheme.typography.bodySmall,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant
-                    )
-                }
-                Switch(
-                    checked = mergeToNativeEnabled,
-                    onCheckedChange = { enabled ->
-                        AccountDeviceHistoryManager.setMergeToNativeCallLogEnabled(context, enabled)
-                    }
-                )
-            }
-
-            Spacer(modifier = Modifier.height(12.dp))
 
             // 4. Hide Self-Calls Toggle
             Row(
