@@ -259,6 +259,7 @@ class MyInCallService : InCallService() {
             private var pendingDisconnectCleanup: Runnable? = null
             private var transientEmptyRecoveryRunnable: Runnable? = null
             private var lastLiveCallSeenAtMs: Long = 0L
+            @Volatile private var bubbleSuppressedForTermination = false
 
             // --- CALL STATE MACHINE TRACKERS ---
             private val callDirectionTracker = java.util.concurrent.ConcurrentHashMap<String, String>()
@@ -364,6 +365,13 @@ class MyInCallService : InCallService() {
                     it.state != Call.STATE_DISCONNECTED && it.state != Call.STATE_DISCONNECTING
                 }
             }
+
+            /**
+             * The overlay must not rely on a sticky UI snapshot while a user-initiated
+             * disconnect is still being processed by Telecom.
+             */
+            fun isOngoingCallForBubble(): Boolean =
+                !bubbleSuppressedForTermination && getLiveCalls().isNotEmpty()
 
             private fun getLiveTopLevelCalls(allCalls: List<Call> = getSafeCalls()): List<Call> {
                 return allCalls.filter {
@@ -2068,6 +2076,10 @@ class MyInCallService : InCallService() {
              * the activity above the app the user is using.
              */
             fun showCallBubbleIfNeeded(launchFullScreenWhenOverlayUnavailable: Boolean = true) {
+                if (!isOngoingCallForBubble()) {
+                    Log.d(P2P_FORENSIC_TAG, "call_bubble_skip reason=no_ongoing_call_or_termination")
+                    return
+                }
                 val liveCalls = getLiveCalls()
                 val snapshot = lastCallUiSnapshot ?: getCurrentCallStateFromSync()
                 val hasCall = snapshot.isInCall || liveCalls.isNotEmpty() || hasActiveCall()
@@ -2358,6 +2370,9 @@ class MyInCallService : InCallService() {
             @SuppressLint("FullScreenIntentPolicy")
             @Suppress("UseFullScreenIntent")
             override fun onCallAdded(call: Call) {
+                // A newly added Telecom call begins a new session and may use the bubble again.
+                bubbleSuppressedForTermination = false
+                CallBubbleOverlay.allowForNewOngoingCall()
                 // First call of a session: remember whether the app was on screen, so the call screen can
                 // return to the app (not the home screen) when the call ends.
                 if (getLiveCalls().count { it !== call } == 0) {
@@ -2848,6 +2863,10 @@ class MyInCallService : InCallService() {
 
             fun disconnectCall() {
                 try {
+                    // Set this before asking Telecom to disconnect. Its in-call signals can linger long
+                    // enough for CallActivity.onStop to otherwise recreate the overlay.
+                    bubbleSuppressedForTermination = true
+                    CallBubbleOverlay.suppressForTermination(this)
                     stopIncomingRingtone("disconnectCall", resetCurrentCall = true)
                     lastAppInitiatedDisconnectAtElapsedMs = SystemClock.elapsedRealtime()
                     if (ContextCompat.checkSelfPermission(this, Manifest.permission.ANSWER_PHONE_CALLS) != PackageManager.PERMISSION_GRANTED) {

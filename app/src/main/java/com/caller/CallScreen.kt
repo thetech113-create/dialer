@@ -1622,6 +1622,7 @@ class CallActivity : ComponentActivity() {
     private val seededCallState = mutableStateOf(CallState())
     private var finishReceiver: BroadcastReceiver? = null
     private var isFinishingCallUi = false
+    @Volatile private var isEndCallRequested = false
 
     private fun logCall(msg: String) {
         Log.e(
@@ -1864,7 +1865,7 @@ class CallActivity : ComponentActivity() {
             this,
             object : OnBackPressedCallback(true) {
                 override fun handleOnBackPressed() {
-                    if (hasLiveCall() && !isFinishingCallUi) {
+                    if (hasLiveCall() && !isFinishingCallUi && !isEndCallRequested) {
                         CallBubbleOverlay.showFromCallActivityExit(this@CallActivity)
                         MyInCallService.getInstance()?.showCallBubbleIfNeeded()
                         if (!isFinishing && !isDestroyed) {
@@ -2085,11 +2086,15 @@ class CallActivity : ComponentActivity() {
                         onAnswerCall = { answerCall(this) },
                         onRejectCall = {
                             localEndRequested = true
+                            isEndCallRequested = true
+                            CallBubbleOverlay.suppressForTermination(this)
                             Log.w(CALL_UI_FORENSIC_TAG, "call_ui_local_end action=reject")
                             endCall(this)
                         },
                         onEndCall = {
                             localEndRequested = true
+                            isEndCallRequested = true
+                            CallBubbleOverlay.suppressForTermination(this)
                             Log.w(CALL_UI_FORENSIC_TAG, "call_ui_local_end action=end")
                             endCall(this)
                         },
@@ -2162,7 +2167,7 @@ class CallActivity : ComponentActivity() {
         super.onUserLeaveHint()
         logCall("InCallActivity.onUserLeaveHint hasActiveCall=${hasLiveCall()}")
         logCallActivityLifecycle("onUserLeaveHint")
-        if (!isFinishing && !isFinishingCallUi && hasLiveCall()) {
+        if (!isFinishing && !isFinishingCallUi && !isEndCallRequested && hasLiveCall()) {
             CallBubbleOverlay.showFromCallActivityExit(this)
             MyInCallService.getInstance()?.showCallBubbleIfNeeded()
         }
@@ -2173,14 +2178,14 @@ class CallActivity : ComponentActivity() {
         logCallActivityLifecycle("onStop")
         CallBubbleOverlay.isCallActivityVisible = false
         super.onStop()
-        if (!isFinishing && !isFinishingCallUi && hasLiveCall()) {
+        if (!isFinishing && !isFinishingCallUi && !isEndCallRequested && hasLiveCall()) {
             CallBubbleOverlay.showFromCallActivityExit(this)
             MyInCallService.getInstance()?.showCallBubbleIfNeeded()
         }
     }
 
     override fun onBackPressed() {
-        if (hasLiveCall() && !isFinishingCallUi) {
+        if (hasLiveCall() && !isFinishingCallUi && !isEndCallRequested) {
             CallBubbleOverlay.showFromCallActivityExit(this)
             MyInCallService.getInstance()?.showCallBubbleIfNeeded()
             if (!isFinishing && !isDestroyed) {
@@ -2201,6 +2206,7 @@ class CallActivity : ComponentActivity() {
 
 fun endCall(context: Context) {
     try {
+        CallBubbleOverlay.suppressForTermination(context)
         val inCallService = MyInCallService.getInstance()
         if (inCallService != null) {
             Log.w(CALL_UI_FORENSIC_TAG, "call_disconnect_owner source=CallScreen.endCall owner=MyInCallService")

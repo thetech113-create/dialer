@@ -3719,6 +3719,12 @@ class MainActivity : ComponentActivity() {
             if (isInCall) {
                 Surface(
                     modifier = Modifier.fillMaxWidth().height(48.dp).clickable {
+                        // The banner can remain composed briefly while Telecom is disconnecting.
+                        // Do not reopen the call UI unless the service confirms a live call.
+                        if (MyInCallService.getInstance()?.isOngoingCallForBubble() != true) {
+                            Log.d(P2P_FORENSIC_TAG, "ongoing_call_banner_tap skipped: no ongoing non-terminating call")
+                            return@clickable
+                        }
                         val intent = Intent(ctx, CallActivity::class.java).apply {
                             action = "WAKE_UI"
                             addFlags(Intent.FLAG_ACTIVITY_SINGLE_TOP or Intent.FLAG_ACTIVITY_CLEAR_TOP or Intent.FLAG_ACTIVITY_REORDER_TO_FRONT)

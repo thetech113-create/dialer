@@ -36,9 +36,40 @@ object CallBubbleOverlay {
     @Volatile
     var isCallActivityVisible: Boolean = false
 
+    /**
+     * Set as soon as the user asks to end a call. Telecom can continue reporting an in-call
+     * state while it tears the call down, so that state alone is not safe to use for showing
+     * the overlay.
+     */
+    @Volatile
+    private var isSuppressedForTermination: Boolean = false
+
     private val handler = android.os.Handler(android.os.Looper.getMainLooper())
 
     fun isShowing(): Boolean = view != null
+
+    fun suppressForTermination(context: Context) {
+        isSuppressedForTermination = true
+        Log.d(TAG, "hide: call termination was requested")
+        hide(context)
+    }
+
+    /** Called only when Telecom reports a new call to the in-call service. */
+    fun allowForNewOngoingCall() {
+        isSuppressedForTermination = false
+    }
+
+    private fun canShowForOngoingCall(): Boolean {
+        if (isSuppressedForTermination) {
+            Log.d(TAG, "skip: call termination is in progress")
+            return false
+        }
+        if (MyInCallService.getInstance()?.isOngoingCallForBubble() != true) {
+            Log.d(TAG, "skip: no ongoing non-terminating call")
+            return false
+        }
+        return true
+    }
 
     private fun formatElapsed(ms: Long): String {
         val total = (ms / 1000L).coerceAtLeast(0L)
@@ -87,6 +118,10 @@ object CallBubbleOverlay {
                     hide(ctx)
                 }
                 "CALL_STATE_UPDATED" -> {
+                    if (isSuppressedForTermination) {
+                        hide(ctx)
+                        return
+                    }
                     val isInCall = intent.getBooleanExtra("IS_IN_CALL", false)
                     if (!isInCall) {
                         hide(ctx)
@@ -137,6 +172,7 @@ object CallBubbleOverlay {
      */
     fun showFromCallActivityExit(context: Context) {
         isCallActivityVisible = false
+        if (!canShowForOngoingCall()) return
         val snapshot = MyInCallService.peekLastCallUiSnapshot()
         val rawTitle = snapshot?.primaryName?.takeIf { it.isNotBlank() && it != "Unknown" }
             ?: snapshot?.primaryNumber?.let { formatPhoneNumberForDisplay(it) }
@@ -230,6 +266,7 @@ object CallBubbleOverlay {
         onHangUp: () -> Unit
     ) {
         if (isCallActivityVisible) return
+        if (!canShowForOngoingCall()) return
         if (!canShow(context)) {
             Log.w(TAG, "skip: overlay permission not granted")
             return
@@ -237,6 +274,7 @@ object CallBubbleOverlay {
 
         handler.post {
             if (isCallActivityVisible) return@post
+            if (!canShowForOngoingCall()) return@post
 
             val overlayContext = resolveOverlayWindowContext(context)
             val appContext = context.applicationContext
