@@ -1,5 +1,6 @@
 package com.caller.security
 
+import android.annotation.SuppressLint
 import android.util.Base64
 import java.io.ByteArrayOutputStream
 import java.io.File
@@ -26,9 +27,26 @@ object Crypto {
     fun randomBytes(n: Int): ByteArray = ByteArray(n).also { rng.nextBytes(it) }
     fun randomIndex(bound: Int): Int = rng.nextInt(bound)
 
-    fun b64(b: ByteArray): String = Base64.encodeToString(b, Base64.NO_WRAP or Base64.NO_PADDING)
-    fun b64url(b: ByteArray): String = Base64.encodeToString(b, Base64.URL_SAFE or Base64.NO_WRAP or Base64.NO_PADDING)
-    fun unb64(s: String): ByteArray = Base64.decode(s, Base64.DEFAULT)
+    @SuppressLint("NewApi")
+    fun b64(b: ByteArray): String = try {
+        Base64.encodeToString(b, Base64.NO_WRAP or Base64.NO_PADDING)
+    } catch (_: Throwable) {
+        java.util.Base64.getEncoder().withoutPadding().encodeToString(b)
+    }
+
+    @SuppressLint("NewApi")
+    fun b64url(b: ByteArray): String = try {
+        Base64.encodeToString(b, Base64.URL_SAFE or Base64.NO_WRAP or Base64.NO_PADDING)
+    } catch (_: Throwable) {
+        java.util.Base64.getUrlEncoder().withoutPadding().encodeToString(b)
+    }
+
+    @SuppressLint("NewApi")
+    fun unb64(s: String): ByteArray = try {
+        Base64.decode(s, Base64.DEFAULT)
+    } catch (_: Throwable) {
+        java.util.Base64.getDecoder().decode(s)
+    }
 
     fun sha256(b: ByteArray): ByteArray = MessageDigest.getInstance("SHA-256").digest(b)
     fun hex(b: ByteArray): String = b.joinToString("") { "%02x".format(it) }

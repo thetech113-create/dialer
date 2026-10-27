@@ -451,13 +451,22 @@ object AccountDeviceHistoryManager {
     fun getLastAccountSyncTime(context: Context): Long =
         getPrefs(context).getLong(KEY_LAST_ACCOUNT_SYNC_MS, 0L)
 
+    @Volatile var activePairingHost: PairingHost? = null
+    @Volatile var activePairingCode: String? = null
+    @Volatile var pendingPairingRequest: PairingHost.PendingView? = null
+
     // =========================================================================
-    // 6-DIGIT LINK CODE (PAIRING PASSCODE) GENERATION & CONFIRMATION
+    // 6-DIGIT LINK CODE (PAIRING PASSCODE) GENERATION & EXPLICIT APPROVAL
     // =========================================================================
 
     fun generate6DigitPairingCode(context: Context, onCodeGenerated: (String) -> Unit) {
         val appCtx = context.applicationContext
+        val host = getPairingHost(appCtx)
+        activePairingHost = host
+        val offer = host.createOffer()
         val code = (100000..999999).random().toString()
+        activePairingCode = code
+
         val accountKey = "pair_$code"
         val endpoint = "$ACCOUNT_CLOUD_BUCKET_URL/$accountKey"
 
@@ -465,11 +474,12 @@ object AccountDeviceHistoryManager {
             runCatching {
                 val snapshot = JSONObject().apply {
                     put("code", code)
+                    put("ownerId", offer.ownerId)
                     put("accountId", getAccountId(appCtx))
                     put("deviceId", getCurrentDeviceId(appCtx))
                     put("deviceName", getCurrentDeviceName(appCtx))
                     put("verifiedNumbers", JSONArray(getVerifiedNumbers(appCtx)))
-                    put("createdAt", System.currentTimeMillis())
+                    put("expiresAt", offer.expiresAt)
                 }
                 val postBody = snapshot.toString().toRequestBody("application/json; charset=utf-8".toMediaType())
                 val req = Request.Builder()
@@ -477,11 +487,48 @@ object AccountDeviceHistoryManager {
                     .header("User-Agent", "Caller-Account-Sync")
                     .post(postBody)
                     .build()
+
                 http.newCall(req).execute().use { resp ->
                     if (resp.isSuccessful) {
                         mainHandler.post { onCodeGenerated(code) }
                     } else {
                         mainHandler.post { toast(appCtx, "Failed to generate pairing code. Try again.") }
+                    }
+                }
+
+                // Poll Cloud KV for incoming PairRequest from Phone 2
+                val reqEndpoint = "$ACCOUNT_CLOUD_BUCKET_URL/req_$code"
+                val deadline = System.currentTimeMillis() + 120_000L
+                while (System.currentTimeMillis() < deadline && activePairingCode == code) {
+                    delay(1500L)
+                    val getReq = Request.Builder()
+                        .url(reqEndpoint)
+                        .header("Accept", "application/json")
+                        .header("User-Agent", "Caller-Account-Sync")
+                        .get()
+                        .build()
+
+                    runCatching {
+                        http.newCall(getReq).execute().use { resp ->
+                            if (resp.isSuccessful) {
+                                val bodyStr = resp.body?.string()?.trim().orEmpty()
+                                if (bodyStr.startsWith("{")) {
+                                    val pairReq = PairRequest.fromWire(bodyStr)
+                                    if (pairReq != null) {
+                                        val handleRes = host.handleRequest(pairReq)
+                                        if (handleRes is PairingHost.RequestResult.Accepted) {
+                                            val pendingList = host.pendingRequests()
+                                            if (pendingList.isNotEmpty()) {
+                                                mainHandler.post {
+                                                    pendingPairingRequest = pendingList.first()
+                                                    notifyStateChanged()
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
                     }
                 }
             }.onFailure { e ->
@@ -529,6 +576,7 @@ object AccountDeviceHistoryManager {
                 val remoteAccountId = pairObj!!.optString("accountId")
                 val remoteDeviceId = pairObj!!.optString("deviceId")
                 val remoteDeviceName = pairObj!!.optString("deviceName").ifBlank { "Linked Phone" }
+                val ownerId = pairObj!!.optString("ownerId")
                 val numsArr = pairObj!!.optJSONArray("verifiedNumbers")
                 val remoteNums = buildList {
                     if (numsArr != null) {
@@ -539,30 +587,107 @@ object AccountDeviceHistoryManager {
                     }
                 }
 
-                // 1. Adopt remote account ID on this device (Phone 2)
-                setAccountId(appCtx, remoteAccountId)
+                // Build signed PairRequest via PairingClient
+                val client = PairingClient(getDeviceIdentity(appCtx), getCurrentDeviceName(appCtx))
+                val link = PairingLink(cleanCode.padEnd(10, 'A'), ownerId.ifBlank { "0".repeat(64) })
+                val pairReq = client.buildRequest(link)
 
-                // 2. Register Phone 1 on Phone 2
-                val peerReg = AccountDeviceRegistration(
-                    accountId = remoteAccountId,
-                    deviceId = remoteDeviceId,
-                    deviceName = remoteDeviceName,
-                    verifiedNumbers = remoteNums,
-                    lastSyncTimestamp = System.currentTimeMillis()
-                )
-                registerPeerDevice(appCtx, peerReg)
+                // Post PairRequest to Cloud KV
+                val reqEndpoint = "$ACCOUNT_CLOUD_BUCKET_URL/req_$cleanCode"
+                val reqBody = pairReq.toWire().toRequestBody("application/json; charset=utf-8".toMediaType())
+                val postReq = Request.Builder()
+                    .url(reqEndpoint)
+                    .header("User-Agent", "Caller-Account-Sync")
+                    .post(reqBody)
+                    .build()
 
-                // 3. Immediately trigger full account sync to pull all history and register Phone 2 on Phone 1
-                syncAccountNow(appCtx, showToast = false)
+                http.newCall(postReq).execute().use { it.isSuccessful }
 
-                mainHandler.post {
-                    onComplete(true, "Successfully linked with $remoteDeviceName under Account $remoteAccountId!")
+                mainHandler.post { onComplete(true, "Pairing request sent to Phone 1! Waiting for approval on Phone 1...") }
+
+                // Poll status endpoint for approval from Phone 1
+                val statusEndpoint = "$ACCOUNT_CLOUD_BUCKET_URL/status_$cleanCode"
+                val deadline = System.currentTimeMillis() + 120_000L
+                while (System.currentTimeMillis() < deadline) {
+                    delay(2000L)
+                    val statusGet = Request.Builder().url(statusEndpoint).get().build()
+                    runCatching {
+                        http.newCall(statusGet).execute().use { resp ->
+                            if (resp.isSuccessful) {
+                                val bodyStr = resp.body?.string()?.trim().orEmpty()
+                                if (bodyStr.startsWith("{")) {
+                                    val pairStatus = PairStatus.fromWire(bodyStr)
+                                    if (pairStatus.state == "APPROVED") {
+                                        setAccountId(appCtx, remoteAccountId)
+                                        val peerReg = AccountDeviceRegistration(
+                                            accountId = remoteAccountId,
+                                            deviceId = remoteDeviceId,
+                                            deviceName = remoteDeviceName,
+                                            verifiedNumbers = remoteNums,
+                                            lastSyncTimestamp = System.currentTimeMillis()
+                                        )
+                                        registerPeerDevice(appCtx, peerReg)
+                                        syncAccountNow(appCtx, showToast = false)
+                                        mainHandler.post {
+                                            toast(appCtx, "Pairing APPROVED by $remoteDeviceName!")
+                                        }
+                                        return@launch
+                                    } else if (pairStatus.state == "DENIED") {
+                                        mainHandler.post {
+                                            toast(appCtx, "Pairing was DENIED on Phone 1.")
+                                        }
+                                        return@launch
+                                    }
+                                }
+                            }
+                        }
+                    }
                 }
             }.onFailure { e ->
                 Log.e(TAG, "Pairing code verification error", e)
                 mainHandler.post { onComplete(false, "Pairing error: ${e.message}") }
             }
         }
+    }
+
+    fun approvePendingPairing(context: Context, pairingId: String) {
+        val appCtx = context.applicationContext
+        val host = activePairingHost ?: getPairingHost(appCtx)
+        val code = activePairingCode ?: return
+        if (host.approve(pairingId)) {
+            val status = host.status(pairingId)
+            val statusEndpoint = "$ACCOUNT_CLOUD_BUCKET_URL/status_$code"
+            scope.launch {
+                runCatching {
+                    val postBody = status.toWire().toRequestBody("application/json; charset=utf-8".toMediaType())
+                    val req = Request.Builder().url(statusEndpoint).post(postBody).build()
+                    http.newCall(req).execute().use { it.isSuccessful }
+                }
+            }
+            syncAccountNow(appCtx, showToast = false)
+            toast(appCtx, "Device pairing APPROVED!")
+        }
+        pendingPairingRequest = null
+        notifyStateChanged()
+    }
+
+    fun denyPendingPairing(context: Context, pairingId: String) {
+        val appCtx = context.applicationContext
+        val host = activePairingHost ?: getPairingHost(appCtx)
+        val code = activePairingCode ?: return
+        host.deny(pairingId)
+        val status = host.status(pairingId)
+        val statusEndpoint = "$ACCOUNT_CLOUD_BUCKET_URL/status_$code"
+        scope.launch {
+            runCatching {
+                val postBody = status.toWire().toRequestBody("application/json; charset=utf-8".toMediaType())
+                val req = Request.Builder().url(statusEndpoint).post(postBody).build()
+                http.newCall(req).execute().use { it.isSuccessful }
+            }
+        }
+        pendingPairingRequest = null
+        notifyStateChanged()
+        toast(appCtx, "Device pairing DENIED.")
     }
 
     fun startSyncEngine(context: Context) {
@@ -1458,6 +1583,9 @@ fun MultiDeviceSettingsCard(
     val lastSyncTime = remember(refreshTick) {
         AccountDeviceHistoryManager.getLastAccountSyncTime(context)
     }
+    val pendingPairingView = remember(refreshTick) {
+        AccountDeviceHistoryManager.pendingPairingRequest
+    }
 
     var showEditAccountDialog by remember { mutableStateOf(false) }
     var accountInput by remember { mutableStateOf(accountId) }
@@ -2074,6 +2202,53 @@ fun MultiDeviceSettingsCard(
             confirmButton = {
                 TextButton(onClick = { showSyncedHistoryDialog = false }) {
                     Text("Close")
+                }
+            }
+        )
+    }
+
+    // Dialog 6: Explicit Cryptographic Pairing Approval Prompt (Host Device)
+    if (pendingPairingView != null) {
+        val pending = pendingPairingView
+        AlertDialog(
+            onDismissRequest = {
+                AccountDeviceHistoryManager.denyPendingPairing(context, pending.id)
+            },
+            title = { Text("Approve Device Pairing", fontWeight = FontWeight.Bold) },
+            text = {
+                Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                    Text(
+                        text = "Device '${pending.name}' is requesting to pair with your account.",
+                        style = MaterialTheme.typography.bodyMedium
+                    )
+                    Text(
+                        text = "Device Fingerprint ID:\n${pending.deviceId}",
+                        style = MaterialTheme.typography.labelSmall,
+                        color = MaterialTheme.colorScheme.primary
+                    )
+                    Text(
+                        text = "Only approve if you own this device.",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                }
+            },
+            confirmButton = {
+                Button(
+                    onClick = {
+                        AccountDeviceHistoryManager.approvePendingPairing(context, pending.id)
+                    }
+                ) {
+                    Text("Approve & Link")
+                }
+            },
+            dismissButton = {
+                TextButton(
+                    onClick = {
+                        AccountDeviceHistoryManager.denyPendingPairing(context, pending.id)
+                    }
+                ) {
+                    Text("Deny")
                 }
             }
         )
