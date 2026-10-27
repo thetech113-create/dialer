@@ -196,6 +196,28 @@ object AccountDeviceHistoryManager {
         }
     }
 
+    fun getDeviceIdentity(context: Context): DeviceIdentity {
+        val file = java.io.File(p2pContext(context).filesDir, "device_identity_v1.key")
+        return DeviceIdentity.loadOrCreate(file)
+    }
+
+    fun getTrustStore(context: Context): TrustStore {
+        val file = java.io.File(p2pContext(context).filesDir, "trust_store_v1.tsv")
+        return FileTrustStore(file)
+    }
+
+    fun getPairingHost(context: Context): PairingHost {
+        val identity = getDeviceIdentity(context)
+        val trustStore = getTrustStore(context)
+        return PairingHost(identity, trustStore, getCurrentDeviceName(context))
+    }
+
+    fun getAuthenticator(context: Context): SyncAuthenticator {
+        val identity = getDeviceIdentity(context)
+        val trustStore = getTrustStore(context)
+        return SyncAuthenticator(identity, trustStore)
+    }
+
     fun isFilteringEnabled(context: Context): Boolean =
         getPrefs(context).getBoolean(KEY_FILTERING_ENABLED, true)
 
