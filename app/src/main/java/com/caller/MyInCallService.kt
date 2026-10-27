@@ -192,6 +192,7 @@ class MyInCallService : InCallService() {
                 private const val ACTION_DISCONNECT_CALL = "DISCONNECT_CALL"
                 // Call notification was removed (swipe/Clear all on some phones): put it straight back.
                 private const val ACTION_REPOST_CALL_NOTIFICATION = "REPOST_CALL_NOTIFICATION"
+                private const val ACTION_START_INCALL_KEEPALIVE = "com.caller.ACTION_START_INCALL_KEEPALIVE"
                 const val VOICEMAIL_FILE_PREFIX = "Voicemail"
 
                 /** Whether the app's main screen was visible when the current call session began. */
@@ -260,6 +261,68 @@ class MyInCallService : InCallService() {
             private var transientEmptyRecoveryRunnable: Runnable? = null
             private var lastLiveCallSeenAtMs: Long = 0L
             @Volatile private var bubbleSuppressedForTermination = false
+            @Volatile private var isServiceExplicitlyStarted = false
+
+            /**
+             * Hides MainActivity/MessagingActivity tasks from Recent Apps while a call is active
+             * so "Clear All" in Recents skips our process, and restores them when the call ends.
+             * CallActivity and WidgetCallActivity remain permanently excluded.
+             */
+            private fun setAllAppTasksExcludedFromRecents(excluded: Boolean) {
+                runCatching {
+                    val am = getSystemService(Context.ACTIVITY_SERVICE) as? android.app.ActivityManager ?: return
+                    am.appTasks.forEach { task ->
+                        val baseClass = runCatching {
+                            task.taskInfo.baseIntent.component?.className.orEmpty()
+                        }.getOrDefault("")
+                        val alwaysExcluded = baseClass.endsWith("CallActivity") ||
+                            baseClass.endsWith("WidgetCallActivity")
+                        task.setExcludeFromRecents(if (alwaysExcluded) true else excluded)
+                    }
+                    Log.w(
+                        P2P_FORENSIC_TAG,
+                        "app_tasks_exclude_from_recents excluded=$excluded taskCount=${am.appTasks.size}"
+                    )
+                }
+            }
+
+            /**
+             * Explicitly calls startForegroundService() on MyInCallService so Android sets
+             * ServiceRecord.startRequested = true. Without this, onTaskRemoved() never fires
+             * and OEM Recents cleaners kill the bound-only InCallService process on swipe.
+             */
+            private fun ensureServiceExplicitlyStarted(call: Call? = null) {
+                val targetCall = call ?: getLiveCalls().firstOrNull()
+                if (targetCall != null) {
+                    val isConf = targetCall.details?.hasProperty(Call.Details.PROPERTY_CONFERENCE) == true
+                    val rawNum = if (isConf) "Conference" else targetCall.details?.handle?.schemeSpecificPart.orEmpty()
+                    val stateHint = stateToUiStateHint(targetCall.state)
+                    val (_, nameHint) = resolveCallIdentity(targetCall, "ensureServiceExplicitlyStarted")
+                    if (stateHint != "RINGING") {
+                        startImmediateCallForeground(
+                            phoneNumber = rawNum,
+                            contactName = nameHint.ifBlank {
+                                if (isConf) "Conference Call" else rawNum.ifBlank { "Ongoing Call" }
+                            },
+                            isConf = isConf,
+                            callState = stateHint
+                        )
+                    }
+                }
+                if (!isServiceExplicitlyStarted) {
+                    runCatching {
+                        val keepAliveIntent = Intent(applicationContext, MyInCallService::class.java).apply {
+                            action = ACTION_START_INCALL_KEEPALIVE
+                        }
+                        ContextCompat.startForegroundService(applicationContext, keepAliveIntent)
+                        isServiceExplicitlyStarted = true
+                        Log.w(P2P_FORENSIC_TAG, "incall_service_explicit_start startRequested=true")
+                    }.onFailure { e ->
+                        Log.e(P2P_FORENSIC_TAG, "incall_service_explicit_start failed: ${e.message}", e)
+                    }
+                }
+                setAllAppTasksExcludedFromRecents(true)
+            }
 
             // --- CALL STATE MACHINE TRACKERS ---
             private val callDirectionTracker = java.util.concurrent.ConcurrentHashMap<String, String>()
@@ -1270,7 +1333,10 @@ class MyInCallService : InCallService() {
                         transitionWakeLock?.release()
                         android.util.Log.e("OEM_FALLBACK_TRACE", "MyInCallService: PARTIAL_WAKE_LOCK released.")
                     }
-                    
+
+                    isServiceExplicitlyStarted = false
+                    setAllAppTasksExcludedFromRecents(false)
+
                     // Drop foreground status to allow normal process priority
                     stopForeground(STOP_FOREGROUND_REMOVE)
                     android.util.Log.e("OEM_FALLBACK_TRACE", "MyInCallService: Foreground service released. Process priority normalized.")
@@ -1823,14 +1889,36 @@ class MyInCallService : InCallService() {
                 val liveCalls = getLiveCalls()
                 Log.w(
                     P2P_FORENSIC_TAG,
-                    "call_task_removed liveCalls=${liveCalls.size} terminationSuppressed=$bubbleSuppressedForTermination"
+                    "call_task_removed liveCalls=${liveCalls.size} terminationSuppressed=$bubbleSuppressedForTermination rootIntent=${rootIntent?.component}"
                 )
                 if (liveCalls.isEmpty()) return
 
-                // Swiping the launcher task away must not hand an active call back to the
-                // preinstalled dialer. Keep our foreground call surface alive without forcing
-                // the full-screen activity back over whatever the user was doing.
+                // Re-assert WakeLock, Recents exclusion, and started Foreground Service state immediately
+                if (transitionWakeLock?.isHeld == false) {
+                    transitionWakeLock?.acquire(4 * 60 * 60 * 1000L)
+                }
+                setAllAppTasksExcludedFromRecents(true)
+                isServiceExplicitlyStarted = false
+                ensureServiceExplicitlyStarted(liveCalls.firstOrNull())
+
+                val currentState = runCatching { getCurrentCallStateFromSync() }.getOrNull()
+                if (currentState != null && currentState.isInCall) {
+                    if (currentState.primaryState == "RINGING") {
+                        showIncomingCallNotification(currentState.primaryNumber, currentState.primaryName)
+                    } else {
+                        showOngoingCallNotification(
+                            currentState.primaryNumber,
+                            currentState.primaryName,
+                            currentState.isConference,
+                            currentState.primaryState.ifBlank { "ACTIVE" }
+                        )
+                    }
+                }
+
+                // Keep our floating call pill attached (a visible TYPE_APPLICATION_OVERLAY window
+                // forces VISIBLE_APP_ADJ priority on MIUI/HyperOS and ColorOS).
                 CallBubbleOverlay.isCallActivityVisible = false
+                startNotificationRepost(forceRefresh = true)
                 syncCalls()
                 showCallBubbleIfNeeded(launchFullScreenWhenOverlayUnavailable = false)
             }
@@ -1885,6 +1973,8 @@ class MyInCallService : InCallService() {
                 callStateListener = null
                 callUIListener = null
                 
+                isServiceExplicitlyStarted = false
+                setAllAppTasksExcludedFromRecents(false)
                 super.onDestroy()
                 instance = null
                 unregisterScreenStateReceiver()
@@ -1959,6 +2049,37 @@ class MyInCallService : InCallService() {
 
             override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
                 when (intent?.action) {
+                    ACTION_START_INCALL_KEEPALIVE, null -> {
+                        isServiceExplicitlyStarted = true
+                        val liveCalls = getLiveCalls()
+                        if (liveCalls.isNotEmpty()) {
+                            setAllAppTasksExcludedFromRecents(true)
+                            val currentState = getCurrentCallStateFromSync()
+                            if (currentState.primaryState == "RINGING") {
+                                showIncomingCallNotification(currentState.primaryNumber, currentState.primaryName)
+                            } else {
+                                showOngoingCallNotification(
+                                    currentState.primaryNumber,
+                                    currentState.primaryName,
+                                    currentState.isConference,
+                                    currentState.primaryState.ifBlank { "ACTIVE" }
+                                )
+                            }
+                            startNotificationRepost(forceRefresh = true)
+                            return START_STICKY
+                        } else {
+                            runCatching {
+                                startCallForeground(
+                                    buildImmediateCallNotification("", "Call ended", false, "DISCONNECTED")
+                                )
+                                stopForeground(STOP_FOREGROUND_REMOVE)
+                            }
+                            isServiceExplicitlyStarted = false
+                            setAllAppTasksExcludedFromRecents(false)
+                            stopSelfResult(startId)
+                            return START_NOT_STICKY
+                        }
+                    }
                     Constants.ACTION_ANSWER_CALL -> {
                         val shouldOpenUiAfterAnswer = intent?.getBooleanExtra(OPEN_UI_AFTER_ANSWER_EXTRA, false) == true
                         val rawNumberHint = intent?.getStringExtra(CALL_UI_EXTRA_PHONE_NUMBER_HINT).orEmpty()
@@ -2400,6 +2521,7 @@ class MyInCallService : InCallService() {
                 Log.e("CMF_RINGTONE_DEBUG", "Call direction: ${call.details?.callDirection}")
 
                 // 1. ABSOLUTELY CRITICAL: Always call super first so OS state machine doesn't corrupt!
+                super.onCallAdded(call)
                 updateCallTimerStateStrict(call, getEffectiveCallState(call))
                 val details = call.details
                 val seedRawNumber = details?.handle?.schemeSpecificPart.orEmpty()
@@ -2411,6 +2533,10 @@ class MyInCallService : InCallService() {
                 val immediateState = stateToUiStateHint(call.state)
                 val (_, immediateName) = resolveCallIdentity(call, "onCallAdded_initial")
                 // -----------------------------
+
+                // Promote MyInCallService to a started ForegroundService (startRequested = true)
+                // and hide app tasks from Recents immediately.
+                ensureServiceExplicitlyStarted(call)
 
                 logCall("onCallAdded call=${System.identityHashCode(call)} state=${call.state} handle=${details?.handle}")
                 android.util.Log.e("OEM_FALLBACK_TRACE", "MyInCallService: onCallAdded - System recognized our ownership.")
@@ -2445,7 +2571,7 @@ class MyInCallService : InCallService() {
                     transitionWakeLock?.setReferenceCounted(false)
                 }
                 if (transitionWakeLock?.isHeld == false) {
-                    transitionWakeLock?.acquire(10 * 60 * 1000L) // 10 minute absolute timeout safety net
+                    transitionWakeLock?.acquire(4 * 60 * 60 * 1000L) // 4-hour timeout for long calls
                     android.util.Log.e("OEM_FALLBACK_TRACE", "MyInCallService: PARTIAL_WAKE_LOCK acquired. Process freeze blocked.")
                 }
 

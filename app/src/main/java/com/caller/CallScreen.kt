@@ -2170,6 +2170,9 @@ class CallActivity : ComponentActivity() {
         if (!isFinishing && !isFinishingCallUi && !isEndCallRequested && hasLiveCall()) {
             CallBubbleOverlay.showFromCallActivityExit(this)
             MyInCallService.getInstance()?.showCallBubbleIfNeeded()
+            if (CallBubbleOverlay.canShow(this)) {
+                finishAndRemoveTask()
+            }
         }
     }
 
