@@ -627,9 +627,10 @@ object AccountDeviceHistoryManager {
     fun approvePendingPairing(context: Context, pairingId: String) {
         val appCtx = context.applicationContext
         val host = activePairingHost ?: getPairingHost(appCtx)
-        val code = activePairingCode ?: return
+        val code = activePairingCode
         val pendingRec = host.getPendingRecord(pairingId)
         if (host.approve(pairingId)) {
+            activePairingCode = null
             if (pendingRec != null) {
                 val peerReg = AccountDeviceRegistration(
                     accountId = getAccountId(appCtx),
@@ -640,11 +641,13 @@ object AccountDeviceHistoryManager {
                 )
                 registerPeerDevice(appCtx, peerReg)
             }
-            val status = host.status(pairingId)
-            val statusEndpoint = cloudTopicUrl("status_$code")
-            scope.launch {
-                runCatching {
-                    cloudPost(statusEndpoint, status.toWire())
+            if (code != null) {
+                val status = host.status(pairingId)
+                val statusEndpoint = cloudTopicUrl("status_$code")
+                scope.launch {
+                    runCatching {
+                        cloudPost(statusEndpoint, status.toWire())
+                    }
                 }
             }
             syncAccountNow(appCtx, showToast = false)
@@ -657,13 +660,16 @@ object AccountDeviceHistoryManager {
     fun denyPendingPairing(context: Context, pairingId: String) {
         val appCtx = context.applicationContext
         val host = activePairingHost ?: getPairingHost(appCtx)
-        val code = activePairingCode ?: return
+        val code = activePairingCode
         host.deny(pairingId)
-        val status = host.status(pairingId)
-        val statusEndpoint = cloudTopicUrl("status_$code")
-        scope.launch {
-            runCatching {
-                cloudPost(statusEndpoint, status.toWire())
+        activePairingCode = null
+        if (code != null) {
+            val status = host.status(pairingId)
+            val statusEndpoint = cloudTopicUrl("status_$code")
+            scope.launch {
+                runCatching {
+                    cloudPost(statusEndpoint, status.toWire())
+                }
             }
         }
         pendingPairingRequest = null
@@ -828,7 +834,7 @@ object AccountDeviceHistoryManager {
 
     private fun cloudGet(endpoint: String): CloudResult = try {
         val targetUrl = if (endpoint.contains("ntfy.sh") && !endpoint.contains("/json")) {
-            "$endpoint/json?poll=1"
+            "$endpoint/json?poll=1&since=all"
         } else {
             endpoint
         }
@@ -848,12 +854,16 @@ object AccountDeviceHistoryManager {
             }
             if (targetUrl.contains("ntfy.sh")) {
                 val lines = rawBody.lines().filter { it.contains("\"message\"") }
-                val lastMsgLine = lines.lastOrNull()
-                if (lastMsgLine != null) {
-                    val msgObj = JSONObject(lastMsgLine)
-                    val innerMsg = msgObj.optString("message").trim()
-                    if (innerMsg.startsWith("{") || innerMsg.startsWith("[")) {
-                        return@use CloudResult(200, innerMsg, null)
+                if (lines.isEmpty()) {
+                    return@use CloudResult(404, null, null)
+                }
+                for (line in lines.reversed()) {
+                    runCatching {
+                        val msgObj = JSONObject(line)
+                        val innerMsg = msgObj.optString("message").trim()
+                        if (innerMsg.startsWith("{") || innerMsg.startsWith("[")) {
+                            return@use CloudResult(200, innerMsg, null)
+                        }
                     }
                 }
                 return@use CloudResult(404, null, null)

@@ -159,6 +159,15 @@ class PairingHost(
     fun handleRequest(req: PairRequest): RequestResult {
         val code = activeCode ?: return RequestResult.Rejected("no active offer")
         val devId = "dev_" + Crypto.publicKeyFingerprint(req.publicKey)
+
+        // Do not recreate pending approval dialog if device is already approved or handled
+        if (trustStore.getApprovedPeer(devId) != null) {
+            return RequestResult.Accepted("already_approved_$devId")
+        }
+        if (handledDevIds.contains(devId)) {
+            return RequestResult.Rejected("request already handled for device $devId")
+        }
+
         val name = String(Crypto.decodeB64(req.nameB64), Charsets.UTF_8)
         val expectedProof = Crypto.encodeB64(Crypto.hmacSha256(code.toByteArray(), Crypto.canonicalTranscript(identity.id, devId, req.nonce, req.timestamp.toString())))
         if (!Crypto.constantTimeEqualsUtf8(expectedProof, req.proof)) {
@@ -187,6 +196,7 @@ class PairingHost(
     private val pendingReqs = LinkedHashMap<String, TrustedPeerRecord>()
     private val approvedReqs = HashSet<String>()
     private val deniedReqs = HashSet<String>()
+    private val handledDevIds = HashSet<String>()
 
     @Synchronized
     fun pendingRequests(): List<PendingView> = pendingReqs.map { (id, rec) ->
@@ -201,12 +211,17 @@ class PairingHost(
         val rec = pendingReqs[pairingId] ?: return false
         trustStore.approvePeer(rec)
         approvedReqs.add(pairingId)
+        handledDevIds.add(rec.deviceId)
         pendingReqs.remove(pairingId)
         return true
     }
 
     @Synchronized
     fun deny(pairingId: String) {
+        val rec = pendingReqs[pairingId]
+        if (rec != null) {
+            handledDevIds.add(rec.deviceId)
+        }
         deniedReqs.add(pairingId)
         pendingReqs.remove(pairingId)
     }
