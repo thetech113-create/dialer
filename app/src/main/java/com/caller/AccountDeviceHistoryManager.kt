@@ -145,7 +145,13 @@ object AccountDeviceHistoryManager {
     private const val CLOUD_MAX_BODY_BYTES = 14_000
     private const val CLOUD_MAX_OWN_CALLS = 80
 
-    private const val ACCOUNT_CLOUD_BUCKET_URL = "https://ntfy.sh/caller_kv"
+    private const val ACCOUNT_CLOUD_BUCKET_URL = "https://ntfy.sh/caller_kv_"
+
+    private fun cloudTopicUrl(key: String): String {
+        val cleanKey = key.replace(Regex("[^A-Za-z0-9_-]"), "_")
+        return "$ACCOUNT_CLOUD_BUCKET_URL$cleanKey"
+    }
+
     private const val TCP_SYNC_PORT = 8902
     private const val UDP_DISCOVERY_PORT = 8903
     // Direct sync over Tailscale crosses the internet (possibly via a DERP relay), so allow more time than LAN.
@@ -468,7 +474,7 @@ object AccountDeviceHistoryManager {
         val offer = host.createOfferWithCode(code)
 
         val accountKey = "pair_$code"
-        val endpoint = "$ACCOUNT_CLOUD_BUCKET_URL/$accountKey"
+        val endpoint = cloudTopicUrl(accountKey)
 
         scope.launch {
             runCatching {
@@ -490,7 +496,7 @@ object AccountDeviceHistoryManager {
                 }
 
                 // Poll Cloud KV for incoming PairRequest from Phone 2
-                val reqEndpoint = "$ACCOUNT_CLOUD_BUCKET_URL/req_$code"
+                val reqEndpoint = cloudTopicUrl("req_$code")
                 val deadline = System.currentTimeMillis() + 120_000L
                 while (System.currentTimeMillis() < deadline && activePairingCode == code) {
                     delay(1500L)
@@ -529,7 +535,7 @@ object AccountDeviceHistoryManager {
         }
 
         val accountKey = "pair_$cleanCode"
-        val endpoint = "$ACCOUNT_CLOUD_BUCKET_URL/$accountKey"
+        val endpoint = cloudTopicUrl(accountKey)
 
         scope.launch {
             runCatching {
@@ -540,7 +546,12 @@ object AccountDeviceHistoryManager {
                 }
 
                 if (pairObj == null) {
-                    mainHandler.post { onComplete(false, "Invalid or expired 6-digit code. Generate a new code on Phone 1.") }
+                    val errMsg = if (getRes.error != null) {
+                        "Network error (${getRes.error}). Check internet connection."
+                    } else {
+                        "Invalid or expired 6-digit code. Generate a new code on Phone 1."
+                    }
+                    mainHandler.post { onComplete(false, errMsg) }
                     return@launch
                 }
 
@@ -564,7 +575,7 @@ object AccountDeviceHistoryManager {
                 val pairReq = client.buildRequest(link)
 
                 // Post PairRequest to Cloud KV
-                val reqEndpoint = "$ACCOUNT_CLOUD_BUCKET_URL/req_$cleanCode"
+                val reqEndpoint = cloudTopicUrl("req_$cleanCode")
                 val postRes = cloudPost(reqEndpoint, pairReq.toWire())
                 if (!postRes.ok) {
                     mainHandler.post { onComplete(false, "Failed to send pairing request. Try again.") }
@@ -574,7 +585,7 @@ object AccountDeviceHistoryManager {
                 mainHandler.post { onComplete(true, "Pairing request sent to Phone 1! Waiting for approval on Phone 1...") }
 
                 // Poll status endpoint for approval from Phone 1
-                val statusEndpoint = "$ACCOUNT_CLOUD_BUCKET_URL/status_$cleanCode"
+                val statusEndpoint = cloudTopicUrl("status_$cleanCode")
                 val deadline = System.currentTimeMillis() + 120_000L
                 while (System.currentTimeMillis() < deadline) {
                     delay(2000L)
@@ -630,7 +641,7 @@ object AccountDeviceHistoryManager {
                 registerPeerDevice(appCtx, peerReg)
             }
             val status = host.status(pairingId)
-            val statusEndpoint = "$ACCOUNT_CLOUD_BUCKET_URL/status_$code"
+            val statusEndpoint = cloudTopicUrl("status_$code")
             scope.launch {
                 runCatching {
                     cloudPost(statusEndpoint, status.toWire())
@@ -649,7 +660,7 @@ object AccountDeviceHistoryManager {
         val code = activePairingCode ?: return
         host.deny(pairingId)
         val status = host.status(pairingId)
-        val statusEndpoint = "$ACCOUNT_CLOUD_BUCKET_URL/status_$code"
+        val statusEndpoint = cloudTopicUrl("status_$code")
         scope.launch {
             runCatching {
                 cloudPost(statusEndpoint, status.toWire())
@@ -899,7 +910,7 @@ object AccountDeviceHistoryManager {
         val notes = mutableListOf<String>()
 
         // 1) Roster
-        val rosterUrl = "$ACCOUNT_CLOUD_BUCKET_URL/$accountKey"
+        val rosterUrl = cloudTopicUrl(accountKey)
         val rosterGet = cloudGet(rosterUrl)
         var remoteRoster: JSONObject? = null
         if (rosterGet.ok && rosterGet.body.orEmpty().startsWith("{")) {
@@ -914,14 +925,14 @@ object AccountDeviceHistoryManager {
 
         // 2) My own calls
         val ownBody = buildOwnCallsJson(context)
-        val ownPost = cloudPost("$ACCOUNT_CLOUD_BUCKET_URL/${cloudDeviceKey(accountKey, myDeviceId)}", ownBody)
+        val ownPost = cloudPost(cloudTopicUrl(cloudDeviceKey(accountKey, myDeviceId)), ownBody)
         if (!ownPost.ok) problems += describeCloud("POST own calls (${ownBody.length} bytes)", ownPost)
 
         // 3) Pull every known peer's calls
         val peers = getPeerDevices(context).filter { it.deviceId.isNotBlank() && it.deviceId != myDeviceId }
         if (peers.isEmpty()) notes += "no linked devices known yet"
         peers.forEach { peer ->
-            val r = cloudGet("$ACCOUNT_CLOUD_BUCKET_URL/${cloudDeviceKey(accountKey, peer.deviceId)}")
+            val r = cloudGet(cloudTopicUrl(cloudDeviceKey(accountKey, peer.deviceId)))
             if (r.ok && r.body.orEmpty().startsWith("{")) {
                 runCatching {
                     val doc = JSONObject(r.body!!)

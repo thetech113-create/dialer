@@ -164,6 +164,10 @@ class PairingHost(
         if (!Crypto.constantTimeEqualsUtf8(expectedProof, req.proof)) {
             return RequestResult.Rejected("invalid pairing code")
         }
+        val existing = pendingReqs.entries.firstOrNull { it.value.deviceId == devId }
+        if (existing != null) {
+            return RequestResult.Accepted(existing.key)
+        }
         val id = Crypto.randomNonceB64(16)
         val rec = TrustedPeerRecord(
             deviceId = devId,
