@@ -140,12 +140,58 @@ object AccountDeviceHistoryManager {
     private const val KEY_LAST_ACCOUNT_SYNC_MS = "last_account_sync_ms"
     private const val KEY_LAST_CLOUD_STATUS = "last_cloud_status"
     private const val KEY_LAST_CLOUD_OK_MS = "last_cloud_ok_ms"
+    private const val KEY_LAST_PUBLISHED_ROSTER_SIG = "last_published_roster_sig"
+    private const val KEY_LAST_PUBLISHED_CALLS_SIG = "last_published_calls_sig"
     private const val KEY_NATIVE_LOG_CLEANED = "native_log_peer_cleanup_v2"
     // kvdb.io rejects values larger than ~16 KB by default, so every cloud document stays well under it.
     private const val CLOUD_MAX_BODY_BYTES = 14_000
     private const val CLOUD_MAX_OWN_CALLS = 80
 
     private const val ACCOUNT_CLOUD_BUCKET_URL = "https://ntfy.sh/caller_kv_"
+
+    @Volatile private var rateLimit429UntilMs: Long = 0L
+
+    private fun isRateLimitActive(): Boolean = System.currentTimeMillis() < rateLimit429UntilMs
+
+    private fun markRateLimited(backoffMs: Long = 300_000L) {
+        rateLimit429UntilMs = System.currentTimeMillis() + backoffMs
+        Log.w(TAG, "ntfy.sh rate limited (HTTP 429); backing off for ${backoffMs / 1000}s")
+    }
+
+    private fun computeRosterSignature(rosterJson: JSONObject): String {
+        val devArr = rosterJson.optJSONArray("devices") ?: JSONArray()
+        val devTokens = mutableListOf<String>()
+        for (i in 0 until devArr.length()) {
+            val d = devArr.optJSONObject(i) ?: continue
+            devTokens.add("${d.optString("deviceId")}_${d.optString("deviceName")}")
+        }
+        devTokens.sort()
+        return Crypto.sha256Hex(devTokens.joinToString(";").toByteArray(Charsets.UTF_8)).take(16)
+    }
+
+    private fun computeOwnCallsSignature(ownCalls: List<SyncedCallRecord>): String {
+        val tokens = ownCalls.map { "${it.timestamp}_${it.remoteNumber}_${it.durationSec}_${it.callTypeInt}" }
+        return Crypto.sha256Hex(tokens.joinToString(";").toByteArray(Charsets.UTF_8)).take(16)
+    }
+
+    private fun isPublishNeeded(context: Context, prefKey: String, currentSignature: String): Boolean {
+        val prefs = getPrefs(context)
+        val lastSig = prefs.getString(prefKey, null)
+        val lastPubMs = prefs.getLong("${prefKey}_ms", 0L)
+        val now = System.currentTimeMillis()
+
+        if (lastSig != currentSignature) return true
+        if (now - lastPubMs > 12 * 3600 * 1000L) return true // Refresh publish every 12 hours
+        return false
+    }
+
+    private fun recordPublishedSignature(context: Context, prefKey: String, signature: String) {
+        val now = System.currentTimeMillis()
+        getPrefs(context).edit()
+            .putString(prefKey, signature)
+            .putLong("${prefKey}_ms", now)
+            .apply()
+    }
 
     private fun cloudTopicUrl(key: String): String {
         val cleanKey = key.replace(Regex("[^A-Za-z0-9_-]"), "_")
@@ -927,21 +973,62 @@ object AccountDeviceHistoryManager {
             remoteRoster = runCatching { JSONObject(rosterGet.body!!) }.getOrNull()
         } else if (rosterGet.code != 404) {
             problems += describeCloud("GET roster", rosterGet)
+            if (rosterGet.code == 429) markRateLimited()
         }
         remoteRoster?.let { ingestAccountSnapshotJson(context, it) }
 
-        val rosterPost = cloudPost(rosterUrl, buildRosterJson(context, remoteRoster).toString())
-        if (!rosterPost.ok) problems += describeCloud("POST roster", rosterPost)
+        val rosterJson = buildRosterJson(context, remoteRoster)
+        val rosterSig = computeRosterSignature(rosterJson)
+        val shouldPostRoster = isPublishNeeded(context, KEY_LAST_PUBLISHED_ROSTER_SIG, rosterSig)
+
+        if (shouldPostRoster) {
+            if (isRateLimitActive()) {
+                notes += "roster upload deferred (HTTP 429 backoff)"
+            } else {
+                val rosterPost = cloudPost(rosterUrl, rosterJson.toString())
+                if (rosterPost.ok) {
+                    recordPublishedSignature(context, KEY_LAST_PUBLISHED_ROSTER_SIG, rosterSig)
+                    notes += "roster updated"
+                } else {
+                    problems += describeCloud("POST roster", rosterPost)
+                    if (rosterPost.code == 429) markRateLimited()
+                }
+            }
+        } else {
+            notes += "roster unchanged"
+        }
 
         // 2) My own calls
-        val ownBody = buildOwnCallsJson(context)
-        val ownPost = cloudPost(cloudTopicUrl(cloudDeviceKey(accountKey, myDeviceId)), ownBody)
-        if (!ownPost.ok) problems += describeCloud("POST own calls (${ownBody.length} bytes)", ownPost)
+        val ownCalls = queryLocalDeviceCallLog(context, maxCount = CLOUD_MAX_OWN_CALLS)
+        val ownCallsSig = computeOwnCallsSignature(ownCalls)
+        val shouldPostCalls = isPublishNeeded(context, KEY_LAST_PUBLISHED_CALLS_SIG, ownCallsSig)
+
+        val ownBody = buildOwnCallsJson(context, ownCalls)
+        if (shouldPostCalls) {
+            if (isRateLimitActive()) {
+                notes += "calls upload deferred (HTTP 429 backoff)"
+            } else {
+                val ownPost = cloudPost(cloudTopicUrl(cloudDeviceKey(accountKey, myDeviceId)), ownBody)
+                if (ownPost.ok) {
+                    recordPublishedSignature(context, KEY_LAST_PUBLISHED_CALLS_SIG, ownCallsSig)
+                    notes += "calls uploaded (${ownBody.length} B)"
+                } else {
+                    problems += describeCloud("POST own calls (${ownBody.length} bytes)", ownPost)
+                    if (ownPost.code == 429) markRateLimited()
+                }
+            }
+        } else {
+            notes += "own calls unchanged"
+        }
 
         // 3) Pull every known peer's calls
         val peers = getPeerDevices(context).filter { it.deviceId.isNotBlank() && it.deviceId != myDeviceId }
         if (peers.isEmpty()) notes += "no linked devices known yet"
         peers.forEach { peer ->
+            if (isRateLimitActive()) {
+                notes += "GET ${peer.deviceName} deferred (HTTP 429 backoff)"
+                return@forEach
+            }
             val r = cloudGet(cloudTopicUrl(cloudDeviceKey(accountKey, peer.deviceId)))
             if (r.ok && r.body.orEmpty().startsWith("{")) {
                 runCatching {
@@ -958,7 +1045,6 @@ object AccountDeviceHistoryManager {
                         }
                         ingestAccountSnapshotJson(context, JSONObject().put("calls", arr))
                     }
-                    // Only a recent upload by the peer itself shows it is online; an old document is stale data.
                     val updatedAt = doc.optLong("updatedAt", 0L)
                     if (updatedAt > 0L && kotlin.math.abs(System.currentTimeMillis() - updatedAt) <= CLOUD_FRESH_WINDOW_MS) {
                         freshPeerIds += peer.deviceId
@@ -968,18 +1054,19 @@ object AccountDeviceHistoryManager {
                 notes += "${peer.deviceName} has not uploaded yet"
             } else {
                 problems += describeCloud("GET ${peer.deviceName}", r)
+                if (r.code == 429) markRateLimited()
             }
         }
 
         val ok = problems.isEmpty()
-        val text = (if (ok) "uploaded ${ownBody.length} B, checked ${peers.size} peer(s)" else problems.joinToString(" | ")) +
+        val text = (if (ok) "sync ok" else problems.joinToString(" | ")) +
                 (if (notes.isNotEmpty()) " [" + notes.joinToString("; ") + "]" else "")
         recordCloudStatus(context, ok, text)
         return ok
     }
 
-    private fun buildOwnCallsJson(context: Context): String {
-        val own = queryLocalDeviceCallLog(context, maxCount = CLOUD_MAX_OWN_CALLS)
+    private fun buildOwnCallsJson(context: Context, ownList: List<SyncedCallRecord>? = null): String {
+        val own = ownList ?: queryLocalDeviceCallLog(context, maxCount = CLOUD_MAX_OWN_CALLS)
         val myDeviceId = getCurrentDeviceId(context)
         val myDeviceName = getCurrentDeviceName(context)
         fun build(n: Int): String {
