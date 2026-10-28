@@ -1,88 +1,283 @@
 package com.caller.security
 
-import kotlin.math.abs
+import java.nio.charset.StandardCharsets
 
-object SyncAuth {
-    const val HDR_ID = "x-device-id"
-    const val HDR_TS = "x-timestamp"
-    const val HDR_NONCE = "x-nonce"
-    const val HDR_SIG = "x-signature"
-    const val HDR_RESP_SIG = "x-resp-signature"
-
-    /** Signed over method, exact target (path+query), time, nonce, body hash, receiver id and sender id. */
-    fun requestBytes(method: String, target: String, ts: Long, nonce: String, body: ByteArray, audienceId: String, callerId: String): ByteArray =
-        Crypto.canon("dialer-sync-v1", method.uppercase(), target, ts.toString(), nonce, Crypto.hex(Crypto.sha256(body)), audienceId, callerId)
-
-    fun responseBytes(requestNonce: String, callerId: String, status: Int, body: ByteArray): ByteArray =
-        Crypto.canon("dialer-sync-resp-v1", requestNonce, callerId, status.toString(), Crypto.hex(Crypto.sha256(body)))
-
-    /** Headers a client attaches to every sync request. A fresh nonce is used each call. */
-    fun sign(identity: DeviceIdentity, audienceId: String, method: String, target: String, body: ByteArray, now: Long): Map<String, String> {
-        val nonce = Crypto.b64url(Crypto.randomBytes(16))
-        val sig = identity.sign(requestBytes(method, target, now, nonce, body, audienceId, identity.id))
-        return mapOf(HDR_ID to identity.id, HDR_TS to now.toString(), HDR_NONCE to nonce, HDR_SIG to Crypto.b64(sig))
-    }
+enum class SyncOperation {
+    SYNC_PUSH_CALLS,
+    SYNC_PULL_CALLS,
+    SYNC_SNAPSHOT_EXCHANGE,
+    HEARTBEAT_RECONNECT
 }
 
-sealed interface AuthResult {
-    data class Allowed(val device: TrustedDevice, val nonce: String) : AuthResult
-    data class Denied(val reason: String) : AuthResult
-}
+data class AuthenticatedSyncEnvelope(
+    val protocolVersion: Int,
+    val senderDeviceId: String,
+    val recipientDeviceId: String,
+    val operation: SyncOperation,
+    val sessionId: String,
+    val timestampMs: Long,
+    val nonceB64: String,
+    val ephemeralKemPubB64: String,
+    val ivB64: String,
+    val ciphertextAndTagB64: String,
+    val senderSignatureB64: String
+)
+
+data class VerifiedSyncPayload(
+    val senderDeviceId: String,
+    val senderDeviceName: String,
+    val operation: SyncOperation,
+    val sessionId: String,
+    val timestampMs: Long,
+    val plaintextUtf8: String
+)
 
 /**
- * Gatekeeper for every sync handler. Network location (Wi-Fi, Tailscale, IP, subnet) is never
- * consulted: only a valid signature from a currently TRUSTED device key passes.
+ * Enforces Section 6 (Authentication Before Every Sync):
+ * 1. Authenticate peer cryptographic identity (ECDSA P-256 signature).
+ * 2. Verify peer remains trusted and is not revoked in TrustStore.
+ * 3. Establish/validate authenticated secure channel (ephemeral ECDH + pinned channel secret + AES-256-GCM).
+ * 4. Validate authenticity, integrity, freshness (timestamp window), and session/nonce anti-replay.
+ * 5. Authorize the requested SyncOperation.
+ * 6. Only then decrypt and return the call-history payload.
  */
 class SyncAuthenticator(
-    private val identity: DeviceIdentity,
+    private val localIdentity: DeviceIdentity,
     private val trustStore: TrustStore,
-    private val clock: () -> Long = System::currentTimeMillis,
-    private val skewMs: Long = 60_000,
-    private val onDenied: (String) -> Unit = {},
+    private val allowedOperations: Set<SyncOperation> = SyncOperation.entries.toSet()
 ) {
-    private val seen = LinkedHashMap<String, Long>()
-    private val nonceTtlMs = skewMs * 2 + 1_000
-
-    fun authenticate(method: String, target: String, headers: Map<String, String>, body: ByteArray): AuthResult {
-        val h = headers.mapKeys { it.key.lowercase() }
-        val id = h[SyncAuth.HDR_ID] ?: return deny("missing credentials")
-        val nonce = h[SyncAuth.HDR_NONCE] ?: return deny("missing credentials")
-        val ts = h[SyncAuth.HDR_TS]?.toLongOrNull() ?: return deny("missing credentials")
-        val sigB64 = h[SyncAuth.HDR_SIG] ?: return deny("missing credentials")
-        if (!Pairing.validNonce(nonce)) return deny("bad nonce")
-
-        val device = trustStore.get(id)
-        if (device == null) return deny("unknown device")
-        if (device.status != TrustStatus.TRUSTED) return deny("revoked device")
-
-        val now = clock()
-        if (abs(now - ts) > skewMs) return deny("stale timestamp")
-
-        val pub = runCatching { Crypto.publicKeyFromEncoded(Crypto.unb64(device.publicKey)) }.getOrNull() ?: return deny("bad stored key")
-        val sig = runCatching { Crypto.unb64(sigB64) }.getOrNull() ?: return deny("bad signature")
-        if (!Crypto.verify(pub, SyncAuth.requestBytes(method, target, ts, nonce, body, identity.id, id), sig)) return deny("bad signature")
-
-        // Only remember nonces of requests that already verified, so outsiders can't fill the cache.
-        if (!remember("$id:$nonce", now)) return deny("replay")
-        return AuthResult.Allowed(device, nonce)
+    companion object {
+        const val MAX_CLOCK_SKEW_MS: Long = 120_000L
+        private const val MAX_REPLAY_CACHE_SIZE: Int = 4096
     }
 
-    fun signResponse(requestNonce: String, callerId: String, status: Int, body: ByteArray): String =
-        Crypto.b64(identity.sign(SyncAuth.responseBytes(requestNonce, callerId, status, body)))
+    private val replayLock = Any()
+    private val seenNonces = LinkedHashMap<String, Long>()
 
-    @Synchronized
-    private fun remember(key: String, now: Long): Boolean {
-        val iter = seen.entries.iterator()
-        while (iter.hasNext()) {
-            if (iter.next().value < now) iter.remove() else break
+    fun createAuthenticatedEnvelope(
+        recipientDeviceId: String,
+        operation: SyncOperation,
+        plaintextPayloadUtf8: String,
+        nowMs: Long = System.currentTimeMillis()
+    ): AuthenticatedSyncEnvelope {
+        if (trustStore.isCorrupted()) {
+            throw SecurityException("TrustStore is corrupted; refusing to send sync traffic")
         }
-        if (seen.containsKey(key)) return false
-        seen[key] = now + nonceTtlMs
-        return true
+        if (trustStore.isRevoked(recipientDeviceId)) {
+            throw SecurityException("Recipient device $recipientDeviceId is revoked")
+        }
+        val peer = trustStore.getApprovedPeer(recipientDeviceId)
+            ?: throw SecurityException("Recipient device $recipientDeviceId is not trusted")
+
+        val ephemeralKp = Crypto.generateEcKeyPair()
+        val ephemeralPubB64 = Crypto.encodeB64(ephemeralKp.public.encoded)
+        val nonceB64 = Crypto.randomNonceB64(24)
+
+        val aadBytes = buildEnvelopeAad(
+            protocolVersion = Crypto.PROTOCOL_VERSION,
+            senderDeviceId = localIdentity.deviceId,
+            recipientDeviceId = recipientDeviceId,
+            operation = operation,
+            sessionId = peer.pairedSessionId,
+            timestampMs = nowMs,
+            nonceB64 = nonceB64,
+            ephemeralKemPubB64 = ephemeralPubB64
+        )
+
+        val ephemSecret = Crypto.computeEcdhSharedSecret(ephemeralKp.private, peer.kemPublicKeyB64)
+        val pinnedSecret = Crypto.decodeB64(peer.channelSecretB64)
+        val messageKey = derivePerMessageAesKey(
+            ephemeralSecret = ephemSecret,
+            pinnedChannelSecret = pinnedSecret,
+            aadBytes = aadBytes
+        )
+
+        val encrypted = Crypto.encryptAesGcm(
+            key32Bytes = messageKey,
+            plaintext = plaintextPayloadUtf8.toByteArray(StandardCharsets.UTF_8),
+            aad = aadBytes
+        )
+
+        val signingTranscript = buildSigningTranscript(
+            aadBytes = aadBytes,
+            ivB64 = encrypted.ivB64,
+            ciphertextAndTagB64 = encrypted.ciphertextAndTagB64
+        )
+        val signatureB64 = localIdentity.sign(signingTranscript)
+
+        return AuthenticatedSyncEnvelope(
+            protocolVersion = Crypto.PROTOCOL_VERSION,
+            senderDeviceId = localIdentity.deviceId,
+            recipientDeviceId = recipientDeviceId,
+            operation = operation,
+            sessionId = peer.pairedSessionId,
+            timestampMs = nowMs,
+            nonceB64 = nonceB64,
+            ephemeralKemPubB64 = ephemeralPubB64,
+            ivB64 = encrypted.ivB64,
+            ciphertextAndTagB64 = encrypted.ciphertextAndTagB64,
+            senderSignatureB64 = signatureB64
+        )
     }
 
-    private fun deny(reason: String): AuthResult {
-        onDenied(reason)
-        return AuthResult.Denied(reason)
+    fun verifyAndDecrypt(
+        envelope: AuthenticatedSyncEnvelope,
+        expectedOperation: SyncOperation? = null,
+        nowMs: Long = System.currentTimeMillis()
+    ): VerifiedSyncPayload {
+        // Check 0: Fail closed if TrustStore is corrupted or protocol downgraded
+        if (trustStore.isCorrupted()) {
+            throw SecurityException("TrustStore is corrupted; failing closed")
+        }
+        if (envelope.protocolVersion != Crypto.PROTOCOL_VERSION) {
+            throw SecurityException("Unsupported or downgraded sync protocol version: ${envelope.protocolVersion}")
+        }
+        if (envelope.recipientDeviceId != localIdentity.deviceId) {
+            throw SecurityException("Envelope recipient (${envelope.recipientDeviceId}) does not match local device (${localIdentity.deviceId})")
+        }
+
+        // Check 1 & 2: Verify peer remains trusted and has not been revoked
+        if (trustStore.isRevoked(envelope.senderDeviceId)) {
+            throw SecurityException("Sender device ${envelope.senderDeviceId} has been revoked")
+        }
+        val peer = trustStore.getApprovedPeer(envelope.senderDeviceId)
+            ?: throw SecurityException("Sender device ${envelope.senderDeviceId} is untrusted")
+
+        if (envelope.sessionId != peer.pairedSessionId) {
+            throw SecurityException("Session binding mismatch for peer ${envelope.senderDeviceId}")
+        }
+
+        // Check 3: Authorize requested operation
+        if (envelope.operation !in allowedOperations) {
+            throw SecurityException("Operation ${envelope.operation} is not permitted on this endpoint")
+        }
+        if (expectedOperation != null && envelope.operation != expectedOperation) {
+            throw SecurityException("Unexpected sync operation: expected $expectedOperation, got ${envelope.operation}")
+        }
+
+        // Check 4: Freshness validation
+        val skew = kotlin.math.abs(nowMs - envelope.timestampMs)
+        if (skew > MAX_CLOCK_SKEW_MS) {
+            throw SecurityException("Sync message timestamp outside allowed freshness window")
+        }
+
+        // Check 5: Verify peer ECDSA signature BEFORE touching replay state or decrypting
+        val aadBytes = buildEnvelopeAad(
+            protocolVersion = envelope.protocolVersion,
+            senderDeviceId = envelope.senderDeviceId,
+            recipientDeviceId = envelope.recipientDeviceId,
+            operation = envelope.operation,
+            sessionId = envelope.sessionId,
+            timestampMs = envelope.timestampMs,
+            nonceB64 = envelope.nonceB64,
+            ephemeralKemPubB64 = envelope.ephemeralKemPubB64
+        )
+        val signingTranscript = buildSigningTranscript(
+            aadBytes = aadBytes,
+            ivB64 = envelope.ivB64,
+            ciphertextAndTagB64 = envelope.ciphertextAndTagB64
+        )
+        if (!Crypto.verifyEcdsa(peer.signingPublicKeyB64, signingTranscript, envelope.senderSignatureB64)) {
+            throw SecurityException("ECDSA signature verification failed for sender ${envelope.senderDeviceId}")
+        }
+
+        // Check 6: Nonce anti-replay check (scoped to sender + session + nonce)
+        val replayKey = "${envelope.senderDeviceId}|${envelope.sessionId}|${envelope.nonceB64}"
+        synchronized(replayLock) {
+            pruneExpiredNoncesLocked(nowMs)
+            if (seenNonces.containsKey(replayKey)) {
+                throw SecurityException("Replayed sync message detected (nonce already used)")
+            }
+            // Re-verify revocation inside lock to prevent concurrent sync + revocation race condition
+            if (trustStore.isRevoked(envelope.senderDeviceId) || trustStore.getApprovedPeer(envelope.senderDeviceId) == null) {
+                throw SecurityException("Peer ${envelope.senderDeviceId} was revoked concurrently")
+            }
+            seenNonces[replayKey] = envelope.timestampMs
+        }
+
+        // Check 7: Derive per-message AES-256-GCM key and authenticate/decrypt payload
+        val ephemSecret = localIdentity.deriveSharedSecret(envelope.ephemeralKemPubB64)
+        val pinnedSecret = Crypto.decodeB64(peer.channelSecretB64)
+        val messageKey = derivePerMessageAesKey(
+            ephemeralSecret = ephemSecret,
+            pinnedChannelSecret = pinnedSecret,
+            aadBytes = aadBytes
+        )
+        val plaintextBytes = try {
+            Crypto.decryptAesGcm(
+                key32Bytes = messageKey,
+                ivB64 = envelope.ivB64,
+                ciphertextAndTagB64 = envelope.ciphertextAndTagB64,
+                aad = aadBytes
+            )
+        } catch (e: Throwable) {
+            throw SecurityException("AES-GCM authenticated decryption failed", e)
+        }
+
+        return VerifiedSyncPayload(
+            senderDeviceId = peer.deviceId,
+            senderDeviceName = peer.deviceName,
+            operation = envelope.operation,
+            sessionId = peer.pairedSessionId,
+            timestampMs = envelope.timestampMs,
+            plaintextUtf8 = String(plaintextBytes, StandardCharsets.UTF_8)
+        )
     }
+
+    private fun pruneExpiredNoncesLocked(nowMs: Long) {
+        val iter = seenNonces.entries.iterator()
+        while (iter.hasNext()) {
+            val entry = iter.next()
+            if (nowMs - entry.value > MAX_CLOCK_SKEW_MS * 2) {
+                iter.remove()
+            }
+        }
+        while (seenNonces.size > MAX_REPLAY_CACHE_SIZE) {
+            val firstKey = seenNonces.keys.firstOrNull() ?: break
+            seenNonces.remove(firstKey)
+        }
+    }
+
+    private fun buildEnvelopeAad(
+        protocolVersion: Int,
+        senderDeviceId: String,
+        recipientDeviceId: String,
+        operation: SyncOperation,
+        sessionId: String,
+        timestampMs: Long,
+        nonceB64: String,
+        ephemeralKemPubB64: String
+    ): ByteArray = Crypto.canonicalTranscript(
+        "SYNC_ENVELOPE_AAD_V1",
+        protocolVersion.toString(),
+        senderDeviceId,
+        recipientDeviceId,
+        operation.name,
+        sessionId,
+        timestampMs.toString(),
+        nonceB64,
+        ephemeralKemPubB64
+    )
+
+    private fun buildSigningTranscript(
+        aadBytes: ByteArray,
+        ivB64: String,
+        ciphertextAndTagB64: String
+    ): ByteArray = Crypto.canonicalTranscript(
+        "SYNC_ENVELOPE_SIG_V1",
+        Crypto.encodeB64(aadBytes),
+        ivB64,
+        Crypto.encodeB64(Crypto.sha256(Crypto.decodeB64(ciphertextAndTagB64)))
+    )
+
+    private fun derivePerMessageAesKey(
+        ephemeralSecret: ByteArray,
+        pinnedChannelSecret: ByteArray,
+        aadBytes: ByteArray
+    ): ByteArray = Crypto.hkdfSha256(
+        ikm = ephemeralSecret + pinnedChannelSecret,
+        salt = Crypto.sha256(aadBytes),
+        info = "TRILLION_GUARD_PER_MESSAGE_AES256_GCM_V1".toByteArray(StandardCharsets.UTF_8),
+        outputLengthBytes = 32
+    )
 }

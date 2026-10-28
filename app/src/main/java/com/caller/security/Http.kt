@@ -1,62 +1,109 @@
 package com.caller.security
 
-class HandlerResult(val status: Int, val body: ByteArray)
+data class SyncTransportRequest(
+    val endpointPath: String,
+    val sourceNetworkTag: String, // e.g., "WIFI_LAN:192.168.1.25", "TAILSCALE:100.84.12.9", "CLOUD_RELAY"
+    val sharedAccountCodeHint: String? = null, // Untrusted discovery hint (e.g., "1111")
+    val envelope: AuthenticatedSyncEnvelope?
+)
 
-fun interface SyncHandler {
-    fun handle(device: TrustedDevice, method: String, target: String, body: ByteArray): HandlerResult
-}
+data class SyncTransportResponse(
+    val statusCode: Int,
+    val responseEnvelope: AuthenticatedSyncEnvelope? = null,
+    val errorMessage: String? = null
+)
 
-/** Authenticated client for a paired peer. Also verifies the peer's signature on every success response. */
-class SecureSyncClient(
-    private val identity: DeviceIdentity,
-    private val trustStore: TrustStore,
-    private val peerId: String,
-    private val baseUrl: String,
-    private val clock: () -> Long = System::currentTimeMillis,
+/**
+ * Gatekeeper for all incoming sync transport endpoints (Wi-Fi TCP, Tailscale TCP, HTTP, Background Workers).
+ * Enforces that network reachability or a matching short code ("1111") NEVER grants access.
+ */
+class AuthenticatedSyncGateway(
+    private val authenticator: SyncAuthenticator,
+    private val callHistoryProvider: (senderDeviceId: String) -> String,
+    private val callHistoryIngestor: (senderDeviceId: String, payloadJson: String) -> Unit
 ) {
-    class Response(val status: Int, val body: ByteArray)
-
-    fun request(method: String, target: String, body: ByteArray = ByteArray(0)): Response {
-        val peer = trustStore.get(peerId)?.takeIf { it.status == TrustStatus.TRUSTED }
-            ?: throw SecurityException("peer is not trusted")
-        val headers = SyncAuth.sign(identity, peerId, method, target, body, clock())
-        val r = httpCall(method, baseUrl + target, headers, body)
-        if (r.status in 200..299) {
-            val sig = r.headers[SyncAuth.HDR_RESP_SIG]?.let { runCatching { Crypto.unb64(it) }.getOrNull() }
-                ?: throw SecurityException("unsigned response")
-            val pub = Crypto.publicKeyFromEncoded(Crypto.unb64(peer.publicKey))
-            val nonce = headers.getValue(SyncAuth.HDR_NONCE)
-            if (!Crypto.verify(pub, SyncAuth.responseBytes(nonce, identity.id, r.status, r.body), sig)) {
-                throw SecurityException("response signature invalid")
-            }
-        }
-        return Response(r.status, r.body)
+    companion object {
+        const val PATH_PUSH_CALLS = "/v1/sync/push"
+        const val PATH_PULL_CALLS = "/v1/sync/pull"
+        const val PATH_SNAPSHOT_EXCHANGE = "/v1/sync/snapshot"
+        const val PATH_HEARTBEAT = "/v1/sync/heartbeat"
     }
 
-    private class RawResponse(val status: Int, val headers: Map<String, String>, val body: ByteArray)
+    fun handleIncomingSync(
+        request: SyncTransportRequest,
+        nowMs: Long = System.currentTimeMillis()
+    ): SyncTransportResponse {
+        val env = request.envelope
+            ?: return SyncTransportResponse(statusCode = 401, errorMessage = "Missing authenticated sync envelope")
 
-    private fun httpCall(method: String, urlStr: String, headers: Map<String, String>, body: ByteArray): RawResponse {
-        val conn = (java.net.URL(urlStr).openConnection() as java.net.HttpURLConnection).apply {
-            requestMethod = method
-            connectTimeout = 10_000
-            readTimeout = 10_000
-            doInput = true
-            headers.forEach { (k, v) -> setRequestProperty(k, v) }
-            if (body.isNotEmpty()) {
-                doOutput = true
-                outputStream.use { it.write(body) }
-            }
+        val expectedOp = when (request.endpointPath) {
+            PATH_PUSH_CALLS -> SyncOperation.SYNC_PUSH_CALLS
+            PATH_PULL_CALLS -> SyncOperation.SYNC_PULL_CALLS
+            PATH_SNAPSHOT_EXCHANGE -> SyncOperation.SYNC_SNAPSHOT_EXCHANGE
+            PATH_HEARTBEAT -> SyncOperation.HEARTBEAT_RECONNECT
+            else -> return SyncTransportResponse(statusCode = 404, errorMessage = "Unknown sync endpoint")
         }
+
+        val verified = try {
+            authenticator.verifyAndDecrypt(
+                envelope = env,
+                expectedOperation = expectedOp,
+                nowMs = nowMs
+            )
+        } catch (secEx: SecurityException) {
+            return SyncTransportResponse(statusCode = 403, errorMessage = "Access denied: ${secEx.message}")
+        } catch (_: Throwable) {
+            return SyncTransportResponse(statusCode = 403, errorMessage = "Access denied")
+        }
+
         return try {
-            val code = conn.responseCode
-            val stream = if (code in 200..299) conn.inputStream else conn.errorStream ?: conn.inputStream
-            val respBody = stream?.use { it.readBytes() } ?: ByteArray(0)
-            val respHeaders = conn.headerFields.mapNotNull { (k, v) ->
-                if (k != null && v.isNotEmpty()) k to v[0] else null
-            }.toMap()
-            RawResponse(code, respHeaders, respBody)
-        } finally {
-            conn.disconnect()
+            when (expectedOp) {
+                SyncOperation.SYNC_PUSH_CALLS -> {
+                    callHistoryIngestor(verified.senderDeviceId, verified.plaintextUtf8)
+                    val ackEnvelope = authenticator.createAuthenticatedEnvelope(
+                        recipientDeviceId = verified.senderDeviceId,
+                        operation = SyncOperation.SYNC_PUSH_CALLS,
+                        plaintextPayloadUtf8 = """{"status":"INGESTED"}""",
+                        nowMs = nowMs
+                    )
+                    SyncTransportResponse(statusCode = 200, responseEnvelope = ackEnvelope)
+                }
+
+                SyncOperation.SYNC_PULL_CALLS -> {
+                    val historyJson = callHistoryProvider(verified.senderDeviceId)
+                    val replyEnvelope = authenticator.createAuthenticatedEnvelope(
+                        recipientDeviceId = verified.senderDeviceId,
+                        operation = SyncOperation.SYNC_PULL_CALLS,
+                        plaintextPayloadUtf8 = historyJson,
+                        nowMs = nowMs
+                    )
+                    SyncTransportResponse(statusCode = 200, responseEnvelope = replyEnvelope)
+                }
+
+                SyncOperation.SYNC_SNAPSHOT_EXCHANGE -> {
+                    callHistoryIngestor(verified.senderDeviceId, verified.plaintextUtf8)
+                    val localSnapshotJson = callHistoryProvider(verified.senderDeviceId)
+                    val replyEnvelope = authenticator.createAuthenticatedEnvelope(
+                        recipientDeviceId = verified.senderDeviceId,
+                        operation = SyncOperation.SYNC_SNAPSHOT_EXCHANGE,
+                        plaintextPayloadUtf8 = localSnapshotJson,
+                        nowMs = nowMs
+                    )
+                    SyncTransportResponse(statusCode = 200, responseEnvelope = replyEnvelope)
+                }
+
+                SyncOperation.HEARTBEAT_RECONNECT -> {
+                    val ackEnvelope = authenticator.createAuthenticatedEnvelope(
+                        recipientDeviceId = verified.senderDeviceId,
+                        operation = SyncOperation.HEARTBEAT_RECONNECT,
+                        plaintextPayloadUtf8 = """{"status":"ALIVE"}""",
+                        nowMs = nowMs
+                    )
+                    SyncTransportResponse(statusCode = 200, responseEnvelope = ackEnvelope)
+                }
+            }
+        } catch (secEx: SecurityException) {
+            SyncTransportResponse(statusCode = 403, errorMessage = "Access denied during response: ${secEx.message}")
         }
     }
 }
