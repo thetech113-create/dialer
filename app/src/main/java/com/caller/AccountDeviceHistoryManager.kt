@@ -145,7 +145,7 @@ object AccountDeviceHistoryManager {
     private const val CLOUD_MAX_BODY_BYTES = 14_000
     private const val CLOUD_MAX_OWN_CALLS = 80
 
-    private const val ACCOUNT_CLOUD_BUCKET_URL = "https://kvdb.io/A9xK3mP7vR2qL8nW4jY6tB"
+    private const val ACCOUNT_CLOUD_BUCKET_URL = "https://ntfy.sh/caller_kv"
     private const val TCP_SYNC_PORT = 8902
     private const val UDP_DISCOVERY_PORT = 8903
     // Direct sync over Tailscale crosses the internet (possibly via a DERP relay), so allow more time than LAN.
@@ -846,14 +846,38 @@ object AccountDeviceHistoryManager {
     }
 
     private fun cloudGet(endpoint: String): CloudResult = try {
+        val targetUrl = if (endpoint.contains("ntfy.sh") && !endpoint.contains("/json")) {
+            "$endpoint/json?poll=1"
+        } else {
+            endpoint
+        }
         val req = Request.Builder()
-            .url(endpoint)
+            .url(targetUrl)
             .header("Accept", "application/json")
             .header("User-Agent", "Caller-Account-Sync")
             .get()
             .build()
         http.newCall(req).execute().use { resp ->
-            CloudResult(resp.code, resp.body?.string()?.trim(), null)
+            if (!resp.isSuccessful) {
+                return@use CloudResult(resp.code, null, "HTTP ${resp.code}")
+            }
+            val rawBody = resp.body?.string()?.trim().orEmpty()
+            if (rawBody.isBlank()) {
+                return@use CloudResult(404, null, null)
+            }
+            if (targetUrl.contains("ntfy.sh")) {
+                val lines = rawBody.lines().filter { it.contains("\"message\"") }
+                val lastMsgLine = lines.lastOrNull()
+                if (lastMsgLine != null) {
+                    val msgObj = JSONObject(lastMsgLine)
+                    val innerMsg = msgObj.optString("message").trim()
+                    if (innerMsg.startsWith("{") || innerMsg.startsWith("[")) {
+                        return@use CloudResult(200, innerMsg, null)
+                    }
+                }
+                return@use CloudResult(404, null, null)
+            }
+            CloudResult(resp.code, rawBody, null)
         }
     } catch (e: Exception) {
         CloudResult(-1, null, "${e.javaClass.simpleName}: ${e.message}")
