@@ -617,7 +617,18 @@ object AccountDeviceHistoryManager {
         val appCtx = context.applicationContext
         val host = activePairingHost ?: getPairingHost(appCtx)
         val code = activePairingCode ?: return
+        val pendingRec = host.getPendingRecord(pairingId)
         if (host.approve(pairingId)) {
+            if (pendingRec != null) {
+                val peerReg = AccountDeviceRegistration(
+                    accountId = getAccountId(appCtx),
+                    deviceId = pendingRec.deviceId,
+                    deviceName = pendingRec.deviceName,
+                    verifiedNumbers = emptyList(),
+                    lastSyncTimestamp = System.currentTimeMillis()
+                )
+                registerPeerDevice(appCtx, peerReg)
+            }
             val status = host.status(pairingId)
             val statusEndpoint = "$ACCOUNT_CLOUD_BUCKET_URL/status_$code"
             scope.launch {

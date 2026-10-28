@@ -190,6 +190,9 @@ class PairingHost(
     }
 
     @Synchronized
+    fun getPendingRecord(pairingId: String): TrustedPeerRecord? = pendingReqs[pairingId]
+
+    @Synchronized
     fun approve(pairingId: String): Boolean {
         val rec = pendingReqs[pairingId] ?: return false
         trustStore.approvePeer(rec)
