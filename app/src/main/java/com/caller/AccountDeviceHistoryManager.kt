@@ -970,6 +970,8 @@ object AccountDeviceHistoryManager {
 
     private fun buildOwnCallsJson(context: Context): String {
         val own = queryLocalDeviceCallLog(context, maxCount = CLOUD_MAX_OWN_CALLS)
+        val myDeviceId = getCurrentDeviceId(context)
+        val myDeviceName = getCurrentDeviceName(context)
         fun build(n: Int): String {
             val arr = JSONArray()
             own.take(n).forEach { c ->
@@ -979,12 +981,14 @@ object AccountDeviceHistoryManager {
                     put("callTypeInt", c.callTypeInt)
                     put("timestamp", c.timestamp)
                     put("durationSec", c.durationSec)
+                    put("sourceDeviceId", myDeviceId)
+                    put("sourceDeviceName", myDeviceName)
                 })
             }
             return JSONObject().apply {
                 put("accountId", getAccountId(context))
-                put("deviceId", getCurrentDeviceId(context))
-                put("deviceName", getCurrentDeviceName(context))
+                put("deviceId", myDeviceId)
+                put("deviceName", myDeviceName)
                 put("updatedAt", System.currentTimeMillis())
                 getOwnTailscaleIp().takeIf { it.isNotBlank() }?.let { put("tailscaleIp", it) }
                 put("calls", arr)
@@ -1178,14 +1182,20 @@ object AccountDeviceHistoryManager {
             val existingCalls = getSyncedCallHistory(context).toMutableList()
             var newlyMergedCount = 0
 
+            val rootDevId = root.optString("deviceId").ifBlank { root.optString("senderDeviceId") }.trim()
+            val rootDevName = root.optString("deviceName").ifBlank { root.optString("senderDeviceName") }.ifBlank { "Linked Device" }.trim()
+
             for (i in 0 until callsArr.length()) {
                 val c = callsArr.optJSONObject(i) ?: continue
                 val num = c.optString("remoteNumber").ifBlank { c.optString("number") }.trim()
                 if (num.isBlank()) continue
                 if (num in setOf("100", "112", "101", "102", "108", "911")) continue
 
-                val srcDevId = c.optString("sourceDeviceId")
-                val srcDevName = c.optString("sourceDeviceName").ifBlank { "Linked Device" }
+                var srcDevId = c.optString("sourceDeviceId").ifBlank { rootDevId }.trim()
+                val srcDevName = c.optString("sourceDeviceName").ifBlank { rootDevName }.trim()
+                if (srcDevId.isBlank()) {
+                    srcDevId = getPeerDevices(context).firstOrNull { it.deviceId != myDeviceId }?.deviceId.orEmpty()
+                }
                 val ts = c.optLong("timestamp", c.optLong("date", 0L))
                 if (ts <= 0L) continue
 
@@ -1199,7 +1209,7 @@ object AccountDeviceHistoryManager {
                     sourceDeviceName = srcDevName
                 )
 
-                if (srcDevId != myDeviceId) {
+                if (srcDevId != myDeviceId && srcDevId.isNotBlank()) {
                     val isDup = existingCalls.any {
                         buildP2PNumberSnapshot(it.remoteNumber).last10 == buildP2PNumberSnapshot(record.remoteNumber).last10 &&
                                 kotlin.math.abs(it.timestamp - record.timestamp) < 5000L
