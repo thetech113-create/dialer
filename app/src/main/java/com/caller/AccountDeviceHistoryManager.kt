@@ -481,19 +481,12 @@ object AccountDeviceHistoryManager {
                     put("verifiedNumbers", JSONArray(getVerifiedNumbers(appCtx)))
                     put("expiresAt", offer.expiresAt)
                 }
-                val postBody = snapshot.toString().toRequestBody("application/json; charset=utf-8".toMediaType())
-                val req = Request.Builder()
-                    .url(endpoint)
-                    .header("User-Agent", "Caller-Account-Sync")
-                    .post(postBody)
-                    .build()
-
-                http.newCall(req).execute().use { resp ->
-                    if (resp.isSuccessful) {
-                        mainHandler.post { onCodeGenerated(code) }
-                    } else {
-                        mainHandler.post { toast(appCtx, "Failed to generate pairing code. Try again.") }
-                    }
+                val postRes = cloudPost(endpoint, snapshot.toString())
+                if (postRes.ok) {
+                    mainHandler.post { onCodeGenerated(code) }
+                } else {
+                    mainHandler.post { toast(appCtx, "Failed to generate pairing code. Try again.") }
+                    return@launch
                 }
 
                 // Poll Cloud KV for incoming PairRequest from Phone 2
@@ -501,29 +494,18 @@ object AccountDeviceHistoryManager {
                 val deadline = System.currentTimeMillis() + 120_000L
                 while (System.currentTimeMillis() < deadline && activePairingCode == code) {
                     delay(1500L)
-                    val getReq = Request.Builder()
-                        .url(reqEndpoint)
-                        .header("Accept", "application/json")
-                        .header("User-Agent", "Caller-Account-Sync")
-                        .get()
-                        .build()
-
                     runCatching {
-                        http.newCall(getReq).execute().use { resp ->
-                            if (resp.isSuccessful) {
-                                val bodyStr = resp.body?.string()?.trim().orEmpty()
-                                if (bodyStr.startsWith("{")) {
-                                    val pairReq = PairRequest.fromWire(bodyStr)
-                                    if (pairReq != null) {
-                                        val handleRes = host.handleRequest(pairReq)
-                                        if (handleRes is PairingHost.RequestResult.Accepted) {
-                                            val pendingList = host.pendingRequests()
-                                            if (pendingList.isNotEmpty()) {
-                                                mainHandler.post {
-                                                    pendingPairingRequest = pendingList.first()
-                                                    notifyStateChanged()
-                                                }
-                                            }
+                        val getRes = cloudGet(reqEndpoint)
+                        if (getRes.ok && getRes.body.orEmpty().startsWith("{")) {
+                            val pairReq = PairRequest.fromWire(getRes.body!!)
+                            if (pairReq != null) {
+                                val handleRes = host.handleRequest(pairReq)
+                                if (handleRes is PairingHost.RequestResult.Accepted) {
+                                    val pendingList = host.pendingRequests()
+                                    if (pendingList.isNotEmpty()) {
+                                        mainHandler.post {
+                                            pendingPairingRequest = pendingList.first()
+                                            notifyStateChanged()
                                         }
                                     }
                                 }
@@ -551,21 +533,10 @@ object AccountDeviceHistoryManager {
 
         scope.launch {
             runCatching {
-                val getReq = Request.Builder()
-                    .url(endpoint)
-                    .header("Accept", "application/json")
-                    .header("User-Agent", "Caller-Account-Sync")
-                    .get()
-                    .build()
-
+                val getRes = cloudGet(endpoint)
                 var pairObj: JSONObject? = null
-                http.newCall(getReq).execute().use { resp ->
-                    if (resp.isSuccessful) {
-                        val bodyStr = resp.body?.string()?.trim().orEmpty()
-                        if (bodyStr.startsWith("{")) {
-                            pairObj = JSONObject(bodyStr)
-                        }
-                    }
+                if (getRes.ok && getRes.body.orEmpty().startsWith("{")) {
+                    pairObj = JSONObject(getRes.body!!)
                 }
 
                 if (pairObj == null) {
@@ -573,11 +544,11 @@ object AccountDeviceHistoryManager {
                     return@launch
                 }
 
-                val remoteAccountId = pairObj!!.optString("accountId")
-                val remoteDeviceId = pairObj!!.optString("deviceId")
-                val remoteDeviceName = pairObj!!.optString("deviceName").ifBlank { "Linked Phone" }
-                val ownerId = pairObj!!.optString("ownerId")
-                val numsArr = pairObj!!.optJSONArray("verifiedNumbers")
+                val remoteAccountId = pairObj.optString("accountId")
+                val remoteDeviceId = pairObj.optString("deviceId")
+                val remoteDeviceName = pairObj.optString("deviceName").ifBlank { "Linked Phone" }
+                val ownerId = pairObj.optString("ownerId")
+                val numsArr = pairObj.optJSONArray("verifiedNumbers")
                 val remoteNums = buildList {
                     if (numsArr != null) {
                         for (i in 0 until numsArr.length()) {
@@ -594,14 +565,11 @@ object AccountDeviceHistoryManager {
 
                 // Post PairRequest to Cloud KV
                 val reqEndpoint = "$ACCOUNT_CLOUD_BUCKET_URL/req_$cleanCode"
-                val reqBody = pairReq.toWire().toRequestBody("application/json; charset=utf-8".toMediaType())
-                val postReq = Request.Builder()
-                    .url(reqEndpoint)
-                    .header("User-Agent", "Caller-Account-Sync")
-                    .post(reqBody)
-                    .build()
-
-                http.newCall(postReq).execute().use { it.isSuccessful }
+                val postRes = cloudPost(reqEndpoint, pairReq.toWire())
+                if (!postRes.ok) {
+                    mainHandler.post { onComplete(false, "Failed to send pairing request. Try again.") }
+                    return@launch
+                }
 
                 mainHandler.post { onComplete(true, "Pairing request sent to Phone 1! Waiting for approval on Phone 1...") }
 
@@ -610,35 +578,30 @@ object AccountDeviceHistoryManager {
                 val deadline = System.currentTimeMillis() + 120_000L
                 while (System.currentTimeMillis() < deadline) {
                     delay(2000L)
-                    val statusGet = Request.Builder().url(statusEndpoint).get().build()
                     runCatching {
-                        http.newCall(statusGet).execute().use { resp ->
-                            if (resp.isSuccessful) {
-                                val bodyStr = resp.body?.string()?.trim().orEmpty()
-                                if (bodyStr.startsWith("{")) {
-                                    val pairStatus = PairStatus.fromWire(bodyStr)
-                                    if (pairStatus.state == "APPROVED") {
-                                        setAccountId(appCtx, remoteAccountId)
-                                        val peerReg = AccountDeviceRegistration(
-                                            accountId = remoteAccountId,
-                                            deviceId = remoteDeviceId,
-                                            deviceName = remoteDeviceName,
-                                            verifiedNumbers = remoteNums,
-                                            lastSyncTimestamp = System.currentTimeMillis()
-                                        )
-                                        registerPeerDevice(appCtx, peerReg)
-                                        syncAccountNow(appCtx, showToast = false)
-                                        mainHandler.post {
-                                            toast(appCtx, "Pairing APPROVED by $remoteDeviceName!")
-                                        }
-                                        return@launch
-                                    } else if (pairStatus.state == "DENIED") {
-                                        mainHandler.post {
-                                            toast(appCtx, "Pairing was DENIED on Phone 1.")
-                                        }
-                                        return@launch
-                                    }
+                        val statusRes = cloudGet(statusEndpoint)
+                        if (statusRes.ok && statusRes.body.orEmpty().startsWith("{")) {
+                            val pairStatus = PairStatus.fromWire(statusRes.body!!)
+                            if (pairStatus.state == "APPROVED") {
+                                setAccountId(appCtx, remoteAccountId)
+                                val peerReg = AccountDeviceRegistration(
+                                    accountId = remoteAccountId,
+                                    deviceId = remoteDeviceId,
+                                    deviceName = remoteDeviceName,
+                                    verifiedNumbers = remoteNums,
+                                    lastSyncTimestamp = System.currentTimeMillis()
+                                )
+                                registerPeerDevice(appCtx, peerReg)
+                                syncAccountNow(appCtx, showToast = false)
+                                mainHandler.post {
+                                    toast(appCtx, "Pairing APPROVED by $remoteDeviceName!")
                                 }
+                                return@launch
+                            } else if (pairStatus.state == "DENIED") {
+                                mainHandler.post {
+                                    toast(appCtx, "Pairing was DENIED on Phone 1.")
+                                }
+                                return@launch
                             }
                         }
                     }
@@ -659,9 +622,7 @@ object AccountDeviceHistoryManager {
             val statusEndpoint = "$ACCOUNT_CLOUD_BUCKET_URL/status_$code"
             scope.launch {
                 runCatching {
-                    val postBody = status.toWire().toRequestBody("application/json; charset=utf-8".toMediaType())
-                    val req = Request.Builder().url(statusEndpoint).post(postBody).build()
-                    http.newCall(req).execute().use { it.isSuccessful }
+                    cloudPost(statusEndpoint, status.toWire())
                 }
             }
             syncAccountNow(appCtx, showToast = false)
@@ -680,9 +641,7 @@ object AccountDeviceHistoryManager {
         val statusEndpoint = "$ACCOUNT_CLOUD_BUCKET_URL/status_$code"
         scope.launch {
             runCatching {
-                val postBody = status.toWire().toRequestBody("application/json; charset=utf-8".toMediaType())
-                val req = Request.Builder().url(statusEndpoint).post(postBody).build()
-                http.newCall(req).execute().use { it.isSuccessful }
+                cloudPost(statusEndpoint, status.toWire())
             }
         }
         pendingPairingRequest = null
