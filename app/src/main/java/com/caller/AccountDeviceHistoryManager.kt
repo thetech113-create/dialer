@@ -253,9 +253,30 @@ object AccountDeviceHistoryManager {
         return DeviceIdentity.loadOrCreate(file)
     }
 
+    private fun getTrustStoreIntegrityKey(context: Context): ByteArray {
+        val prefs = getPrefs(context)
+        var b64Key = prefs.getString("trust_store_integrity_key_v1", null)
+        if (b64Key.isNullOrBlank()) {
+            val keyFile = java.io.File(p2pContext(context).filesDir, "trust_store_v1.key")
+            if (keyFile.exists() && keyFile.length() == 32L) {
+                val bytes = keyFile.readBytes()
+                b64Key = Crypto.encodeB64(bytes)
+                prefs.edit().putString("trust_store_integrity_key_v1", b64Key).apply()
+                return bytes
+            }
+            val newKey = Crypto.randomBytes(32)
+            b64Key = Crypto.encodeB64(newKey)
+            prefs.edit().putString("trust_store_integrity_key_v1", b64Key).apply()
+            runCatching { keyFile.writeBytes(newKey) }
+            return newKey
+        }
+        return Crypto.decodeB64(b64Key)
+    }
+
     fun getTrustStore(context: Context): TrustStore {
         val file = java.io.File(p2pContext(context).filesDir, "trust_store_v1.tsv")
-        return FileTrustStore(file)
+        val key = getTrustStoreIntegrityKey(context)
+        return FileTrustStore(file, key)
     }
 
     fun getPairingHost(context: Context): PairingHost {
@@ -616,7 +637,7 @@ object AccountDeviceHistoryManager {
                 }
 
                 // Build signed PairRequest via PairingClient
-                val client = PairingClient(getDeviceIdentity(appCtx), getCurrentDeviceName(appCtx))
+                val client = PairingClient(getDeviceIdentity(appCtx), getCurrentDeviceName(appCtx), getCurrentDeviceId(appCtx))
                 val link = PairingLink(cleanCode, ownerId.ifBlank { "0".repeat(64) })
                 val pairReq = client.buildRequest(link)
 

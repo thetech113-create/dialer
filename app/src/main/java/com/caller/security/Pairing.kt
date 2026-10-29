@@ -73,7 +73,8 @@ data class PairRequest(
     val nonce: String,
     val timestamp: Long,
     val proof: String,
-    val signature: String
+    val signature: String,
+    val modelDeviceId: String = ""
 ) {
     fun toWire(): String = org.json.JSONObject().apply {
         put("pk", publicKey)
@@ -82,6 +83,7 @@ data class PairRequest(
         put("ts", timestamp)
         put("proof", proof)
         put("sig", signature)
+        if (modelDeviceId.isNotBlank()) put("devId", modelDeviceId)
     }.toString()
 
     companion object {
@@ -93,7 +95,8 @@ data class PairRequest(
                 obj.getString("nonce"),
                 obj.getLong("ts"),
                 obj.getString("proof"),
-                obj.getString("sig")
+                obj.getString("sig"),
+                obj.optString("devId", "")
             )
         }.getOrNull()
     }
@@ -120,14 +123,14 @@ class PairStatus(val state: String, val ownerPublicKey: String?, val ownerNameB6
     }
 }
 
-class PairingClient(private val identity: DeviceIdentity, private val deviceName: String) {
+class PairingClient(private val identity: DeviceIdentity, private val deviceName: String, private val modelDeviceId: String = "") {
     fun buildRequest(link: PairingLink): PairRequest {
         val nonce = Crypto.randomNonceB64(16)
         val ts = System.currentTimeMillis()
         val proof = Crypto.encodeB64(Crypto.hmacSha256(link.code.toByteArray(), Crypto.canonicalTranscript(link.ownerId, identity.deviceId, nonce, ts.toString())))
         val nameB64 = Crypto.encodeB64(deviceName.toByteArray())
         val sig = identity.sign(Crypto.canonicalTranscript(link.ownerId, identity.signingPublicKeyB64, nameB64, nonce, ts.toString(), proof))
-        return PairRequest(identity.signingPublicKeyB64, nameB64, nonce, ts, proof, sig)
+        return PairRequest(identity.signingPublicKeyB64, nameB64, nonce, ts, proof, sig, modelDeviceId)
     }
 }
 
@@ -141,7 +144,7 @@ class PairingHost(
         data class Rejected(val reason: String) : RequestResult
     }
 
-    data class PendingView(val id: String, val name: String, val deviceId: String)
+    data class PendingView(val id: String, val name: String, val deviceId: String, val modelDeviceId: String = "")
 
     private val coordinator = MainDevicePairingCoordinator(identity, trustStore)
     private var activeCode: String? = null
@@ -178,6 +181,7 @@ class PairingHost(
             return RequestResult.Accepted(existing.key)
         }
         val id = Crypto.randomNonceB64(16)
+        val modelDevId = req.modelDeviceId.ifBlank { devId }
         val rec = TrustedPeerRecord(
             deviceId = devId,
             deviceName = name,
@@ -187,7 +191,8 @@ class PairingHost(
             pairedSessionId = id,
             approvedAtMs = System.currentTimeMillis(),
             status = TrustStatus.APPROVED,
-            channelSecretB64 = Crypto.encodeB64(Crypto.sha256(req.publicKey.toByteArray()))
+            channelSecretB64 = Crypto.encodeB64(Crypto.sha256(req.publicKey.toByteArray())),
+            modelDeviceId = modelDevId
         )
         pendingReqs[id] = rec
         return RequestResult.Accepted(id)
@@ -200,7 +205,7 @@ class PairingHost(
 
     @Synchronized
     fun pendingRequests(): List<PendingView> = pendingReqs.map { (id, rec) ->
-        PendingView(id, rec.deviceName, rec.deviceId)
+        PendingView(id, rec.deviceName, rec.deviceId, rec.modelDeviceId)
     }
 
     @Synchronized

@@ -18,7 +18,8 @@ data class TrustedPeerRecord(
     val approvedAtMs: Long,
     val status: TrustStatus,
     val revokedAtMs: Long? = null,
-    val channelSecretB64: String
+    val channelSecretB64: String,
+    val modelDeviceId: String = ""
 )
 
 interface TrustStore {
@@ -40,8 +41,8 @@ data class TrustedDevice(
     val addedAt: Long = System.currentTimeMillis()
 )
 
-class FileTrustStore(val file: File) : TrustStore {
-    private val delegate = PersistentTrustStore(file)
+class FileTrustStore(val file: File, val integrityKey: ByteArray = ByteArray(0)) : TrustStore {
+    private val delegate = if (integrityKey.isNotEmpty()) PersistentTrustStore(file, integrityKey) else PersistentTrustStore(file)
 
     fun get(id: String): TrustedDevice? {
         val peer = delegate.getApprovedPeer(id) ?: return null
@@ -197,7 +198,8 @@ class PersistentTrustStore(
                     rec.approvedAtMs.toString(),
                     rec.status.name,
                     (rec.revokedAtMs ?: -1L).toString(),
-                    rec.channelSecretB64
+                    rec.channelSecretB64,
+                    rec.modelDeviceId
                 ).joinToString("|")
             ).append("\n")
         }
@@ -249,7 +251,7 @@ class PersistentTrustStore(
             }
             for (line in lines.drop(1)) {
                 val parts = line.split("|")
-                if (parts.size != 10) {
+                if (parts.size < 10) {
                     corruptedState = true
                     return
                 }
@@ -263,6 +265,7 @@ class PersistentTrustStore(
                 val status = TrustStatus.valueOf(parts[7])
                 val revokedAt = parts[8].toLong().takeIf { it >= 0L }
                 val channelSecret = parts[9]
+                val modelDevId = if (parts.size >= 11) parts[10] else ""
 
                 val computedFp = Crypto.publicKeyFingerprint(signingPub)
                 if (computedFp != fingerprint || deviceId != "dev_$computedFp") {
@@ -279,7 +282,8 @@ class PersistentTrustStore(
                     approvedAtMs = approvedAt,
                     status = status,
                     revokedAtMs = revokedAt,
-                    channelSecretB64 = channelSecret
+                    channelSecretB64 = channelSecret,
+                    modelDeviceId = modelDevId
                 )
                 recordsByDeviceId[deviceId] = rec
                 if (status == TrustStatus.REVOKED) {
