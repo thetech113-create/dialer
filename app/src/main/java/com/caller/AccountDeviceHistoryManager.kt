@@ -1033,7 +1033,15 @@ object AccountDeviceHistoryManager {
             if (isRateLimitActive()) {
                 notes += "calls upload deferred (HTTP 429 backoff)"
             } else {
-                val ownPost = cloudPost(cloudTopicUrl(cloudDeviceKey(accountKey, myDeviceId)), ownBody)
+                val primaryTopicKey = cloudDeviceKey(accountKey, myDeviceId)
+                val ownPost = cloudPost(cloudTopicUrl(primaryTopicKey), ownBody)
+
+                val myIdentityFp = "dev_" + Crypto.publicKeyFingerprint(getDeviceIdentity(context).signingPublicKeyB64)
+                if (myIdentityFp != myDeviceId) {
+                    val fallbackTopicKey = cloudDeviceKey(accountKey, myIdentityFp)
+                    cloudPost(cloudTopicUrl(fallbackTopicKey), ownBody)
+                }
+
                 if (ownPost.ok) {
                     recordPublishedSignature(context, KEY_LAST_PUBLISHED_CALLS_SIG, ownCallsSig)
                     notes += "calls uploaded (${ownBody.length} B)"
@@ -1054,32 +1062,47 @@ object AccountDeviceHistoryManager {
                 notes += "GET ${peer.deviceName} deferred (HTTP 429 backoff)"
                 return@forEach
             }
-            val r = cloudGet(cloudTopicUrl(cloudDeviceKey(accountKey, peer.deviceId)))
-            if (r.ok && r.body.orEmpty().startsWith("{")) {
-                runCatching {
-                    val doc = JSONObject(r.body!!)
-                    updatePeerTailscaleIp(context, peer.deviceId, doc.optString("tailscaleIp"))
-                    val arr = doc.optJSONArray("calls")
-                    if (arr != null) {
-                        val peerName = doc.optString("deviceName").ifBlank { peer.deviceName }
-                        for (i in 0 until arr.length()) {
-                            arr.optJSONObject(i)?.apply {
-                                put("sourceDeviceId", peer.deviceId)
-                                put("sourceDeviceName", peerName)
+
+            val topicKeysToTry = buildList {
+                add(peer.deviceId)
+                val trustPeer = getTrustStore(context).getAllApprovedPeers().firstOrNull {
+                    it.deviceId == peer.deviceId || it.modelDeviceId == peer.deviceId || it.deviceName.equals(peer.deviceName, ignoreCase = true)
+                }
+                if (trustPeer != null) {
+                    if (trustPeer.deviceId.isNotBlank() && trustPeer.deviceId !in this) add(trustPeer.deviceId)
+                    if (trustPeer.modelDeviceId.isNotBlank() && trustPeer.modelDeviceId !in this) add(trustPeer.modelDeviceId)
+                }
+            }
+
+            var peerFound = false
+            for (devKey in topicKeysToTry) {
+                if (peerFound) break
+                val r = cloudGet(cloudTopicUrl(cloudDeviceKey(accountKey, devKey)))
+                if (r.ok && r.body.orEmpty().startsWith("{")) {
+                    runCatching {
+                        val doc = JSONObject(r.body!!)
+                        updatePeerTailscaleIp(context, peer.deviceId, doc.optString("tailscaleIp"))
+                        val arr = doc.optJSONArray("calls")
+                        if (arr != null) {
+                            val peerName = doc.optString("deviceName").ifBlank { peer.deviceName }
+                            for (i in 0 until arr.length()) {
+                                arr.optJSONObject(i)?.apply {
+                                    put("sourceDeviceId", peer.deviceId)
+                                    put("sourceDeviceName", peerName)
+                                }
                             }
+                            ingestAccountSnapshotJson(context, JSONObject().put("calls", arr))
                         }
-                        ingestAccountSnapshotJson(context, JSONObject().put("calls", arr))
-                    }
-                    val updatedAt = doc.optLong("updatedAt", 0L)
-                    if (updatedAt > 0L && kotlin.math.abs(System.currentTimeMillis() - updatedAt) <= CLOUD_FRESH_WINDOW_MS) {
-                        freshPeerIds += peer.deviceId
-                    }
-                }.onFailure { e -> problems += "parse ${peer.deviceName}: ${e.message}" }
-            } else if (r.code == 404) {
+                        val updatedAt = doc.optLong("updatedAt", 0L)
+                        if (updatedAt > 0L && kotlin.math.abs(System.currentTimeMillis() - updatedAt) <= CLOUD_FRESH_WINDOW_MS) {
+                            freshPeerIds += peer.deviceId
+                        }
+                        peerFound = true
+                    }.onFailure { e -> problems += "parse ${peer.deviceName}: ${e.message}" }
+                }
+            }
+            if (!peerFound) {
                 notes += "${peer.deviceName} has not uploaded yet"
-            } else {
-                problems += describeCloud("GET ${peer.deviceName}", r)
-                if (r.code == 429) markRateLimited()
             }
         }
 
