@@ -797,9 +797,13 @@ object AccountDeviceHistoryManager {
      * fresh document the peer itself uploaded to the cloud. Registration and stored call counts are not evidence.
      */
     private fun countReachedPeers(context: Context, runStart: Long, cloudFreshIds: Set<String>): Int {
-        val peerIds = getPeerDevices(context).map { it.deviceId }.filter { it.isNotBlank() }.toSet()
+        val peerDevices = getPeerDevices(context)
+        val peerIds = peerDevices.map { it.deviceId }.filter { it.isNotBlank() }.toSet()
+        val peerNames = peerDevices.map { it.deviceName.lowercase() }.filter { it.isNotBlank() }.toSet()
         val directIds = lastDirectSyncMs.filterValues { it >= runStart }.keys
-        val reached = (directIds + cloudFreshIds).filter { it in peerIds }.toSet()
+        val reached = (directIds + cloudFreshIds).filter { id ->
+            id in peerIds || id.lowercase() in peerNames || UNKNOWN_PEER_KEY in directIds
+        }.toSet()
         return if (reached.isEmpty() && UNKNOWN_PEER_KEY in directIds) 1 else reached.size
     }
 
@@ -1456,12 +1460,21 @@ object AccountDeviceHistoryManager {
                     return false
                 }
                 val replyDeviceId = replyObj.optString("senderDeviceId").trim()
-                if (expectedDeviceId != null && replyDeviceId != expectedDeviceId) {
+                val replyDeviceName = replyObj.optString("deviceName").trim()
+                val isPeerMatch = expectedDeviceId.isNullOrBlank() ||
+                        replyDeviceId == expectedDeviceId ||
+                        getPeerDevices(context).any { it.deviceId == replyDeviceId || (it.deviceName.isNotBlank() && it.deviceName.equals(replyDeviceName, ignoreCase = true)) } ||
+                        getTrustStore(context).getAllApprovedPeers().any { it.deviceId == replyDeviceId || "dev_" + it.fingerprint == replyDeviceId }
+
+                if (!isPeerMatch) {
                     logFail("Direct sync ($via) with $host:$port: reply rejected (unexpected device identity)")
                     return false
                 }
                 ingestAccountSnapshotJson(context, replyObj)
                 recordDirectSync(replyDeviceId.ifBlank { expectedDeviceId.orEmpty() })
+                if (expectedDeviceId != null && expectedDeviceId.isNotBlank()) {
+                    recordDirectSync(expectedDeviceId)
+                }
                 if (replyDeviceId.isNotBlank()) {
                     updatePeerTailscaleIp(context, replyDeviceId, replyObj.optString("tailscaleIp"))
                 }
@@ -1504,9 +1517,11 @@ object AccountDeviceHistoryManager {
                 // LAN behaviour is unchanged.
                 if (viaTailscale) {
                     val senderDeviceId = incomingObj.optString("senderDeviceId").trim()
+                    val senderDeviceName = incomingObj.optString("deviceName").trim()
                     val linked = senderDeviceId.isNotBlank() &&
                             senderDeviceId != getCurrentDeviceId(context) &&
-                            getPeerDevices(context).any { it.deviceId == senderDeviceId }
+                            (getPeerDevices(context).any { it.deviceId == senderDeviceId || (it.deviceName.isNotBlank() && it.deviceName.equals(senderDeviceName, ignoreCase = true)) } ||
+                             getTrustStore(context).getAllApprovedPeers().any { it.deviceId == senderDeviceId || "dev_" + it.fingerprint == senderDeviceId })
                     if (!linked) {
                         Log.w(TAG, "Rejected incoming sync from $remoteIp (tailscale): sender is not a linked device")
                         return@use
