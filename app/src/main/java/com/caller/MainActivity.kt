@@ -1096,8 +1096,14 @@ class MainActivity : ComponentActivity() {
                         var showAddContactDialog by remember { mutableStateOf(false) }
                         var addContactPrefillNumber by remember { mutableStateOf("") }
                         var pendingMergedContactDelete by remember { mutableStateOf<Contact?>(null) }
-                        val contactDisplayEntries = remember(uiState.contacts, contactMergeDecisions) {
-                            buildContactDisplayEntries(uiState.contacts, contactMergeDecisions)
+                        val contactDisplayEntries by produceState<List<ContactDisplayEntry>>(
+                            initialValue = emptyList(),
+                            key1 = uiState.contacts,
+                            key2 = contactMergeDecisions
+                        ) {
+                            value = kotlinx.coroutines.withContext(Dispatchers.Default) {
+                                buildContactDisplayEntries(uiState.contacts, contactMergeDecisions)
+                            }
                         }
                         val handleDeleteContact: (Contact) -> Unit = { contact ->
                             val updatedContacts = if (!contact.rawContactId.isNullOrBlank()) {
@@ -3220,25 +3226,27 @@ class MainActivity : ComponentActivity() {
     }
 
     private fun groupRecentCalls(calls: List<RecentCall>): List<GroupedRecentCall> {
-        // This phone's calls and each linked phone's calls are grouped separately, so a number called from
-        // both phones shows once in each section. A linked phone's key is prefixed, so it can never match
-        // (or delete) one of this phone's own rows.
         val grouped = calls.groupBy {
             val numberKey = buildRecentCallerGroupKey(it.phoneNumber)
             if (it.sourceDeviceName.isBlank()) numberKey
             else "peer:${it.sourceDeviceName.trim().lowercase(Locale.ROOT)}:$numberKey"
         }
+        val blocklistPrefs = getBlocklistPreferences()
+        fun isBlocked(num: String): Boolean {
+            val cleanNum = getBlockedNumberKey(num)
+            if (cleanNum.isBlank()) return false
+            return blocklistPrefs.getBoolean(cleanNum, false) ||
+                (cleanNum.length >= 10 && blocklistPrefs.getBoolean(cleanNum.takeLast(10), false))
+        }
+
         return grouped.map { (groupKey, callList) ->
-            // The group's number is what Recents shows and dials, so it must stay the call-log number as
-            // stored. normalizePhoneNumber() is a lookup key (it drops the leading 1 of 11-digit numbers),
-            // and using it here turned 18004190157 into 8004190157.
             val canonicalPhoneNumber = callList.first().phoneNumber.trim().ifBlank {
                 callList.first().phoneNumber
             }
             val providerRowIds = callList.map { it.id }.filter { it.isNotBlank() }.distinct()
             val name = callList.firstOrNull { it.name != "Unknown" }?.name ?: callList.first().name
             val callHistory = callList.map {
-                val isBlockedCall = it.duration <= 0L && isPhoneNumberBlocked(it.phoneNumber)
+                val isBlockedCall = it.duration <= 0L && isBlocked(it.phoneNumber)
                 CallHistoryItem(
                     timestamp = it.timestamp, callType = it.callType, duration = it.duration,
                     formattedTime = formatTimestamp(it.timestamp),
@@ -3251,10 +3259,6 @@ class MainActivity : ComponentActivity() {
                     isTollFree = it.isTollFree
                 )
             }.sortedByDescending { it.timestamp }
-            Log.w(
-                P2P_FORENSIC_TAG,
-                "recent_group_bucket source=groupRecentCalls groupKey=$groupKey bucketSize=${callHistory.size} phone=${maskP2PNumberForLog(canonicalPhoneNumber)} rowIdCount=${providerRowIds.size}"
-            )
             GroupedRecentCall(
                 phoneNumber = canonicalPhoneNumber,
                 name = name,
