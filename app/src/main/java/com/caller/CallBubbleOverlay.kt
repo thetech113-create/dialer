@@ -38,6 +38,8 @@ object CallBubbleOverlay {
     @Volatile
     var isCallActivityVisible: Boolean = false
 
+    private var triggerDot: View? = null
+
     private const val AUTO_COLLAPSE_DELAY_MS = 5000L
     @Volatile private var isExpanded: Boolean = true
 
@@ -52,15 +54,17 @@ object CallBubbleOverlay {
 
     private fun expandBubble() {
         isExpanded = true
-        view?.animate()?.alpha(1.0f)?.setDuration(200L)?.start()
-        nameView?.visibility = View.VISIBLE
+        pillContainer?.visibility = View.VISIBLE
+        pillContainer?.alpha = 1.0f
+        triggerDot?.visibility = View.GONE
         scheduleAutoCollapse()
     }
 
     private fun collapseBubble() {
         isExpanded = false
-        view?.animate()?.alpha(0.35f)?.setDuration(300L)?.start()
-        nameView?.visibility = View.GONE
+        pillContainer?.visibility = View.GONE
+        triggerDot?.visibility = View.VISIBLE
+        triggerDot?.alpha = 0.25f
     }
 
     /**
@@ -377,9 +381,31 @@ object CallBubbleOverlay {
                 }
             }
 
+            val root = android.widget.FrameLayout(appContext)
+
+            val dot = android.widget.ImageView(appContext).apply {
+                setImageResource(R.drawable.ic_phone_vector)
+                contentDescription = "Show call"
+                scaleType = android.widget.ImageView.ScaleType.CENTER_INSIDE
+                setPadding(dp(4), dp(4), dp(4), dp(4))
+                background = GradientDrawable().apply {
+                    shape = GradientDrawable.OVAL
+                    setColor(palette.timerAccentArgb)
+                }
+                layoutParams = android.widget.FrameLayout.LayoutParams(dp(22), dp(22)).apply {
+                    gravity = Gravity.CENTER
+                }
+                alpha = 0.25f
+                visibility = View.GONE
+            }
+            triggerDot = dot
+
             pill.addView(name)
             pill.addView(timer)
             pill.addView(hangUp)
+
+            root.addView(pill)
+            root.addView(dot)
 
             val params = WindowManager.LayoutParams(
                 WindowManager.LayoutParams.WRAP_CONTENT,
@@ -409,7 +435,7 @@ object CallBubbleOverlay {
             var startY = 0
             var dragged = false
 
-            pill.setOnTouchListener { v, event ->
+            root.setOnTouchListener { v, event ->
                 val wasCollapsed = !isExpanded
                 expandBubble()
                 when (event.actionMasked) {
@@ -449,8 +475,8 @@ object CallBubbleOverlay {
             }
 
             try {
-                wm.addView(pill, params)
-                view = pill
+                wm.addView(root, params)
+                view = root
                 handler.removeCallbacks(ticker)
                 if (resolvedConnectMs > 0L) {
                     handler.post(ticker)
@@ -470,6 +496,7 @@ object CallBubbleOverlay {
             ?: (context.applicationContext.getSystemService(Context.WINDOW_SERVICE) as? WindowManager)
         view = null
         pillContainer = null
+        triggerDot = null
         nameView = null
         timerView = null
         windowManagerRef = null
