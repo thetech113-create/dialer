@@ -2158,6 +2158,7 @@ class CallActivity : ComponentActivity() {
     }
 
     override fun onPause() {
+        CallBubbleOverlay.isCallActivityVisible = false
         logCall("InCallActivity.onPause hasActiveCall=${hasLiveCall()}")
         logCallActivityLifecycle("onPause")
         super.onPause()

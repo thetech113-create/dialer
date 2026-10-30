@@ -132,6 +132,7 @@ object CallBubbleOverlay {
                         return
                     }
                     if (isCallActivityVisible) {
+                        hide(ctx)
                         return
                     }
                     val primaryState = intent.getStringExtra("PRIMARY_STATE") ?: "IDLE"

@@ -1917,7 +1917,6 @@ class MyInCallService : InCallService() {
 
                 // Keep our floating call pill attached (a visible TYPE_APPLICATION_OVERLAY window
                 // forces VISIBLE_APP_ADJ priority on MIUI/HyperOS and ColorOS).
-                CallBubbleOverlay.isCallActivityVisible = false
                 startNotificationRepost(forceRefresh = true)
                 syncCalls()
                 showCallBubbleIfNeeded(launchFullScreenWhenOverlayUnavailable = false)
