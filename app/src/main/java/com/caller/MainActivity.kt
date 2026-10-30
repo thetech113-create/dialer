@@ -3286,6 +3286,17 @@ class MainActivity : ComponentActivity() {
             .asSequence()
             .filter { it.sourceDeviceId.isNotBlank() && it.sourceDeviceId != currentDeviceId }
             .forEach { record ->
+                val callType = when (record.callTypeInt) {
+                    Calls.INCOMING_TYPE -> CallType.INCOMING
+                    Calls.MISSED_TYPE, Calls.REJECTED_TYPE -> CallType.MISSED
+                    else -> CallType.OUTGOING
+                }
+
+                if (AccountDeviceHistoryManager.shouldFilterCallHistoryItem(
+                        this@MainActivity, record.remoteNumber, callType, record.sourceDeviceId)) {
+                    return@forEach
+                }
+
                 val numberSnapshot = buildP2PNumberSnapshot(record.remoteNumber)
                 val contactName = numberSnapshot.lookupKeys.firstNotNullOfOrNull { key ->
                     contactMap[key]
@@ -3295,11 +3306,7 @@ class MainActivity : ComponentActivity() {
                 val displayName = contactName?.takeIf { it.isNotBlank() && it != "Unknown" }
                     ?: record.contactName.takeIf { it.isNotBlank() }
                     ?: formatPhoneNumberForDisplay(record.remoteNumber)
-                val callType = when (record.callTypeInt) {
-                    Calls.INCOMING_TYPE -> CallType.INCOMING
-                    Calls.MISSED_TYPE, Calls.REJECTED_TYPE -> CallType.MISSED
-                    else -> CallType.OUTGOING
-                }
+
                 calls.add(
                     RecentCall(
                         id = "peer_${record.sourceDeviceId}_${record.timestamp}_${record.remoteNumber}",

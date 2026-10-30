@@ -1754,10 +1754,12 @@ object AccountDeviceHistoryManager {
 
         val remoteSnapshot = buildP2PNumberSnapshot(remoteNumber)
         val remoteKeys = remoteSnapshot.lookupKeys.toSet()
+        val remoteLast10 = remoteSnapshot.last10
 
         val matchesOwnNumber = ownVerifiedNumbers.any { ownNum ->
-            val ownKeys = buildP2PNumberSnapshot(ownNum).lookupKeys.toSet()
-            ownKeys.intersect(remoteKeys).isNotEmpty()
+            val ownSnap = buildP2PNumberSnapshot(ownNum)
+            (ownSnap.last10.length == 10 && ownSnap.last10 == remoteLast10) ||
+                ownSnap.lookupKeys.toSet().intersect(remoteKeys).isNotEmpty()
         }
 
         if (matchesOwnNumber) {
