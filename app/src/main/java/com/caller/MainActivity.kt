@@ -4707,13 +4707,12 @@ class MainActivity : ComponentActivity() {
 
         val displayRecentCalls = remember(filteredRecentCalls, selectedRecentFilter, selectedDeviceFilter) {
             filteredRecentCalls.filter { groupedCall ->
-                val lastCall = groupedCall.callHistory.firstOrNull() ?: return@filter false
                 val passesTypeFilter = when (selectedRecentFilter) {
                     RecentFilter.ALL -> true
-                    RecentFilter.MISSED -> !lastCall.isBlocked && lastCall.callType == CallType.MISSED
-                    RecentFilter.INCOMING -> !lastCall.isBlocked && lastCall.callType == CallType.INCOMING
-                    RecentFilter.OUTGOING -> !lastCall.isBlocked && lastCall.callType == CallType.OUTGOING
-                    RecentFilter.BLOCKED -> lastCall.isBlocked
+                    RecentFilter.MISSED -> groupedCall.callHistory.any { !it.isBlocked && it.callType == CallType.MISSED }
+                    RecentFilter.INCOMING -> groupedCall.callHistory.any { !it.isBlocked && it.callType == CallType.INCOMING }
+                    RecentFilter.OUTGOING -> groupedCall.callHistory.any { !it.isBlocked && it.callType == CallType.OUTGOING }
+                    RecentFilter.BLOCKED -> groupedCall.callHistory.any { it.isBlocked }
                 }
                 if (!passesTypeFilter) return@filter false
 
@@ -6498,7 +6497,7 @@ class MainActivity : ComponentActivity() {
         }
 
         if (!showDigitResults) {
-            if (isLoading) {
+            if (isLoading && groupedRecentCalls.isEmpty()) {
                 Box(modifier = modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
                     CircularProgressIndicator(color = MaterialTheme.colorScheme.primary)
                 }
