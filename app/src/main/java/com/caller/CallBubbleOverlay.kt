@@ -38,6 +38,31 @@ object CallBubbleOverlay {
     @Volatile
     var isCallActivityVisible: Boolean = false
 
+    private const val AUTO_COLLAPSE_DELAY_MS = 5000L
+    @Volatile private var isExpanded: Boolean = true
+
+    private val autoCollapseRunnable = Runnable {
+        collapseBubble()
+    }
+
+    private fun scheduleAutoCollapse() {
+        handler.removeCallbacks(autoCollapseRunnable)
+        handler.postDelayed(autoCollapseRunnable, AUTO_COLLAPSE_DELAY_MS)
+    }
+
+    private fun expandBubble() {
+        isExpanded = true
+        view?.animate()?.alpha(1.0f)?.setDuration(200L)?.start()
+        nameView?.visibility = View.VISIBLE
+        scheduleAutoCollapse()
+    }
+
+    private fun collapseBubble() {
+        isExpanded = false
+        view?.animate()?.alpha(0.35f)?.setDuration(300L)?.start()
+        nameView?.visibility = View.GONE
+    }
+
     /**
      * Set as soon as the user asks to end a call. Telecom can continue reporting an in-call
      * state while it tears the call down, so that state alone is not safe to use for showing
@@ -385,6 +410,8 @@ object CallBubbleOverlay {
             var dragged = false
 
             pill.setOnTouchListener { v, event ->
+                val wasCollapsed = !isExpanded
+                expandBubble()
                 when (event.actionMasked) {
                     MotionEvent.ACTION_DOWN -> {
                         downX = event.rawX
@@ -411,7 +438,7 @@ object CallBubbleOverlay {
                         true
                     }
                     MotionEvent.ACTION_UP -> {
-                        if (!dragged) {
+                        if (!dragged && !wasCollapsed) {
                             hide(appContext)
                             onOpen()
                         }
@@ -428,6 +455,7 @@ object CallBubbleOverlay {
                 if (resolvedConnectMs > 0L) {
                     handler.post(ticker)
                 }
+                expandBubble()
             } catch (e: Exception) {
                 Log.e(TAG, "show failed on WindowManager: ${e.message}", e)
             }
