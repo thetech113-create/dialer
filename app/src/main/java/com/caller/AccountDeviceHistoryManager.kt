@@ -1071,6 +1071,12 @@ object AccountDeviceHistoryManager {
                     cloudPost(cloudTopicUrl(fallbackTopicKey), ownBody)
                 }
 
+                val myDeviceName = getCurrentDeviceName(context)
+                if (myDeviceName.isNotBlank() && myDeviceName != myDeviceId && myDeviceName != myIdentityFp) {
+                    val nameTopicKey = cloudDeviceKey(accountKey, myDeviceName)
+                    cloudPost(cloudTopicUrl(nameTopicKey), ownBody)
+                }
+
                 if (ownPost.ok) {
                     recordPublishedSignature(context, KEY_LAST_PUBLISHED_CALLS_SIG, ownCallsSig)
                     notes += "calls uploaded (${ownBody.length} B)"
@@ -1093,7 +1099,8 @@ object AccountDeviceHistoryManager {
             }
 
             val topicKeysToTry = buildList {
-                add(peer.deviceId)
+                if (peer.deviceId.isNotBlank()) add(peer.deviceId)
+                if (peer.deviceName.isNotBlank() && peer.deviceName !in this) add(peer.deviceName)
                 val trustPeer = getTrustStore(context).getAllApprovedPeers().firstOrNull {
                     it.deviceId == peer.deviceId || it.modelDeviceId == peer.deviceId ||
                     ("dev_" + it.fingerprint == peer.deviceId) || it.deviceName.equals(peer.deviceName, ignoreCase = true)
@@ -1101,6 +1108,7 @@ object AccountDeviceHistoryManager {
                 if (trustPeer != null) {
                     if (trustPeer.deviceId.isNotBlank() && trustPeer.deviceId !in this) add(trustPeer.deviceId)
                     if (trustPeer.modelDeviceId.isNotBlank() && trustPeer.modelDeviceId !in this) add(trustPeer.modelDeviceId)
+                    if (trustPeer.deviceName.isNotBlank() && trustPeer.deviceName !in this) add(trustPeer.deviceName)
                     if (trustPeer.fingerprint.isNotBlank()) {
                         val fpKey = "dev_" + trustPeer.fingerprint
                         if (fpKey !in this) add(fpKey)
@@ -1735,11 +1743,44 @@ object AccountDeviceHistoryManager {
     fun shouldFilterCallHistoryItem(
         context: Context,
         remoteNumber: String,
-        callType: CallType
+        callType: CallType,
+        sourceDeviceId: String = ""
     ): Boolean {
-        // Calls between linked devices or verified phone numbers must be shown on both devices.
-        // Returning false ensures call logs between Phone A and Phone B are preserved and displayed cleanly.
-        return false
+        // 1. Synced calls from a linked peer device must NEVER be filtered out
+        val myDeviceId = getCurrentDeviceId(context)
+        if (sourceDeviceId.isNotBlank() && sourceDeviceId != myDeviceId) {
+            return false
+        }
+
+        // 2. If filtering is disabled, do not filter
+        if (!isFilteringEnabled(context)) return false
+        if (remoteNumber.isBlank()) return false
+
+        // 3. Do NOT filter calls between linked account devices (Phone A calling Phone B or vice versa)
+        val peerNumbers = getPeerDevices(context).flatMap { it.verifiedNumbers }.map { buildP2PNumberSnapshot(it).last10 }.toSet()
+        val remoteLast10 = buildP2PNumberSnapshot(remoteNumber).last10
+        if (remoteLast10 in peerNumbers) {
+            return false
+        }
+
+        // 4. Only filter if the call is a self-dial from this exact phone to its own local SIM number
+        val ownVerifiedNumbers = getVerifiedNumbers(context)
+        if (ownVerifiedNumbers.isEmpty()) return false
+
+        val remoteSnapshot = buildP2PNumberSnapshot(remoteNumber)
+        val remoteKeys = remoteSnapshot.lookupKeys.toSet()
+
+        val matchesOwnNumber = ownVerifiedNumbers.any { ownNum ->
+            val ownKeys = buildP2PNumberSnapshot(ownNum).lookupKeys.toSet()
+            ownKeys.intersect(remoteKeys).isNotEmpty()
+        }
+        if (!matchesOwnNumber) return false
+
+        Log.w(
+            P2P_FORENSIC_TAG,
+            "account_device_filtering action=hide_entry remoteNumber=${maskP2PNumberForLog(remoteNumber)} device=${getCurrentDeviceName(context)}"
+        )
+        return true
     }
 
     private fun toast(context: Context, msg: String) {
