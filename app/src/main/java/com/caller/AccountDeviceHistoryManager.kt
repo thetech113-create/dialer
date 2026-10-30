@@ -1746,24 +1746,9 @@ object AccountDeviceHistoryManager {
         callType: CallType,
         sourceDeviceId: String = ""
     ): Boolean {
-        // 1. Synced calls from a linked peer device must NEVER be filtered out
-        val myDeviceId = getCurrentDeviceId(context)
-        if (sourceDeviceId.isNotBlank() && sourceDeviceId != myDeviceId) {
-            return false
-        }
-
-        // 2. If filtering is disabled, do not filter
         if (!isFilteringEnabled(context)) return false
         if (remoteNumber.isBlank()) return false
 
-        // 3. Do NOT filter calls between linked account devices (Phone A calling Phone B or vice versa)
-        val peerNumbers = getPeerDevices(context).flatMap { it.verifiedNumbers }.map { buildP2PNumberSnapshot(it).last10 }.toSet()
-        val remoteLast10 = buildP2PNumberSnapshot(remoteNumber).last10
-        if (remoteLast10 in peerNumbers) {
-            return false
-        }
-
-        // 4. Only filter if the call is a self-dial from this exact phone to its own local SIM number
         val ownVerifiedNumbers = getVerifiedNumbers(context)
         if (ownVerifiedNumbers.isEmpty()) return false
 
@@ -1774,13 +1759,16 @@ object AccountDeviceHistoryManager {
             val ownKeys = buildP2PNumberSnapshot(ownNum).lookupKeys.toSet()
             ownKeys.intersect(remoteKeys).isNotEmpty()
         }
-        if (!matchesOwnNumber) return false
 
-        Log.w(
-            P2P_FORENSIC_TAG,
-            "account_device_filtering action=hide_entry remoteNumber=${maskP2PNumberForLog(remoteNumber)} device=${getCurrentDeviceName(context)}"
-        )
-        return true
+        if (matchesOwnNumber) {
+            Log.w(
+                P2P_FORENSIC_TAG,
+                "account_device_filtering action=hide_entry remoteNumber=${maskP2PNumberForLog(remoteNumber)} device=${getCurrentDeviceName(context)}"
+            )
+            return true
+        }
+
+        return false
     }
 
     private fun toast(context: Context, msg: String) {
