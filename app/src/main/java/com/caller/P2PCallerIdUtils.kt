@@ -681,6 +681,7 @@ fun resolveLocalP2PProfile(context: Context): LocalP2PProfile? {
     return null
 }
 
+@android.annotation.SuppressLint("HardwareIds", "MissingPermission")
 private fun resolveDeviceDeclaredNumber(context: Context): String {
     return try {
         val telephonyManager = context.getSystemService(Context.TELEPHONY_SERVICE) as TelephonyManager

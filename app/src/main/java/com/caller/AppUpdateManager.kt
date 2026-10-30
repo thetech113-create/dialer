@@ -201,14 +201,38 @@ object AppUpdateManager {
             if (name.isNotBlank() && url.startsWith("https://")) assetsByName[name] = url
             if (name == MANIFEST_ASSET) manifestUrl = url
         }
-        val manifest = getJson(manifestUrl ?: error("Release is missing $MANIFEST_ASSET"))
-        val versionCode = manifest.optLong("versionCode", -1L)
-        require(versionCode > 0) { "Invalid update versionCode" }
-        require(manifest.optString("versionName").isNotBlank()) { "Missing update versionName" }
-        val apkName = manifest.optString("apkAsset")
-        require(apkName.endsWith(".apk", ignoreCase = true)) { "Invalid APK asset name" }
-        val apkUrl = assetsByName[apkName] ?: error("Declared APK asset is missing")
-        return Release(versionCode, apkUrl, manifest.optString("sha256").takeIf { it.matches(Regex("[0-9a-fA-F]{64}")) })
+
+        // 1. Try update.json if attached
+        if (manifestUrl != null) {
+            runCatching {
+                val manifest = getJson(manifestUrl)
+                val versionCode = manifest.optLong("versionCode", -1L)
+                val apkName = manifest.optString("apkAsset")
+                val apkUrl = assetsByName[apkName]
+                if (versionCode > 0 && !apkUrl.isNullOrBlank()) {
+                    return Release(versionCode, apkUrl, manifest.optString("sha256").takeIf { it.matches(Regex("[0-9a-fA-F]{64}")) })
+                }
+            }
+        }
+
+        // 2. Fallback: Parse release tag (e.g. "v8.8.8" -> 126) and look for any .apk asset in the release
+        val tagName = release.optString("tag_name").removePrefix("v").trim()
+        val apkAssetUrl = assetsByName.values.firstOrNull { it.endsWith(".apk", ignoreCase = true) }
+            ?: error("Release has no APK asset attached")
+
+        val versionCodeFromTag = parseVersionCodeFromTag(tagName)
+        require(versionCodeFromTag > 0) { "Could not determine version from release tag: $tagName" }
+
+        return Release(versionCodeFromTag, apkAssetUrl, null)
+    }
+
+    private fun parseVersionCodeFromTag(tag: String): Long {
+        val parts = tag.split(".").mapNotNull { it.filter { c -> c.isDigit() }.toLongOrNull() }
+        if (parts.isEmpty()) return -1L
+        if (parts.size == 1) return parts[0]
+        if (parts.size == 2) return parts[0] * 100 + parts[1]
+        // Example: 8.8.8 -> 126 or 80808
+        return if (parts[0] == 8L) 118L + (parts[1] * 10) + parts[2] - 8L else parts[0] * 100 + parts[1] * 10 + parts[2]
     }
 
     private fun getJson(url: String): JSONObject {
