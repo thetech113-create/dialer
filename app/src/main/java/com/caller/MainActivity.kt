@@ -1065,14 +1065,25 @@ class MainActivity : ComponentActivity() {
                                 )
                                 checkPermissionsAndLoadContacts()
                             }
-                            if (hasReadContactsPermission()) {
-                                val cached = withContext(Dispatchers.IO) { loadContactsFromPreferences() }
-                                if (cached.isNotEmpty()) {
-                                    uiState = uiState.copy(contacts = cached)
-                                    enqueueDuplicateContactCandidate(cached)
+                            withContext(Dispatchers.IO) {
+                                val cachedContacts = if (hasReadContactsPermission()) loadContactsFromPreferences() else emptyList()
+                                val cachedRecents = if (hasReadCallLogPermission()) loadRecentCallsFromPreferences() else emptyList()
+                                withContext(Dispatchers.Main) {
+                                    if (cachedContacts.isNotEmpty() || cachedRecents.isNotEmpty()) {
+                                        uiState = uiState.copy(
+                                            contacts = cachedContacts.ifEmpty { uiState.contacts },
+                                            groupedRecentCalls = cachedRecents.ifEmpty { uiState.groupedRecentCalls },
+                                            isLoading = false
+                                        )
+                                        if (cachedContacts.isNotEmpty()) {
+                                            enqueueDuplicateContactCandidate(cachedContacts)
+                                        }
+                                    }
                                 }
                             }
-                            uiState = uiState.copy(isLoading = true)
+                            if (uiState.groupedRecentCalls.isEmpty() && uiState.contacts.isEmpty()) {
+                                uiState = uiState.copy(isLoading = true)
+                            }
                             lifecycleScope.launch(Dispatchers.IO) {
                                 kotlinx.coroutines.coroutineScope {
                                     launch {
@@ -2829,6 +2840,101 @@ class MainActivity : ComponentActivity() {
         return contacts.sortedBy { it.name.lowercase() }
     }
 
+    private fun saveRecentCallsToPreferences(grouped: List<GroupedRecentCall>) {
+        runCatching {
+            val jsonArray = JSONArray()
+            grouped.take(150).forEach { item ->
+                jsonArray.put(JSONObject().apply {
+                    put("phoneNumber", item.phoneNumber)
+                    put("name", item.name)
+                    put("groupKey", item.groupKey)
+                    put("sourceDeviceName", item.sourceDeviceName)
+                    val historyArr = JSONArray()
+                    item.callHistory.forEach { h ->
+                        historyArr.put(JSONObject().apply {
+                            put("timestamp", h.timestamp)
+                            put("callType", h.callType.name)
+                            put("duration", h.duration)
+                            put("formattedTime", h.formattedTime)
+                            put("formattedDuration", h.formattedDuration)
+                            put("typeString", h.typeString)
+                            put("isBlocked", h.isBlocked)
+                            put("simLabel", h.simLabel)
+                            put("sourceDeviceName", h.sourceDeviceName)
+                            put("isVideo", h.isVideo)
+                            put("isTollFree", h.isTollFree)
+                        })
+                    }
+                    put("callHistory", historyArr)
+                    val idsArr = JSONArray()
+                    item.providerRowIds.forEach { idsArr.put(it) }
+                    put("providerRowIds", idsArr)
+                })
+            }
+            sharedPreferences.edit().putString("cached_grouped_recent_calls", jsonArray.toString()).apply()
+        }
+    }
+
+    private fun loadRecentCallsFromPreferences(): List<GroupedRecentCall> {
+        val rawJson = sharedPreferences.getString("cached_grouped_recent_calls", null).orEmpty()
+        if (rawJson.isBlank()) return emptyList()
+        return runCatching {
+            val array = JSONArray(rawJson)
+            buildList {
+                for (i in 0 until array.length()) {
+                    val obj = array.optJSONObject(i) ?: continue
+                    val phone = obj.optString("phoneNumber")
+                    val name = obj.optString("name")
+                    val groupKey = obj.optString("groupKey", phone)
+                    val srcDevName = obj.optString("sourceDeviceName", "")
+                    val historyArr = obj.optJSONArray("callHistory")
+                    val historyList = mutableListOf<CallHistoryItem>()
+                    if (historyArr != null) {
+                        for (j in 0 until historyArr.length()) {
+                            val h = historyArr.optJSONObject(j) ?: continue
+                            val callTypeName = h.optString("callType", CallType.INCOMING.name)
+                            val callType = runCatching { CallType.valueOf(callTypeName) }.getOrDefault(CallType.INCOMING)
+                            historyList.add(
+                                CallHistoryItem(
+                                    timestamp = h.optLong("timestamp"),
+                                    callType = callType,
+                                    duration = h.optLong("duration"),
+                                    formattedTime = h.optString("formattedTime"),
+                                    formattedDuration = h.optString("formattedDuration"),
+                                    typeString = h.optString("typeString"),
+                                    isBlocked = h.optBoolean("isBlocked"),
+                                    simLabel = h.optString("simLabel"),
+                                    sourceDeviceName = h.optString("sourceDeviceName"),
+                                    isVideo = h.optBoolean("isVideo"),
+                                    isTollFree = h.optBoolean("isTollFree")
+                                )
+                            )
+                        }
+                    }
+                    val idsArr = obj.optJSONArray("providerRowIds")
+                    val rowIds = mutableListOf<String>()
+                    if (idsArr != null) {
+                        for (k in 0 until idsArr.length()) {
+                            rowIds.add(idsArr.optString(k))
+                        }
+                    }
+                    if (phone.isNotBlank() && historyList.isNotEmpty()) {
+                        add(
+                            GroupedRecentCall(
+                                phoneNumber = phone,
+                                name = name,
+                                callHistory = historyList,
+                                groupKey = groupKey,
+                                providerRowIds = rowIds,
+                                sourceDeviceName = srcDevName
+                            )
+                        )
+                    }
+                }
+            }
+        }.getOrDefault(emptyList())
+    }
+
     private fun loadContacts() {
         if (!hasReadContactsPermission()) {
             Log.w(P2P_FORENSIC_TAG, "contacts_load action=skip reason=missing_READ_CONTACTS")
@@ -3216,6 +3322,7 @@ class MainActivity : ComponentActivity() {
                     isLoading = false
                 )
             }
+            saveRecentCallsToPreferences(groupedCalls)
         } else {
             Log.w(
                 P2P_FORENSIC_TAG,
