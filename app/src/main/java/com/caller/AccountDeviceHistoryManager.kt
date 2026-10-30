@@ -1389,13 +1389,20 @@ object AccountDeviceHistoryManager {
                 )
 
                 if (srcDevId != myDeviceId && srcDevId.isNotBlank()) {
-                    val isDup = existingCalls.any {
+                    val dupIndex = existingCalls.indexOfFirst {
                         buildP2PNumberSnapshot(it.remoteNumber).last10 == buildP2PNumberSnapshot(record.remoteNumber).last10 &&
                                 kotlin.math.abs(it.timestamp - record.timestamp) < 5000L
                     }
-                    if (!isDup) {
-                        // Synced calls stay in this app's own storage only; they are never written into
-                        // Android's call log (that loses which phone made the call and can echo it back).
+                    if (dupIndex >= 0) {
+                        val existing = existingCalls[dupIndex]
+                        if (existing.sourceDeviceId.isBlank() || existing.sourceDeviceName.isBlank() || existing.sourceDeviceId == myDeviceId) {
+                            existingCalls[dupIndex] = existing.copy(
+                                sourceDeviceId = record.sourceDeviceId.ifBlank { existing.sourceDeviceId },
+                                sourceDeviceName = record.sourceDeviceName.ifBlank { existing.sourceDeviceName }
+                            )
+                            newlyMergedCount++
+                        }
+                    } else {
                         existingCalls.add(record)
                         newlyMergedCount++
                     }
@@ -1626,6 +1633,9 @@ object AccountDeviceHistoryManager {
     fun getSyncedCallHistory(context: Context): List<SyncedCallRecord> {
         val rawJson = getPrefs(context).getString(KEY_SYNCED_CALLS_JSON, null).orEmpty()
         if (rawJson.isBlank()) return emptyList()
+        val defaultPeerId = runCatching {
+            getPeerDevices(context).firstOrNull { it.deviceId != getCurrentDeviceId(context) }?.deviceId.orEmpty()
+        }.getOrDefault("")
         return runCatching {
             val array = JSONArray(rawJson)
             buildList {
@@ -1633,6 +1643,9 @@ object AccountDeviceHistoryManager {
                     val obj = array.optJSONObject(i) ?: continue
                     val num = obj.optString("remoteNumber")
                     if (num in setOf("100", "112", "101", "102", "108", "911")) continue
+                    val storedDevId = obj.optString("sourceDeviceId", "").trim()
+                    val devId = storedDevId.ifBlank { defaultPeerId }
+                    val devName = obj.optString("sourceDeviceName", "").ifBlank { "Linked Device" }.trim()
                     add(
                         SyncedCallRecord(
                             remoteNumber = num,
@@ -1640,8 +1653,8 @@ object AccountDeviceHistoryManager {
                             callTypeInt = obj.optInt("callTypeInt", CallLog.Calls.INCOMING_TYPE),
                             timestamp = obj.optLong("timestamp", 0L),
                             durationSec = obj.optLong("durationSec", 0L),
-                            sourceDeviceId = obj.optString("sourceDeviceId", ""),
-                            sourceDeviceName = obj.optString("sourceDeviceName", "Linked Device")
+                            sourceDeviceId = devId,
+                            sourceDeviceName = devName
                         )
                     )
                 }
