@@ -1737,26 +1737,9 @@ object AccountDeviceHistoryManager {
         remoteNumber: String,
         callType: CallType
     ): Boolean {
-        if (!isFilteringEnabled(context)) return false
-        if (remoteNumber.isBlank()) return false
-
-        val ownVerifiedNumbers = getVerifiedNumbers(context)
-        if (ownVerifiedNumbers.isEmpty()) return false
-
-        val remoteSnapshot = buildP2PNumberSnapshot(remoteNumber)
-        val remoteKeys = remoteSnapshot.lookupKeys.toSet()
-
-        val matchesOwnNumber = ownVerifiedNumbers.any { ownNum ->
-            val ownKeys = buildP2PNumberSnapshot(ownNum).lookupKeys.toSet()
-            ownKeys.intersect(remoteKeys).isNotEmpty()
-        }
-        if (!matchesOwnNumber) return false
-
-        Log.w(
-            P2P_FORENSIC_TAG,
-            "account_device_filtering action=hide_entry remoteNumber=${maskP2PNumberForLog(remoteNumber)} device=${getCurrentDeviceName(context)}"
-        )
-        return true
+        // Calls between linked devices or verified phone numbers must be shown on both devices.
+        // Returning false ensures call logs between Phone A and Phone B are preserved and displayed cleanly.
+        return false
     }
 
     private fun toast(context: Context, msg: String) {
