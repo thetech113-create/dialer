@@ -3110,6 +3110,9 @@ class MainActivity : ComponentActivity() {
     private suspend fun loadRecentCalls(requestGen: Long = ++recentCallsRequestGeneration): List<GroupedRecentCall> {
         if (!hasReadCallLogPermission()) {
             Log.w(P2P_FORENSIC_TAG, "recent_calls_load action=skip reason=missing_READ_CALL_LOG")
+            withContext(Dispatchers.Main) {
+                if (uiState.isLoading) uiState = uiState.copy(isLoading = false)
+            }
             return uiState.groupedRecentCalls
         }
         val calls = mutableListOf<RecentCall>()
@@ -3123,6 +3126,7 @@ class MainActivity : ComponentActivity() {
         var resolutionFreshCount = 0
         var resolutionMemoCount: Int
         var unresolvedRows = 0
+        var queryFailed = false
 
         try {
             contentResolver.query(
@@ -3174,7 +3178,10 @@ class MainActivity : ComponentActivity() {
                     if (callRows.size >= 1000) break
                 }
             }
-        } catch (e: Exception) {}
+        } catch (e: Exception) {
+            queryFailed = true
+            Log.e(P2P_FORENSIC_TAG, "recent_calls_query_failed", e)
+        }
 
         // TIME-BASED: App name → System fallback (first 7 days only) → Phone number
         val installTime = dpsPrefs.getLong("app_install_time", System.currentTimeMillis())
@@ -4677,7 +4684,7 @@ class MainActivity : ComponentActivity() {
         val palette = oneUiColors()
         var selectedRecentFilter by remember { mutableStateOf(RecentFilter.ALL) }
         var selectedDeviceFilter by remember { mutableStateOf("ALL") }
-        val peerDevices = remember { AccountDeviceHistoryManager.getPeerDevices(this@MainActivity) }
+        val peerDevices = remember(groupedRecentCalls) { AccountDeviceHistoryManager.getPeerDevices(this@MainActivity) }
         var showClearAllRecentDialog by remember { mutableStateOf(false) }
         var showRecentMenu by remember { mutableStateOf(false) }
         var showLinkDevicesDialog by remember { mutableStateOf(false) }
@@ -4689,6 +4696,14 @@ class MainActivity : ComponentActivity() {
         var verificationNumber by remember { mutableStateOf(verifiedNumber.orEmpty()) }
         var verificationStatus by remember { mutableStateOf("") }
         var verificationWaiting by remember { mutableStateOf(false) }
+
+        LaunchedEffect(peerDevices) {
+            if (selectedDeviceFilter != "ALL" && selectedDeviceFilter != "THIS_PHONE" &&
+                peerDevices.none { it.deviceName.trim().equals(selectedDeviceFilter.trim(), ignoreCase = true) || it.deviceId == selectedDeviceFilter }
+            ) {
+                selectedDeviceFilter = "ALL"
+            }
+        }
 
         LaunchedEffect(verificationWaiting) {
             if (!verificationWaiting) return@LaunchedEffect
@@ -4719,16 +4734,24 @@ class MainActivity : ComponentActivity() {
                 when (selectedDeviceFilter) {
                     "ALL" -> true
                     "THIS_PHONE" -> groupedCall.sourceDeviceName.isBlank()
-                    else -> groupedCall.sourceDeviceName.equals(selectedDeviceFilter, ignoreCase = true)
+                    else -> {
+                        val target = selectedDeviceFilter.trim()
+                        groupedCall.sourceDeviceName.trim().equals(target, ignoreCase = true) ||
+                                peerDevices.any { it.deviceId == selectedDeviceFilter && it.deviceName.trim().equals(groupedCall.sourceDeviceName.trim(), ignoreCase = true) }
+                    }
                 }
             }
         }
-        val emptyFilterTitle = when (selectedRecentFilter) {
-            RecentFilter.ALL -> "No recent calls yet"
-            RecentFilter.MISSED -> "No missed calls"
-            RecentFilter.INCOMING -> "No incoming calls"
-            RecentFilter.OUTGOING -> "No outgoing calls"
-            RecentFilter.BLOCKED -> "No blocked calls"
+        val emptyFilterTitle = when {
+            selectedRecentFilter == RecentFilter.ALL && selectedDeviceFilter != "ALL" ->
+                if (selectedDeviceFilter == "THIS_PHONE") "No calls on this phone" else "No calls for $selectedDeviceFilter"
+            else -> when (selectedRecentFilter) {
+                RecentFilter.ALL -> "No recent calls yet"
+                RecentFilter.MISSED -> "No missed calls"
+                RecentFilter.INCOMING -> "No incoming calls"
+                RecentFilter.OUTGOING -> "No outgoing calls"
+                RecentFilter.BLOCKED -> "No blocked calls"
+            }
         }
         val searchVisible = showRecentSearch || recentSearchQuery.isNotEmpty()
 
