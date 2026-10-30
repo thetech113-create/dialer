@@ -2,7 +2,6 @@ package com.caller
 
 import com.caller.security.*
 import android.Manifest
-import android.content.ContentValues
 import android.content.Context
 import android.content.pm.PackageManager
 import android.os.Build
@@ -491,8 +490,7 @@ object AccountDeviceHistoryManager {
     fun getPeerDevices(context: Context): List<AccountDeviceRegistration> {
         val prefs = getPrefs(context)
         val rawJson = prefs.getString(KEY_PEER_DEVICES_JSON, null).orEmpty()
-        if (rawJson.isBlank()) return emptyList()
-        return runCatching {
+        val stored = if (rawJson.isBlank()) emptyList() else runCatching {
             val array = JSONArray(rawJson)
             buildList {
                 for (i in 0 until array.length()) {
@@ -519,6 +517,37 @@ object AccountDeviceHistoryManager {
                 }
             }
         }.getOrDefault(emptyList())
+
+        val myAccountId = getAccountId(context)
+        val myDeviceId = getCurrentDeviceId(context)
+        val approvedTrustPeers = runCatching { getTrustStore(context).getAllApprovedPeers() }.getOrDefault(emptyList())
+
+        if (approvedTrustPeers.isEmpty()) return stored
+
+        val result = stored.toMutableList()
+        for (tp in approvedTrustPeers) {
+            val primaryId = tp.deviceId.ifBlank { "dev_" + tp.fingerprint }
+            if (primaryId == myDeviceId) continue
+            val exists = result.any {
+                it.deviceId == primaryId ||
+                (tp.modelDeviceId.isNotBlank() && it.deviceId == tp.modelDeviceId) ||
+                (tp.fingerprint.isNotBlank() && it.deviceId == "dev_" + tp.fingerprint) ||
+                (it.deviceName.equals(tp.deviceName, ignoreCase = true))
+            }
+            if (!exists) {
+                result.add(
+                    AccountDeviceRegistration(
+                        accountId = myAccountId,
+                        deviceId = primaryId,
+                        deviceName = tp.deviceName.ifBlank { "Account Phone" },
+                        verifiedNumbers = emptyList(),
+                        lastSyncTimestamp = tp.approvedAtMs,
+                        tailscaleIp = ""
+                    )
+                )
+            }
+        }
+        return result
     }
 
     fun getLastAccountSyncTime(context: Context): Long =
@@ -1066,11 +1095,16 @@ object AccountDeviceHistoryManager {
             val topicKeysToTry = buildList {
                 add(peer.deviceId)
                 val trustPeer = getTrustStore(context).getAllApprovedPeers().firstOrNull {
-                    it.deviceId == peer.deviceId || it.modelDeviceId == peer.deviceId || it.deviceName.equals(peer.deviceName, ignoreCase = true)
+                    it.deviceId == peer.deviceId || it.modelDeviceId == peer.deviceId ||
+                    ("dev_" + it.fingerprint == peer.deviceId) || it.deviceName.equals(peer.deviceName, ignoreCase = true)
                 }
                 if (trustPeer != null) {
                     if (trustPeer.deviceId.isNotBlank() && trustPeer.deviceId !in this) add(trustPeer.deviceId)
                     if (trustPeer.modelDeviceId.isNotBlank() && trustPeer.modelDeviceId !in this) add(trustPeer.modelDeviceId)
+                    if (trustPeer.fingerprint.isNotBlank()) {
+                        val fpKey = "dev_" + trustPeer.fingerprint
+                        if (fpKey !in this) add(fpKey)
+                    }
                 }
             }
 
@@ -1516,7 +1550,7 @@ object AccountDeviceHistoryManager {
                 }
                 ingestAccountSnapshotJson(context, replyObj)
                 recordDirectSync(replyDeviceId.ifBlank { expectedDeviceId.orEmpty() })
-                if (expectedDeviceId != null && expectedDeviceId.isNotBlank()) {
+                if (!expectedDeviceId.isNullOrBlank()) {
                     recordDirectSync(expectedDeviceId)
                 }
                 if (replyDeviceId.isNotBlank()) {

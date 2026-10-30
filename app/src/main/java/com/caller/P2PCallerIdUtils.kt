@@ -464,7 +464,7 @@ fun lookupP2PPeerCapability(context: Context, phoneNumber: String, trigger: Stri
             )
         }
 
-        prefs.edit().remove(key).commit()
+        prefs.edit().remove(key).apply()
         Log.w(
             P2P_FORENSIC_TAG,
             "capability_cleanup trigger=$trigger removedKey=${maskP2PNumberForLog(key)} reason=expired_or_invalid"
@@ -520,7 +520,7 @@ fun lookupP2PTransportPreference(context: Context, phoneNumber: String, trigger:
             )
         }
 
-        prefs.edit().remove(key).commit()
+        prefs.edit().remove(key).apply()
         Log.w(
             P2P_FORENSIC_TAG,
             "transport_pref_cleanup trigger=$trigger removedKey=${maskP2PNumberForLog(key)} reason=expired_or_invalid"
@@ -738,7 +738,7 @@ fun lookupP2PCache(context: Context, phoneNumber: String, trigger: String): P2PC
             )
         }
 
-        prefs.edit().remove(key).commit()
+        prefs.edit().remove(key).apply()
         Log.w(
             P2P_FORENSIC_TAG,
             "cache_cleanup trigger=$trigger removedKey=${maskP2PNumberForLog(key)} reason=expired_or_invalid"

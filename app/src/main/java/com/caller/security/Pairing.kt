@@ -452,7 +452,28 @@ class MainDevicePairingCoordinator(
         var stage: PendingSessionStage,
         var failedCodeAttempts: Int = 0,
         var verifiedCodeValue: String? = null
-    )
+    ) {
+        override fun equals(other: Any?): Boolean {
+            if (this === other) return true
+            if (javaClass != other?.javaClass) return false
+            other as InternalPendingSession
+            if (request != other.request) return false
+            if (!coreTranscript.contentEquals(other.coreTranscript)) return false
+            if (stage != other.stage) return false
+            if (failedCodeAttempts != other.failedCodeAttempts) return false
+            if (verifiedCodeValue != other.verifiedCodeValue) return false
+            return true
+        }
+
+        override fun hashCode(): Int {
+            var result = request.hashCode()
+            result = 31 * result + coreTranscript.contentHashCode()
+            result = 31 * result + stage.hashCode()
+            result = 31 * result + failedCodeAttempts
+            result = 31 * result + verifiedCodeValue.hashCode()
+            return result
+        }
+    }
 
     private val lock = Any()
     private val pendingBySessionId = LinkedHashMap<String, InternalPendingSession>()

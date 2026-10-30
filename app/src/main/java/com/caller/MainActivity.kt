@@ -1073,16 +1073,22 @@ class MainActivity : ComponentActivity() {
                                 }
                             }
                             uiState = uiState.copy(isLoading = true)
-                            CoroutineScope(Dispatchers.IO).launch {
-                                if (hasReadContactsPermission()) {
-                                    loadContacts()
-                                } else {
-                                    Log.w(P2P_FORENSIC_TAG, "default_ui_bootstrap action=skip_contacts reason=missing_READ_CONTACTS")
-                                }
-                                if (hasReadCallLogPermission()) {
-                                    loadRecentCalls()
-                                } else {
-                                    Log.w(P2P_FORENSIC_TAG, "default_ui_bootstrap action=skip_calllog reason=missing_READ_CALL_LOG")
+                            lifecycleScope.launch(Dispatchers.IO) {
+                                kotlinx.coroutines.coroutineScope {
+                                    launch {
+                                        if (hasReadContactsPermission()) {
+                                            loadContacts()
+                                        } else {
+                                            Log.w(P2P_FORENSIC_TAG, "default_ui_bootstrap action=skip_contacts reason=missing_READ_CONTACTS")
+                                        }
+                                    }
+                                    launch {
+                                        if (hasReadCallLogPermission()) {
+                                            loadRecentCalls()
+                                        } else {
+                                            Log.w(P2P_FORENSIC_TAG, "default_ui_bootstrap action=skip_calllog reason=missing_READ_CALL_LOG")
+                                        }
+                                    }
                                 }
                             }
                         }
@@ -3107,10 +3113,6 @@ class MainActivity : ComponentActivity() {
                 return@forEach
             }
             val numberSnapshot = buildP2PNumberSnapshot(row.phoneNumber)
-            Log.d("RecentCalls_Debug", "Number: ${row.phoneNumber} | Lookup keys: ${numberSnapshot.lookupKeys}")
-            // contactMap also files a saved 18004190157 under 8004190157 (its lookupKeys drop the leading 1),
-            // so a key hit alone gave 8004190157 that contact's name. Only accept a contact whose number is
-            // the same Recent identity as this row.
             val rowIdentity = buildRecentCallerGroupKey(row.phoneNumber)
 
             // Check app stored name first
@@ -3119,13 +3121,11 @@ class MainActivity : ComponentActivity() {
                     ?.takeIf { buildRecentCallerGroupKey(it.phoneNumber) == rowIdentity }
                     ?.name
                 val prefsName = dpsPrefs.getString(key, null)
-                Log.d("RecentCalls_Debug", "  Key: $key | ContactMap: $contactMapName | Prefs: $prefsName")
 
                 contactMapName?.takeIf { it.isNotBlank() && it != "Unknown" }
                     ?: prefsName?.takeIf { it.isNotBlank() && it != "Unknown" }
             }
             // Then the name the caller shared over P2P, shown for a few hours after it arrived.
-            // Memo per Recent identity: last10 is 8004190157 for both 18004190157 and 8004190157.
             val p2pMemoKey = rowIdentity
             val appName = storedName ?: if (p2pNameMemo.containsKey(p2pMemoKey)) {
                 p2pNameMemo[p2pMemoKey]
@@ -3133,16 +3133,11 @@ class MainActivity : ComponentActivity() {
                 lookupRecentP2PName(this@MainActivity, row.phoneNumber, RECENTS_P2P_NAME_WINDOW_MS)
                     .also { p2pNameMemo[p2pMemoKey] = it }
             }
-            Log.d("RecentCalls_Debug", "Final appName for ${row.phoneNumber}: $appName")
 
             val displayName = appName ?: if (allowSystemFallback) {
-                // Within 7 days → use system name as fallback ONLY if no app name
                 val sysName = getSystemContactName(row.phoneNumber, this@MainActivity)
-                Log.d("RecentCalls_Debug", "Using system fallback for ${row.phoneNumber}: $sysName")
                 sysName ?: formatPhoneNumberForDisplay(row.phoneNumber)
             } else {
-                // After 7 days → NO system fallback, phone only
-                // Shown as the title, so format it like the number line under it (was 8004190157 over +918004190157).
                 formatPhoneNumberForDisplay(row.phoneNumber)
             }
 
@@ -3209,7 +3204,11 @@ class MainActivity : ComponentActivity() {
         if (requestGen >= recentCallsAppliedGeneration) {
             recentCallsAppliedGeneration = requestGen
             withContext(Dispatchers.Main) {
-                uiState = uiState.copy(recentCalls = calls, groupedRecentCalls = groupedCalls)
+                uiState = uiState.copy(
+                    recentCalls = calls,
+                    groupedRecentCalls = groupedCalls,
+                    isLoading = false
+                )
             }
         } else {
             Log.w(
