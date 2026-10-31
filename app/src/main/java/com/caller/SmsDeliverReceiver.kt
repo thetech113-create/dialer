@@ -57,12 +57,34 @@ class SmsDeliverReceiver : BroadcastReceiver() {
 
         // 4. In-memory deduplication guard (blocks double-broadcasts within 10 seconds)
         val signature = "${sender.trim().uppercase()}|${fullBody.hashCode()}"
-        val previousTime = recentSmsCache.put(signature, now)
+        val previousTime = recentSmsCache[signature]
         if (previousTime != null && (now - previousTime) < DEDUP_WINDOW_MS) {
             Log.w(TAG, "Blocked duplicate in-memory SMS from $sender")
             return
         }
+        recentSmsCache[signature] = now
         recentSmsCache.entries.removeIf { now - it.value > 60_000L }
+
+        // Do the slow work (DB write, relay, spam check, contact lookup) off the main thread.
+        val pendingResult = goAsync()
+        Thread {
+            try {
+                processIncoming(context, intent, sender, fullBody, timestamp)
+            } catch (e: Exception) {
+                Log.e(TAG, "Error processing SMS", e)
+            } finally {
+                pendingResult.finish()
+            }
+        }.start()
+    }
+
+    private fun processIncoming(
+        context: Context,
+        intent: Intent,
+        sender: String,
+        fullBody: String,
+        timestamp: Long
+    ) {
 
         // 5. Store message into system SMS database (with DB deduplication check)
         persistIncomingSmsFromIntent(context, intent)

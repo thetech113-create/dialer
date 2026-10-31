@@ -44,16 +44,12 @@ class SmsMonitoringService : Service() {
         super.onCreate()
         UltraForensicLogger.debug("SMS Monitoring Service created")
         Log.w(TAG, "Service onCreate called")
-        registerReceivers()
+        // Receivers are declared in the manifest; registering them again caused double delivery.
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         UltraForensicLogger.debug("SMS Monitoring Service started")
         Log.w(TAG, "Service onStartCommand called")
-
-        if (intent == null) {
-            registerReceivers()
-        }
 
         return START_STICKY_COMPATIBILITY
     }

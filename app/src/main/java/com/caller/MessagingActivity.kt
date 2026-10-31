@@ -264,7 +264,6 @@ class MessagingActivity : ComponentActivity() {
         setIntent(intent)
         validateRoleAndSyncState(triggerAutoPromptIfLost = false)
         updateComposeIntent(intent)
-        refreshKey++
     }
 
     override fun onStart() {
@@ -351,8 +350,6 @@ class MessagingActivity : ComponentActivity() {
         }
         if (preservedThreadId.isNotBlank() && selectedConversationThreadId.isBlank()) {
             selectedConversationThreadId = preservedThreadId
-        } else if (selectedConversationThreadId.isBlank() && composeAddress.isNotBlank() && hasReadSmsPermission(this)) {
-            selectedConversationThreadId = getThreadIdForNumber(composeAddress)
         }
         needsRestoreOnRoleGrant = false
     }
@@ -501,22 +498,15 @@ class MessagingActivity : ComponentActivity() {
     }
 
     private fun loadConversationThread(phoneNumber: String) {
-        try {
-            val resolvedThreadId = if (isDefaultSmsRoleHeld && hasReadSmsPermission(this)) {
-                getThreadIdForNumber(phoneNumber)
-            } else {
-                ""
-            }
-            composeAddress = phoneNumber
-            composeBody = ""
-            selectedConversationThreadId = resolvedThreadId
-            preservedComposeAddress = phoneNumber
-            preservedComposeBody = ""
-            preservedThreadId = resolvedThreadId
-            Log.w("MessagingActivity", "Loading conversation for $phoneNumber (threadId=$resolvedThreadId)")
-        } catch (e: Exception) {
-            Log.w("MessagingActivity", "Error loading conversation thread for $phoneNumber", e)
-        }
+        // No thread-id lookup here: it scanned every SMS thread on the main thread and the
+        // UI discards the result anyway (the conversation loads by address).
+        composeAddress = phoneNumber
+        composeBody = ""
+        selectedConversationThreadId = ""
+        preservedComposeAddress = phoneNumber
+        preservedComposeBody = ""
+        preservedThreadId = ""
+        Log.w("MessagingActivity", "Opening conversation for $phoneNumber")
     }
 
     private fun getThreadIdForNumber(phoneNumber: String): String {
