@@ -79,11 +79,21 @@ fun hasSendSmsPermission(context: Context): Boolean {
 fun extractSmsAddress(intent: Intent?): String {
     if (intent == null) return ""
     val directExtra = intent.getStringExtra(EXTRA_SMS_ADDRESS).orEmpty()
+        .ifBlank { intent.getStringExtra("address").orEmpty() }
+        .ifBlank { intent.getStringExtra("phoneNumber").orEmpty() }
+        .ifBlank { intent.getStringExtra("recipient").orEmpty() }
     if (directExtra.isNotBlank()) return directExtra
 
-    val schemeSpecificPart = intent.data?.schemeSpecificPart.orEmpty()
-    if (schemeSpecificPart.isNotBlank()) {
-        return Uri.decode(schemeSpecificPart).substringBefore('?').trim()
+    val data = intent.data
+    if (data != null) {
+        val ssp = data.schemeSpecificPart.orEmpty()
+        if (ssp.isNotBlank()) {
+            return Uri.decode(ssp).substringBefore('?').trim()
+        }
+        val path = data.path.orEmpty().removePrefix("/")
+        if (path.isNotBlank()) {
+            return Uri.decode(path).substringBefore('?').trim()
+        }
     }
 
     return Uri.decode(intent.getStringExtra(Intent.EXTRA_PHONE_NUMBER).orEmpty()).trim()

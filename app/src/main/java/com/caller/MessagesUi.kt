@@ -641,9 +641,6 @@ private fun MessageConversationPage(
             isConversationLoading = false
             return@LaunchedEffect
         }
-        if (composeAddress.isBlank()) {
-            return@LaunchedEffect
-        }
         isConversationLoading = true
         conversationMessages = withContext(Dispatchers.IO) {
             runCatching {

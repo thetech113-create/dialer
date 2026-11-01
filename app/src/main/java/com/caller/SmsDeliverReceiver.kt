@@ -7,6 +7,7 @@ import android.app.PendingIntent
 import android.content.BroadcastReceiver
 import android.content.Context
 import android.content.Intent
+import android.net.Uri
 import android.content.pm.PackageManager
 import android.os.Build
 import android.provider.Telephony
@@ -169,8 +170,11 @@ class SmsDeliverReceiver : BroadcastReceiver() {
 
             val intent = Intent(context, MessagingActivity::class.java).apply {
                 action = ACTION_OPEN_MESSAGES
+                data = Uri.parse("smsto:$phoneNumber")
                 putExtra(EXTRA_SMS_ADDRESS, phoneNumber)
-                addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TOP)
+                putExtra("address", phoneNumber)
+                putExtra("phoneNumber", phoneNumber)
+                addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TOP or Intent.FLAG_ACTIVITY_SINGLE_TOP)
             }
 
             val pendingIntent = PendingIntent.getActivity(
