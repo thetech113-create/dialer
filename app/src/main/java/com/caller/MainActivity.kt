@@ -3437,8 +3437,7 @@ class MainActivity : ComponentActivity() {
         val action = currentIntent.action.orEmpty()
 
         if (action == "android.telecom.action.POST_CALL" ||
-            action == POWER_END_RECOVERY_ACTION ||
-            action == "OPEN_RECENTS"
+            action == POWER_END_RECOVERY_ACTION
         ) {
             Log.w(P2P_FORENSIC_TAG, "Blocked post-call auto-launch intent action=$action")
             setIntent(Intent(this, MainActivity::class.java))
@@ -3450,8 +3449,8 @@ class MainActivity : ComponentActivity() {
 
         intent?.let { intent ->
             if (isPhoneLauncherIntent(intent)) {
+                // Data refresh must never control navigation: keep the user's selected tab.
                 uiState = uiState.copy(
-                    selectedTab = TAB_RECENTS,
                     prefilledNumber = "",
                     recentSearchQuery = "",
                     recentDialpadVisible = false,
