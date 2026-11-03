@@ -2767,6 +2767,30 @@ class MainActivity : ComponentActivity() {
         dismissXiaomiOtherPermissionsPrompt()
     }
 
+    fun openOppoColorOsSettings() {
+        val packageUri = Uri.fromParts("package", packageName, null)
+        val oppoAutoStartIntent = Intent().apply {
+            component = ComponentName(
+                "com.coloros.safecenter",
+                "com.coloros.safecenter.permission.startup.StartupAppListActivity"
+            )
+            addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+        }
+        val appDetailsIntent = Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS).apply {
+            data = packageUri
+        }
+        try {
+            startActivity(oppoAutoStartIntent)
+            Toast.makeText(this, "Enable Auto-launch and Lock App in Recents for ColorOS", Toast.LENGTH_LONG).show()
+        } catch (_: Exception) {
+            try {
+                startActivity(appDetailsIntent)
+            } catch (fallbackError: Exception) {
+                Log.e(P2P_FORENSIC_TAG, "oppo_settings_prompt action=open failure: ${fallbackError.message}")
+            }
+        }
+    }
+
     private fun requestIgnoreBatteryOptimizations() {
         if (Build.VERSION.SDK_INT < Build.VERSION_CODES.M) {
             showBatteryOptimizationPrompt = false
