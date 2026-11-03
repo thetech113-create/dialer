@@ -254,7 +254,6 @@
 
         <service
             android:name=".MyInCallService"
-            android:process=":incall"
             android:label="@string/launcher_phone_label"
             android:permission="android.permission.BIND_INCALL_SERVICE"
             android:directBootAware="true"
