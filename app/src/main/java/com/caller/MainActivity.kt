@@ -3504,7 +3504,7 @@ class MainActivity : ComponentActivity() {
 
         intent?.let { intent ->
             if (isPhoneLauncherIntent(intent)) {
-                // Data refresh must never control navigation: keep the user's selected tab.
+                // Opening the app must not change the user's selected tab.
                 uiState = uiState.copy(
                     prefilledNumber = "",
                     recentSearchQuery = "",
