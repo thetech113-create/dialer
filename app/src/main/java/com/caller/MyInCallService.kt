@@ -2891,6 +2891,14 @@ class MyInCallService : InCallService() {
                 // EXACT FIX: Guard terminal snapshot against transient unbinds
                 if (isReallyDisconnected) {
                     runCatching { AccountDeviceHistoryManager.syncAccountNow(this, showToast = false) }
+                    // Data only: refresh the persisted Recents cache once Android has logged the call. No UI/navigation.
+                    runCatching {
+                        val callStartedAtMs = (if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) call.details?.creationTimeMillis else null)
+                            ?.takeIf { it > 0L }
+                            ?: call.details?.connectTimeMillis?.takeIf { it > 0L }
+                            ?: (System.currentTimeMillis() - 60_000L)
+                        RecentsBackgroundSync.schedule(this, callStartedAtMs, "onCallRemoved")
+                    }
                     if (lastTerminalUiSnapshot?.primaryCallId != callId) {
                         captureTerminalUiSnapshot(call, "onCallRemoved_fallback")
                     }

@@ -558,6 +558,354 @@ private fun normalizeDuplicateContactName(name: String): String {
     return name.trim().lowercase(Locale.getDefault()).replace(Regex("\\s+"), " ")
 }
 
+private val recentsTimeFormatter = SimpleDateFormat("h:mm a", Locale.getDefault())
+
+private fun formatTimestamp(timestamp: Long): String {
+    val callDate = Date(timestamp)
+    return synchronized(recentsTimeFormatter) { recentsTimeFormatter.format(callDate) }
+}
+
+private fun formatCallDuration(durationSeconds: Long, callType: CallType): String {
+    if (callType == CallType.MISSED) return "Missed call"
+    if (durationSeconds <= 0L) return "Didn't connect"
+    val mins = durationSeconds / 60
+    val secs = durationSeconds % 60
+    return if (mins > 0) "Talked $mins min $secs sec" else "Talked $secs sec"
+}
+
+private fun callTypeToString(callType: String): String = callType
+
+private fun getBlockedNumberKey(phoneNumber: String): String {
+    return phoneNumber.filter { it.isDigit() }
+}
+
+private fun buildContactLookupMap(contacts: List<Contact>): Map<String, Contact> {
+    val contactMap = linkedMapOf<String, Contact>()
+    contacts.forEach { contact ->
+        val snapshot = buildP2PNumberSnapshot(contact.phoneNumber)
+        snapshot.lookupKeys.forEach { key ->
+            if (key.isNotBlank() && key !in contactMap) {
+                contactMap[key] = contact
+            }
+        }
+    }
+    return contactMap
+}
+
+private fun blocklistPreferencesFor(context: Context): SharedPreferences {
+    val safeContext = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.N) {
+        context.createDeviceProtectedStorageContext()
+    } else {
+        context
+    }
+    return safeContext.getSharedPreferences("local_spam_blocklist", Context.MODE_PRIVATE)
+}
+
+private fun groupRecentCallsFor(context: Context, calls: List<RecentCall>): List<GroupedRecentCall> {
+    val grouped = calls.groupBy {
+        val numberKey = buildRecentCallerGroupKey(it.phoneNumber)
+        if (it.sourceDeviceName.isBlank()) numberKey
+        else "peer:${it.sourceDeviceName.trim().lowercase(Locale.ROOT)}:$numberKey"
+    }
+    val blocklistPrefs = blocklistPreferencesFor(context)
+    fun isBlocked(num: String): Boolean {
+        val cleanNum = getBlockedNumberKey(num)
+        if (cleanNum.isBlank()) return false
+        return blocklistPrefs.getBoolean(cleanNum, false) ||
+            (cleanNum.length >= 10 && blocklistPrefs.getBoolean(cleanNum.takeLast(10), false))
+    }
+
+    return grouped.map { (groupKey, callList) ->
+        val canonicalPhoneNumber = callList.first().phoneNumber.trim().ifBlank {
+            callList.first().phoneNumber
+        }
+        val providerRowIds = callList.map { it.id }.filter { it.isNotBlank() }.distinct()
+        val name = callList.firstOrNull { it.name != "Unknown" }?.name ?: callList.first().name
+        val callHistory = callList.map {
+            val isBlockedCall = it.duration <= 0L && isBlocked(it.phoneNumber)
+            CallHistoryItem(
+                timestamp = it.timestamp, callType = it.callType, duration = it.duration,
+                formattedTime = formatTimestamp(it.timestamp),
+                formattedDuration = if (isBlockedCall) "Blocked" else formatCallDuration(it.duration, it.callType),
+                typeString = if (isBlockedCall) "Blocked" else callTypeToString(it.callType.name),
+                isBlocked = isBlockedCall,
+                simLabel = it.simLabel,
+                sourceDeviceName = it.sourceDeviceName,
+                isVideo = it.isVideo,
+                isTollFree = it.isTollFree
+            )
+        }.sortedByDescending { it.timestamp }
+        GroupedRecentCall(
+            phoneNumber = canonicalPhoneNumber,
+            name = name,
+            callHistory = callHistory,
+            groupKey = groupKey,
+            providerRowIds = providerRowIds,
+            sourceDeviceName = callList.first().sourceDeviceName.trim()
+        )
+    }.sortedByDescending { it.callHistory.first().timestamp }
+}
+
+internal fun loadContactsFromRecentsPrefs(prefs: SharedPreferences): List<Contact> {
+    val jsonString = prefs.getString("cached_contacts", null) ?: return emptyList()
+    val contacts = mutableListOf<Contact>()
+    val seenNumbers = mutableSetOf<String>()
+    try {
+        val jsonArray = JSONArray(jsonString)
+        for (i in 0 until jsonArray.length()) {
+            val obj = jsonArray.getJSONObject(i)
+            val phoneNumber = obj.getString("phoneNumber")
+            val normalized = "${obj.getString("id")}|${buildP2PNumberSnapshot(phoneNumber).normalized}"
+            if (phoneNumber.isNotEmpty() && isSafePhoneNumber(phoneNumber) && normalized !in seenNumbers) {
+                val photoUri = if (obj.has("photoUri")) obj.getString("photoUri") else null
+                val rawContactId = if (obj.has("rawContactId")) obj.getString("rawContactId") else null
+                contacts.add(Contact(obj.getString("id"), obj.getString("name"), phoneNumber, photoUri, rawContactId))
+                seenNumbers.add(normalized)
+            }
+        }
+    } catch (e: Exception) {}
+
+    return contacts.sortedBy { it.name.lowercase() }
+}
+
+internal fun saveGroupedRecentCallsCache(prefs: SharedPreferences, grouped: List<GroupedRecentCall>) {
+    runCatching {
+        val jsonArray = JSONArray()
+        grouped.take(150).forEach { item ->
+            jsonArray.put(JSONObject().apply {
+                put("phoneNumber", item.phoneNumber)
+                put("name", item.name)
+                put("groupKey", item.groupKey)
+                put("sourceDeviceName", item.sourceDeviceName)
+                val historyArr = JSONArray()
+                item.callHistory.forEach { h ->
+                    historyArr.put(JSONObject().apply {
+                        put("timestamp", h.timestamp)
+                        put("callType", h.callType.name)
+                        put("duration", h.duration)
+                        put("formattedTime", h.formattedTime)
+                        put("formattedDuration", h.formattedDuration)
+                        put("typeString", h.typeString)
+                        put("isBlocked", h.isBlocked)
+                        put("simLabel", h.simLabel)
+                        put("sourceDeviceName", h.sourceDeviceName)
+                        put("isVideo", h.isVideo)
+                        put("isTollFree", h.isTollFree)
+                    })
+                }
+                put("callHistory", historyArr)
+                val idsArr = JSONArray()
+                item.providerRowIds.forEach { idsArr.put(it) }
+                put("providerRowIds", idsArr)
+            })
+        }
+        prefs.edit().putString("cached_grouped_recent_calls", jsonArray.toString()).apply()
+    }
+}
+
+internal class RecentCallsSnapshot(
+    val calls: List<RecentCall>,
+    val grouped: List<GroupedRecentCall>,
+    val queryFailed: Boolean
+)
+
+@Suppress("RedundantVariableInitializer", "CanBeVal", "RemoveRedundantQualifierName")
+internal fun buildRecentCallsSnapshot(context: Context, contacts: List<Contact>): RecentCallsSnapshot {
+    val calls = mutableListOf<RecentCall>()
+    val callRows = mutableListOf<RecentCallRow>()
+    val safeContext = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.N) context.createDeviceProtectedStorageContext() ?: context else context
+    val contactMap = buildContactLookupMap(contacts)
+    val dpsPrefs = safeContext.getSharedPreferences("dps_bulk_contacts", Context.MODE_PRIVATE)
+    val resolutionCache = linkedMapOf<String, Pair<String, String>>()
+    val resolutionRequests = linkedMapOf<String, RecentCallRow>()
+    val simLabelLookup = DualSimFixes.buildCallLogSimLabelLookup(context)
+    var resolutionFreshCount = 0
+    var resolutionMemoCount: Int
+    var unresolvedRows = 0
+    var queryFailed = false
+
+    try {
+        context.contentResolver.query(
+            Calls.CONTENT_URI,
+            arrayOf(
+                Calls._ID,
+                Calls.NUMBER,
+                Calls.CACHED_NAME,
+                Calls.DATE,
+                Calls.TYPE,
+                Calls.DURATION,
+                Calls.PHONE_ACCOUNT_ID,
+                Calls.PHONE_ACCOUNT_COMPONENT_NAME,
+                Calls.FEATURES
+            ),
+            null, null, Calls.DATE + " DESC"
+        )?.use { c ->
+            while (c.moveToNext()) {
+                var name = c.getString(2) ?: "Unknown"
+                var number = c.getString(1) ?: ""
+                val timestamp = c.getLong(3)
+                val callType = when (c.getInt(4)) {
+                    Calls.OUTGOING_TYPE -> CallType.OUTGOING
+                    Calls.INCOMING_TYPE -> CallType.INCOMING
+                    Calls.MISSED_TYPE -> CallType.MISSED
+                    else -> CallType.OUTGOING
+                }
+                val id = c.getString(0) ?: ""
+
+                if (number.isNotEmpty()) {
+                    val duration = c.getLong(5)
+                    val features = try { c.getInt(8) } catch (_: Exception) { 0 }
+                    val isVideo = (features and Calls.FEATURES_VIDEO) != 0
+                    val isTollFree = !isNumberVideoCallCapable(number)
+                    val row = RecentCallRow(
+                        id = id,
+                        cachedName = name,
+                        phoneNumber = number,
+                        timestamp = timestamp,
+                        callType = callType,
+                        duration = duration,
+                        phoneAccountId = c.getString(6),
+                        phoneAccountComponentName = c.getString(7),
+                        isVideo = isVideo,
+                        isTollFree = isTollFree
+                    )
+                    callRows.add(row)
+                }
+                if (callRows.size >= 1000) break
+            }
+        }
+    } catch (e: Exception) {
+        queryFailed = true
+        Log.e(P2P_FORENSIC_TAG, "recent_calls_query_failed", e)
+    }
+
+    val installTime = dpsPrefs.getLong("app_install_time", System.currentTimeMillis())
+    if (installTime == 0L) {
+        dpsPrefs.edit().putLong("app_install_time", System.currentTimeMillis()).apply()
+    }
+    val daysSinceInstall = (System.currentTimeMillis() - installTime) / (1000 * 60 * 60 * 24)
+    val allowSystemFallback = daysSinceInstall < 7
+
+    val p2pNameMemo = HashMap<String, String?>()
+
+    val trackingSince = simLabelLookup.trackingSince
+    val simSpans: Map<String, LongRange> = run {
+        callRows
+            .filter { trackingSince == 0L || it.timestamp < trackingSince }
+            .filter {
+                !it.phoneAccountId.isNullOrBlank() && (
+                    simLabelLookup.resolve(it.phoneAccountId, it.phoneAccountComponentName).isNotBlank() ||
+                        it.phoneAccountComponentName.orEmpty() in simLabelLookup.simComponents
+                    )
+            }
+            .groupBy { it.phoneAccountId.orEmpty() }
+            .mapValues { (_, rows) -> rows.minOf { it.timestamp }..rows.maxOf { it.timestamp } }
+    }
+    fun simLabelForRow(row: RecentCallRow): String {
+        val label = simLabelLookup.resolve(row.phoneAccountId, row.phoneAccountComponentName)
+        if (label.isBlank()) return ""
+        val rowId = row.phoneAccountId.orEmpty()
+        val otherSimInUse = if (trackingSince != 0L && row.timestamp >= trackingSince) {
+            simLabelLookup.presenceById.any { (id, periods) ->
+                id != rowId && periods.any { row.timestamp in it }
+            }
+        } else {
+            simSpans.any { (id, span) -> id != rowId && row.timestamp in span }
+        }
+        return if (otherSimInUse) label else ""
+    }
+
+    callRows.forEach { row ->
+        if (AccountDeviceHistoryManager.shouldFilterCallHistoryItem(context, row.phoneNumber, row.callType)) {
+            return@forEach
+        }
+        val numberSnapshot = buildP2PNumberSnapshot(row.phoneNumber)
+        val rowIdentity = buildRecentCallerGroupKey(row.phoneNumber)
+
+        val storedName = numberSnapshot.lookupKeys.firstNotNullOfOrNull { key ->
+            val contactMapName = contactMap[key]
+                ?.takeIf { buildRecentCallerGroupKey(it.phoneNumber) == rowIdentity }
+                ?.name
+            val prefsName = dpsPrefs.getString(key, null)
+
+            contactMapName?.takeIf { it.isNotBlank() && it != "Unknown" }
+                ?: prefsName?.takeIf { it.isNotBlank() && it != "Unknown" }
+        }
+        val p2pMemoKey = rowIdentity
+        val appName = storedName ?: if (p2pNameMemo.containsKey(p2pMemoKey)) {
+            p2pNameMemo[p2pMemoKey]
+        } else {
+            lookupRecentP2PName(context, row.phoneNumber, P2P_PROFILE_CACHE_TTL_MS)
+                .also { p2pNameMemo[p2pMemoKey] = it }
+        }
+
+        val displayName = appName ?: if (allowSystemFallback) {
+            val sysName = getSystemContactName(row.phoneNumber, context)
+            sysName ?: formatPhoneNumberForDisplay(row.phoneNumber)
+        } else {
+            formatPhoneNumberForDisplay(row.phoneNumber)
+        }
+
+        val simLabel = simLabelForRow(row)
+        calls.add(
+            RecentCall(
+                id = row.id,
+                name = displayName,
+                phoneNumber = row.phoneNumber,
+                timestamp = row.timestamp,
+                callType = row.callType,
+                duration = row.duration,
+                simLabel = simLabel,
+                isVideo = row.isVideo,
+                isTollFree = row.isTollFree
+            )
+        )
+    }
+
+    val currentDeviceId = AccountDeviceHistoryManager.getCurrentDeviceId(context)
+    AccountDeviceHistoryManager.getSyncedCallHistory(context)
+        .asSequence()
+        .filter { it.sourceDeviceId.isNotBlank() && it.sourceDeviceId != currentDeviceId }
+        .forEach { record ->
+            val callType = when (record.callTypeInt) {
+                Calls.INCOMING_TYPE -> CallType.INCOMING
+                Calls.MISSED_TYPE, Calls.REJECTED_TYPE -> CallType.MISSED
+                else -> CallType.OUTGOING
+            }
+
+            if (AccountDeviceHistoryManager.shouldFilterCallHistoryItem(
+                    context, record.remoteNumber, callType, record.sourceDeviceId)) {
+                return@forEach
+            }
+
+            val numberSnapshot = buildP2PNumberSnapshot(record.remoteNumber)
+            val contactName = numberSnapshot.lookupKeys.firstNotNullOfOrNull { key ->
+                contactMap[key]
+                    ?.takeIf { buildRecentCallerGroupKey(it.phoneNumber) == buildRecentCallerGroupKey(record.remoteNumber) }
+                    ?.name
+            }
+            val displayName = contactName?.takeIf { it.isNotBlank() && it != "Unknown" }
+                ?: record.contactName.takeIf { it.isNotBlank() }
+                ?: formatPhoneNumberForDisplay(record.remoteNumber)
+
+            calls.add(
+                RecentCall(
+                    id = "peer_${record.sourceDeviceId}_${record.timestamp}_${record.remoteNumber}",
+                    name = displayName,
+                    phoneNumber = record.remoteNumber,
+                    timestamp = record.timestamp,
+                    callType = callType,
+                    duration = record.durationSec,
+                    sourceDeviceName = record.sourceDeviceName
+                )
+            )
+        }
+
+    resolutionMemoCount = (unresolvedRows - resolutionFreshCount).coerceAtLeast(0)
+    val groupedCalls = groupRecentCallsFor(context, calls)
+    return RecentCallsSnapshot(calls, groupedCalls, queryFailed)
+}
+
 @OptIn(ExperimentalFoundationApi::class, ExperimentalMaterial3Api::class)
 @Suppress("HandlerLeak")
 class MainActivity : ComponentActivity() {
@@ -2817,62 +3165,10 @@ class MainActivity : ComponentActivity() {
         sharedPreferences.edit().putString("cached_contacts", jsonArray.toString()).apply()
     }
 
-    private fun loadContactsFromPreferences(): List<Contact> {
-        val jsonString = sharedPreferences.getString("cached_contacts", null) ?: return emptyList()
-        val contacts = mutableListOf<Contact>()
-        val seenNumbers = mutableSetOf<String>()
-        try {
-            val jsonArray = JSONArray(jsonString)
-            for (i in 0 until jsonArray.length()) {
-                val obj = jsonArray.getJSONObject(i)
-                val phoneNumber = obj.getString("phoneNumber")
-                // Same rule as loadContacts: dedupe per contact, not across contacts.
-                val normalized = "${obj.getString("id")}|${normalizePhoneNumber(phoneNumber)}"
-                if (phoneNumber.isNotEmpty() && isValidPhoneNumber(phoneNumber) && normalized !in seenNumbers) {
-                    val photoUri = if (obj.has("photoUri")) obj.getString("photoUri") else null
-                    val rawContactId = if (obj.has("rawContactId")) obj.getString("rawContactId") else null
-                    contacts.add(Contact(obj.getString("id"), obj.getString("name"), phoneNumber, photoUri, rawContactId))
-                    seenNumbers.add(normalized)
-                }
-            }
-        } catch (e: Exception) {}
-
-        return contacts.sortedBy { it.name.lowercase() }
-    }
+    private fun loadContactsFromPreferences(): List<Contact> = loadContactsFromRecentsPrefs(sharedPreferences)
 
     private fun saveRecentCallsToPreferences(grouped: List<GroupedRecentCall>) {
-        runCatching {
-            val jsonArray = JSONArray()
-            grouped.take(150).forEach { item ->
-                jsonArray.put(JSONObject().apply {
-                    put("phoneNumber", item.phoneNumber)
-                    put("name", item.name)
-                    put("groupKey", item.groupKey)
-                    put("sourceDeviceName", item.sourceDeviceName)
-                    val historyArr = JSONArray()
-                    item.callHistory.forEach { h ->
-                        historyArr.put(JSONObject().apply {
-                            put("timestamp", h.timestamp)
-                            put("callType", h.callType.name)
-                            put("duration", h.duration)
-                            put("formattedTime", h.formattedTime)
-                            put("formattedDuration", h.formattedDuration)
-                            put("typeString", h.typeString)
-                            put("isBlocked", h.isBlocked)
-                            put("simLabel", h.simLabel)
-                            put("sourceDeviceName", h.sourceDeviceName)
-                            put("isVideo", h.isVideo)
-                            put("isTollFree", h.isTollFree)
-                        })
-                    }
-                    put("callHistory", historyArr)
-                    val idsArr = JSONArray()
-                    item.providerRowIds.forEach { idsArr.put(it) }
-                    put("providerRowIds", idsArr)
-                })
-            }
-            sharedPreferences.edit().putString("cached_grouped_recent_calls", jsonArray.toString()).apply()
-        }
+        saveGroupedRecentCallsCache(sharedPreferences, grouped)
     }
 
     private fun loadRecentCallsFromPreferences(): List<GroupedRecentCall> {
@@ -3115,217 +3411,12 @@ class MainActivity : ComponentActivity() {
             }
             return uiState.groupedRecentCalls
         }
-        val calls = mutableListOf<RecentCall>()
-        val callRows = mutableListOf<RecentCallRow>()
-        val safeContext = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.N) createDeviceProtectedStorageContext() ?: this@MainActivity else this@MainActivity
-        val contactMap = buildContactLookupMap(uiState.contacts)
-        val dpsPrefs = safeContext.getSharedPreferences("dps_bulk_contacts", MODE_PRIVATE)
-        val resolutionCache = linkedMapOf<String, Pair<String, String>>()
-        val resolutionRequests = linkedMapOf<String, RecentCallRow>()
-        val simLabelLookup = DualSimFixes.buildCallLogSimLabelLookup(this@MainActivity)
-        var resolutionFreshCount = 0
-        var resolutionMemoCount: Int
-        var unresolvedRows = 0
-        var queryFailed = false
-
-        try {
-            contentResolver.query(
-                Calls.CONTENT_URI,
-                arrayOf(
-                    Calls._ID,
-                    Calls.NUMBER,
-                    Calls.CACHED_NAME,
-                    Calls.DATE,
-                    Calls.TYPE,
-                    Calls.DURATION,
-                    Calls.PHONE_ACCOUNT_ID,
-                    Calls.PHONE_ACCOUNT_COMPONENT_NAME,
-                    Calls.FEATURES
-                ),
-                null, null, Calls.DATE + " DESC"
-            )?.use { c ->
-                while (c.moveToNext()) {
-                    var name = c.getString(2) ?: "Unknown"
-                    var number = c.getString(1) ?: ""
-                    val timestamp = c.getLong(3)
-                    val callType = when (c.getInt(4)) {
-                        Calls.OUTGOING_TYPE -> CallType.OUTGOING
-                        Calls.INCOMING_TYPE -> CallType.INCOMING
-                        Calls.MISSED_TYPE -> CallType.MISSED
-                        else -> CallType.OUTGOING
-                    }
-                    val id = c.getString(0) ?: ""
-
-                    if (number.isNotEmpty()) {
-                        val duration = c.getLong(5)
-                        val features = try { c.getInt(8) } catch (_: Exception) { 0 }
-                        val isVideo = (features and Calls.FEATURES_VIDEO) != 0
-                        val isTollFree = !isNumberVideoCallCapable(number)
-                        val row = RecentCallRow(
-                            id = id,
-                            cachedName = name,
-                            phoneNumber = number,
-                            timestamp = timestamp,
-                            callType = callType,
-                            duration = duration,
-                            phoneAccountId = c.getString(6),
-                            phoneAccountComponentName = c.getString(7),
-                            isVideo = isVideo,
-                            isTollFree = isTollFree
-                        )
-                        callRows.add(row)
-                    }
-                    if (callRows.size >= 1000) break
-                }
-            }
-        } catch (e: Exception) {
-            queryFailed = true
-            Log.e(P2P_FORENSIC_TAG, "recent_calls_query_failed", e)
-        }
-
-        // TIME-BASED: App name → System fallback (first 7 days only) → Phone number
-        val installTime = dpsPrefs.getLong("app_install_time", System.currentTimeMillis())
-        if (installTime == 0L) {
-            dpsPrefs.edit().putLong("app_install_time", System.currentTimeMillis()).apply()
-        }
-        val daysSinceInstall = (System.currentTimeMillis() - installTime) / (1000 * 60 * 60 * 24)
-        val allowSystemFallback = daysSinceInstall < 7  // Fallback only for first 7 days
-
-        // One P2P cache lookup per caller, not per call-log row.
-        val p2pNameMemo = HashMap<String, String?>()
-
-        // A row shows its SIM label ("SIM 1 - Jio") only if another SIM was also in the phone when it was made.
-        // From when this app started recording SIM presence, that is read from the recorded periods (a SIM
-        // taken out and put back has a gap there). Earlier calls can only be judged from the call log: the
-        // time falls within a different SIM's span of calls (first to last) made before recording started.
-        val trackingSince = simLabelLookup.trackingSince
-        val simSpans: Map<String, LongRange> = run {
-            callRows
-                .filter { trackingSince == 0L || it.timestamp < trackingSince }
-                .filter {
-                    // A SIM call: its SIM is known, or its account belongs to the SIM calling service (a SIM
-                    // removed before its label was saved still shows that another SIM was in use).
-                    !it.phoneAccountId.isNullOrBlank() && (
-                        simLabelLookup.resolve(it.phoneAccountId, it.phoneAccountComponentName).isNotBlank() ||
-                            it.phoneAccountComponentName.orEmpty() in simLabelLookup.simComponents
-                        )
-                }
-                .groupBy { it.phoneAccountId.orEmpty() }
-                .mapValues { (_, rows) -> rows.minOf { it.timestamp }..rows.maxOf { it.timestamp } }
-        }
-        fun simLabelForRow(row: RecentCallRow): String {
-            val label = simLabelLookup.resolve(row.phoneAccountId, row.phoneAccountComponentName)
-            if (label.isBlank()) return ""
-            val rowId = row.phoneAccountId.orEmpty()
-            val otherSimInUse = if (trackingSince != 0L && row.timestamp >= trackingSince) {
-                simLabelLookup.presenceById.any { (id, periods) ->
-                    id != rowId && periods.any { row.timestamp in it }
-                }
-            } else {
-                simSpans.any { (id, span) -> id != rowId && row.timestamp in span }
-            }
-            return if (otherSimInUse) label else ""
-        }
-
-        callRows.forEach { row ->
-            if (AccountDeviceHistoryManager.shouldFilterCallHistoryItem(this@MainActivity, row.phoneNumber, row.callType)) {
-                return@forEach
-            }
-            val numberSnapshot = buildP2PNumberSnapshot(row.phoneNumber)
-            val rowIdentity = buildRecentCallerGroupKey(row.phoneNumber)
-
-            // Check app stored name first
-            val storedName = numberSnapshot.lookupKeys.firstNotNullOfOrNull { key ->
-                val contactMapName = contactMap[key]
-                    ?.takeIf { buildRecentCallerGroupKey(it.phoneNumber) == rowIdentity }
-                    ?.name
-                val prefsName = dpsPrefs.getString(key, null)
-
-                contactMapName?.takeIf { it.isNotBlank() && it != "Unknown" }
-                    ?: prefsName?.takeIf { it.isNotBlank() && it != "Unknown" }
-            }
-            // Then the name the caller shared over P2P, shown for a few hours after it arrived.
-            val p2pMemoKey = rowIdentity
-            val appName = storedName ?: if (p2pNameMemo.containsKey(p2pMemoKey)) {
-                p2pNameMemo[p2pMemoKey]
-            } else {
-                lookupRecentP2PName(this@MainActivity, row.phoneNumber, RECENTS_P2P_NAME_WINDOW_MS)
-                    .also { p2pNameMemo[p2pMemoKey] = it }
-            }
-
-            val displayName = appName ?: if (allowSystemFallback) {
-                val sysName = getSystemContactName(row.phoneNumber, this@MainActivity)
-                sysName ?: formatPhoneNumberForDisplay(row.phoneNumber)
-            } else {
-                formatPhoneNumberForDisplay(row.phoneNumber)
-            }
-
-            val simLabel = simLabelForRow(row)
-            calls.add(
-                RecentCall(
-                    id = row.id,
-                    name = displayName,
-                    // The call-log number as stored: Recents dials this. Display formatting (+91) is applied
-                    // where it is shown; putting it here made Call dial +918004190157 for a stored 8004190157.
-                    phoneNumber = row.phoneNumber,
-                    timestamp = row.timestamp,
-                    callType = row.callType,
-                    duration = row.duration,
-                    simLabel = simLabel,
-                    isVideo = row.isVideo,
-                    isTollFree = row.isTollFree
-                )
-            )
-        }
-
-        // Peer history belongs only to this app's Recents list. Writing it into Android's shared
-        // call log loses the phone that made the call, so a call from OPPO could look like it was
-        // made on Redmi and be sent back again on the next sync.
-        val currentDeviceId = AccountDeviceHistoryManager.getCurrentDeviceId(this@MainActivity)
-        AccountDeviceHistoryManager.getSyncedCallHistory(this@MainActivity)
-            .asSequence()
-            .filter { it.sourceDeviceId.isNotBlank() && it.sourceDeviceId != currentDeviceId }
-            .forEach { record ->
-                val callType = when (record.callTypeInt) {
-                    Calls.INCOMING_TYPE -> CallType.INCOMING
-                    Calls.MISSED_TYPE, Calls.REJECTED_TYPE -> CallType.MISSED
-                    else -> CallType.OUTGOING
-                }
-
-                if (AccountDeviceHistoryManager.shouldFilterCallHistoryItem(
-                        this@MainActivity, record.remoteNumber, callType, record.sourceDeviceId)) {
-                    return@forEach
-                }
-
-                val numberSnapshot = buildP2PNumberSnapshot(record.remoteNumber)
-                val contactName = numberSnapshot.lookupKeys.firstNotNullOfOrNull { key ->
-                    contactMap[key]
-                        ?.takeIf { buildRecentCallerGroupKey(it.phoneNumber) == buildRecentCallerGroupKey(record.remoteNumber) }
-                        ?.name
-                }
-                val displayName = contactName?.takeIf { it.isNotBlank() && it != "Unknown" }
-                    ?: record.contactName.takeIf { it.isNotBlank() }
-                    ?: formatPhoneNumberForDisplay(record.remoteNumber)
-
-                calls.add(
-                    RecentCall(
-                        id = "peer_${record.sourceDeviceId}_${record.timestamp}_${record.remoteNumber}",
-                        name = displayName,
-                        phoneNumber = record.remoteNumber,
-                        timestamp = record.timestamp,
-                        callType = callType,
-                        duration = record.durationSec,
-                        sourceDeviceName = record.sourceDeviceName
-                    )
-                )
-            }
-
-        resolutionMemoCount = (unresolvedRows - resolutionFreshCount).coerceAtLeast(0)
-
-        val groupedCalls = groupRecentCalls(calls)
+        val snapshot = buildRecentCallsSnapshot(this@MainActivity, uiState.contacts)
+        val calls = snapshot.calls
+        val groupedCalls = snapshot.grouped
         Log.w(
             P2P_FORENSIC_TAG,
-            "recent_calls_load_complete rows=${calls.size} grouped=${groupedCalls.size} uniqueResolutions=${resolutionRequests.size} unresolvedRows=$unresolvedRows resolutionFresh=$resolutionFreshCount resolutionMemoHits=$resolutionMemoCount memoKeys=${resolutionCache.size} reqGen=$requestGen appliedGen=$recentCallsAppliedGeneration"
+            "recent_calls_load_complete rows=${calls.size} grouped=${groupedCalls.size} reqGen=$requestGen appliedGen=$recentCallsAppliedGeneration"
         )
         if (requestGen >= recentCallsAppliedGeneration) {
             recentCallsAppliedGeneration = requestGen
@@ -3346,50 +3437,7 @@ class MainActivity : ComponentActivity() {
         return groupedCalls
     }
 
-    private fun groupRecentCalls(calls: List<RecentCall>): List<GroupedRecentCall> {
-        val grouped = calls.groupBy {
-            val numberKey = buildRecentCallerGroupKey(it.phoneNumber)
-            if (it.sourceDeviceName.isBlank()) numberKey
-            else "peer:${it.sourceDeviceName.trim().lowercase(Locale.ROOT)}:$numberKey"
-        }
-        val blocklistPrefs = getBlocklistPreferences()
-        fun isBlocked(num: String): Boolean {
-            val cleanNum = getBlockedNumberKey(num)
-            if (cleanNum.isBlank()) return false
-            return blocklistPrefs.getBoolean(cleanNum, false) ||
-                (cleanNum.length >= 10 && blocklistPrefs.getBoolean(cleanNum.takeLast(10), false))
-        }
-
-        return grouped.map { (groupKey, callList) ->
-            val canonicalPhoneNumber = callList.first().phoneNumber.trim().ifBlank {
-                callList.first().phoneNumber
-            }
-            val providerRowIds = callList.map { it.id }.filter { it.isNotBlank() }.distinct()
-            val name = callList.firstOrNull { it.name != "Unknown" }?.name ?: callList.first().name
-            val callHistory = callList.map {
-                val isBlockedCall = it.duration <= 0L && isBlocked(it.phoneNumber)
-                CallHistoryItem(
-                    timestamp = it.timestamp, callType = it.callType, duration = it.duration,
-                    formattedTime = formatTimestamp(it.timestamp),
-                    formattedDuration = if (isBlockedCall) "Blocked" else formatCallDuration(it.duration, it.callType),
-                    typeString = if (isBlockedCall) "Blocked" else callTypeToString(it.callType.name),
-                    isBlocked = isBlockedCall,
-                    simLabel = it.simLabel,
-                    sourceDeviceName = it.sourceDeviceName,
-                    isVideo = it.isVideo,
-                    isTollFree = it.isTollFree
-                )
-            }.sortedByDescending { it.timestamp }
-            GroupedRecentCall(
-                phoneNumber = canonicalPhoneNumber,
-                name = name,
-                callHistory = callHistory,
-                groupKey = groupKey,
-                providerRowIds = providerRowIds,
-                sourceDeviceName = callList.first().sourceDeviceName.trim()
-            )
-        }.sortedByDescending { it.callHistory.first().timestamp }
-    }
+    private fun groupRecentCalls(calls: List<RecentCall>): List<GroupedRecentCall> = groupRecentCallsFor(this, calls)
 
     private fun refreshRecentCalls(withDelay: Boolean = false) {
         val reqGen = ++recentCallsRequestGeneration
