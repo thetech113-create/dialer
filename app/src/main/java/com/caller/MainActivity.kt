@@ -473,6 +473,8 @@ private const val TAB_VOICEMAIL = 3
 private const val TAB_KEYPAD = 4
 private const val TAB_SETTINGS = 5
 private const val STATE_SELECTED_TAB_KEY = "main_selected_tab"
+// Remembered across closing/reopening the app (the saved-instance bundle is gone after a fresh start).
+private const val LAST_SELECTED_TAB_PREF_KEY = "last_selected_tab"
 private const val STATE_RECENT_SEARCH_QUERY_KEY = "main_recent_search_query"
 private const val STATE_RECENT_DIALPAD_VISIBLE_KEY = "main_recent_dialpad_visible"
 private const val STATE_RECENT_DIALPAD_DIGITS_KEY = "main_recent_dialpad_digits"
@@ -1129,7 +1131,11 @@ class MainActivity : ComponentActivity() {
     }
 
     private fun restoreSavedMainState(savedInstanceState: Bundle?) {
-        if (savedInstanceState == null) return
+        if (savedInstanceState == null) {
+            val lastTab = sharedPreferences.getInt(LAST_SELECTED_TAB_PREF_KEY, TAB_CONTACTS).coerceIn(TAB_CONTACTS, TAB_KEYPAD)
+            if (lastTab != uiState.selectedTab) uiState = uiState.copy(selectedTab = lastTab)
+            return
+        }
         val restoredDigits = sanitizeDialableClipboardText(
             savedInstanceState.getString(STATE_RECENT_DIALPAD_DIGITS_KEY).orEmpty()
         )
@@ -1503,6 +1509,7 @@ class MainActivity : ComponentActivity() {
                                     isPowerSaveMode = uiState.isPowerSaveMode,
                                     isInCall = uiState.callState.isInCall,
                                     onTabSelected = { tab ->
+                                        sharedPreferences.edit().putInt(LAST_SELECTED_TAB_PREF_KEY, tab).apply()
                                         // The keypad now lives in its own tab; leaving it closes the dialpad view.
                                         uiState = if (tab == TAB_KEYPAD) {
                                             uiState.copy(selectedTab = tab)
