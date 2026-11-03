@@ -1132,7 +1132,7 @@ class MainActivity : ComponentActivity() {
 
     private fun restoreSavedMainState(savedInstanceState: Bundle?) {
         if (savedInstanceState == null) {
-            val lastTab = sharedPreferences.getInt(LAST_SELECTED_TAB_PREF_KEY, TAB_CONTACTS).coerceIn(TAB_CONTACTS, TAB_KEYPAD)
+            val lastTab = sharedPreferences.getInt(LAST_SELECTED_TAB_PREF_KEY, TAB_CONTACTS).coerceIn(TAB_CONTACTS, TAB_SETTINGS)
             if (lastTab != uiState.selectedTab) uiState = uiState.copy(selectedTab = lastTab)
             return
         }
@@ -1140,7 +1140,7 @@ class MainActivity : ComponentActivity() {
             savedInstanceState.getString(STATE_RECENT_DIALPAD_DIGITS_KEY).orEmpty()
         )
         uiState = uiState.copy(
-            selectedTab = savedInstanceState.getInt(STATE_SELECTED_TAB_KEY, TAB_CONTACTS).coerceIn(TAB_CONTACTS, TAB_KEYPAD),
+            selectedTab = savedInstanceState.getInt(STATE_SELECTED_TAB_KEY, TAB_CONTACTS).coerceIn(TAB_CONTACTS, TAB_SETTINGS),
             recentSearchQuery = savedInstanceState.getString(STATE_RECENT_SEARCH_QUERY_KEY).orEmpty(),
             recentDialpadVisible = savedInstanceState.getBoolean(STATE_RECENT_DIALPAD_VISIBLE_KEY, false) || restoredDigits.isNotEmpty(),
             recentDialpadDigits = restoredDigits
