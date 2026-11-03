@@ -1874,14 +1874,23 @@ class MyInCallService : InCallService() {
 
             override fun onUnbind(intent: Intent?): Boolean {
                 android.util.Log.e("OEM_FALLBACK_TRACE", "=====================================================================")
-        android.util.Log.e("OEM_FALLBACK_TRACE", "ULTRA SUPREME FORENSIC INFLOP PROFESSION LOGGING")
+                android.util.Log.e("OEM_FALLBACK_TRACE", "ULTRA SUPREME FORENSIC INFLOP PROFESSION LOGGING")
                 android.util.Log.e("OEM_FALLBACK_TRACE", "MyInCallService: onUnbind TRIGGERED!")
-                android.util.Log.e("OEM_FALLBACK_TRACE", "TelecomManager is forcibly detaching our Call Service.")
-                android.util.Log.e("OEM_FALLBACK_TRACE", "If a call is still active, THIS IS THE EXACT MOMENT THE OEM DIALER STRIKES.")
                 android.util.Log.e("OEM_FALLBACK_TRACE", "Intent Action: ${intent?.action}")
-                android.util.Log.e("OEM_FALLBACK_TRACE", "Stack Trace of Unbind:", Throwable("UNBIND TRACE"))
                 android.util.Log.e("OEM_FALLBACK_TRACE", "=====================================================================")
-                return super.onUnbind(intent)
+                super.onUnbind(intent)
+                // Returning true allows Android Telecom to rebind onRebind() if task or process recovers
+                return true
+            }
+
+            override fun onRebind(intent: Intent?) {
+                super.onRebind(intent)
+                Log.w(P2P_FORENSIC_TAG, "incall_service_onRebind: Telecom re-attached to InCallService")
+                val liveCalls = getLiveCalls()
+                if (liveCalls.isNotEmpty()) {
+                    ensureServiceExplicitlyStarted(liveCalls.firstOrNull())
+                    showCallBubbleIfNeeded()
+                }
             }
 
             override fun onTaskRemoved(rootIntent: Intent?) {

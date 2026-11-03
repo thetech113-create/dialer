@@ -12,8 +12,8 @@ android {
         applicationId = "com.caller"
         minSdk = 24
         targetSdk = 35
-        versionCode = 144
-        versionName = "8.10.6"
+        versionCode = 145
+        versionName = "8.10.7"
     }
 
     buildTypes {
