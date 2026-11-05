@@ -2197,6 +2197,15 @@ class MainActivity : ComponentActivity() {
             Log.e(P2P_FORENSIC_TAG, "phone_account action=query result=failure error=${e.message}", e)
         }
     }
+    override fun onUserLeaveHint() {
+        super.onUserLeaveHint()
+        if (!uiState.callState.isInCall) {
+            runCatching { finishAndRemoveTask() }
+        } else {
+            moveTaskToBack(true)
+        }
+    }
+
     @Deprecated("Deprecated in Java", ReplaceWith("OnBackPressedDispatcher"))
     override fun onBackPressed() {
         if (uiState.callState.isInCall) {
@@ -2204,6 +2213,7 @@ class MainActivity : ComponentActivity() {
         } else {
             @Suppress("DEPRECATION")
             super.onBackPressed()
+            runCatching { finishAndRemoveTask() }
         }
     }
 
