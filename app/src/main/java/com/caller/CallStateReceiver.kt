@@ -76,6 +76,9 @@ class CallStateReceiver : BroadcastReceiver() {
         if (action == TelephonyManager.ACTION_PHONE_STATE_CHANGED) {
             val stateStr = intent.getStringExtra(TelephonyManager.EXTRA_STATE)
             
+            // Instantly warm up process so Telecom InCallService binding never times out
+            try { InCallServiceEnhancements.warmUpProcess(context) } catch (_: Exception) {}
+
             // Only trigger for ringing state, other states are handled by InCallService
             if (stateStr == TelephonyManager.EXTRA_STATE_RINGING) {
                 lastEventTime = currentTime

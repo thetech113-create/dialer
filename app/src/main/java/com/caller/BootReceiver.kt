@@ -28,24 +28,21 @@ import android.util.Log
 
 class BootReceiver : BroadcastReceiver() {
     override fun onReceive(context: Context, intent: Intent) {
-        if (intent.action == Intent.ACTION_USER_UNLOCKED) {
-            // PRIVACY COMPLIANCE: Reduce verbose logging noise
-            // Log.d("ContactApp", "BootReceiver: User unlocked, checking for pending call state")
-            
-            if (PendingCallStateStore.hasPendingCall(context)) {
-                // PRIVACY COMPLIANCE: Reduce verbose logging noise
-                // Log.d("ContactApp", "BootReceiver: Found pending call state, starting CallStateResumeService")
-                val serviceIntent = Intent(context, CallStateResumeService::class.java)
-                
-                // Start as foreground service if Android 8.0+
-                if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.O) {
-                    context.startForegroundService(serviceIntent)
-                } else {
-                    context.startService(serviceIntent)
-                }
+        val action = intent.action.orEmpty()
+        Log.w("BootReceiver", "Boot broadcast received: action=$action")
+
+        // 1. Instantly warm up the com.caller process so Telecom binding never times out
+        try { InCallServiceEnhancements.warmUpProcess(context) } catch (_: Exception) {}
+
+        // 2. Reschedule any direct boot or pending call state restorations
+        try { DirectBootCallRescheduler(context).restoreCallNotifications() } catch (_: Exception) {}
+
+        if (action == Intent.ACTION_USER_UNLOCKED && PendingCallStateStore.hasPendingCall(context)) {
+            val serviceIntent = Intent(context, CallStateResumeService::class.java)
+            if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.O) {
+                context.startForegroundService(serviceIntent)
             } else {
-                // PRIVACY COMPLIANCE: Reduce verbose logging noise
-            // Log.d("ContactApp", "BootReceiver: No pending call state found")
+                context.startService(serviceIntent)
             }
         }
     }
