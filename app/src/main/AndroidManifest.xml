@@ -233,6 +233,7 @@
 
         <activity
             android:name=".CallActivity"
+            android:process=":incall"
             android:directBootAware="true"
             android:theme="@style/Theme.Caller.CallScreen"
             android:showWhenLocked="true"
@@ -260,6 +261,7 @@
 
         <activity
             android:name=".WidgetCallActivity"
+            android:process=":incall"
             android:excludeFromRecents="true"
             android:exported="false"
             android:noHistory="true"
@@ -267,6 +269,7 @@
 
         <service
             android:name=".MyInCallService"
+            android:process=":incall"
             android:label="@string/launcher_phone_label"
             android:permission="android.permission.BIND_INCALL_SERVICE"
             android:directBootAware="true"
@@ -430,12 +433,14 @@
 
         <service
             android:name=".CallStateResumeService"
+            android:process=":incall"
             android:enabled="true"
             android:exported="false"
             android:foregroundServiceType="phoneCall" />
 
         <service
             android:name=".ProcessWarmupService"
+            android:process=":incall"
             android:enabled="true"
             android:exported="false"
             android:directBootAware="true"
@@ -443,6 +448,7 @@
 
         <service
             android:name=".MyConnectionService"
+            android:process=":incall"
             android:permission="android.permission.BIND_TELECOM_CONNECTION_SERVICE"
             android:exported="true">
             <intent-filter>
