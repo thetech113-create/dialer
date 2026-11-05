@@ -201,7 +201,7 @@ class MyInCallService : InCallService() {
                 fun getInstance(): MyInCallService? = instance
                 fun peekLastCallUiSnapshot(): UnifiedCallState? = lastCallUiSnapshot
 
-                fun setCallStateListener(listener: (UnifiedCallState) -> Unit) {
+                fun setCallStateListener(listener: ((UnifiedCallState) -> Unit)?) {
                     callStateListener = listener
                 }
                 

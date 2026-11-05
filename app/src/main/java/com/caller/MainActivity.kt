@@ -2052,6 +2052,7 @@ class MainActivity : ComponentActivity() {
         isMainActivityVisible = false
         incomingUiGateMainVisible = false
         AccountDeviceHistoryManager.removeStateListener(accountHistoryListener)
+        MyInCallService.setCallStateListener(null)
         super.onDestroy()
         pendingOemFallbackProbe?.let { forensicProbeHandler.removeCallbacks(it) }
         pendingOemFallbackProbe = null
