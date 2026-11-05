@@ -1,4 +1,4 @@
-        @file:Suppress(
+@file:Suppress(
     "all", 
     "WARNINGS", 
     "unused", 
@@ -204,12 +204,24 @@ class MyInCallService : InCallService() {
                 fun setCallStateListener(listener: ((UnifiedCallState) -> Unit)?) {
                     callStateListener = listener
                 }
+
+                fun clearCallStateListener(listener: ((UnifiedCallState) -> Unit)?) {
+                    if (listener == null || callStateListener === listener) {
+                        callStateListener = null
+                    }
+                }
                 
                 fun setCallUIListener(listener: ((UnifiedCallState) -> Unit)?) {
                     callUIListener = listener
                     // CRITICAL FIX: Instantly push live state to CallScreen to destroy the blank Ghost Screen
                     if (listener != null) {
                         instance?.forceUpdateUI()
+                    }
+                }
+
+                fun clearCallUIListener(listener: ((UnifiedCallState) -> Unit)?) {
+                    if (listener == null || callUIListener === listener) {
+                        callUIListener = null
                     }
                 }
             }
@@ -262,11 +274,65 @@ class MyInCallService : InCallService() {
             private var lastLiveCallSeenAtMs: Long = 0L
             @Volatile private var bubbleSuppressedForTermination = false
             @Volatile private var isServiceExplicitlyStarted = false
+            @Volatile private var isSelfKeepAliveBound = false
+
+            private val selfKeepAliveConnection = object : android.content.ServiceConnection {
+                override fun onServiceConnected(name: android.content.ComponentName?, service: android.os.IBinder?) {
+                    Log.w(P2P_FORENSIC_TAG, "incall_self_keepalive_bound connected=true")
+                }
+
+                override fun onServiceDisconnected(name: android.content.ComponentName?) {
+                    isSelfKeepAliveBound = false
+                    Log.w(P2P_FORENSIC_TAG, "incall_self_keepalive_bound connected=false")
+                }
+            }
+
+            private fun ensureSelfKeepAliveBound() {
+                if (isSelfKeepAliveBound) return
+                runCatching {
+                    val bindIntent = Intent(applicationContext, MyInCallService::class.java).apply {
+                        action = ACTION_START_INCALL_KEEPALIVE
+                    }
+                    isSelfKeepAliveBound = applicationContext.bindService(
+                        bindIntent,
+                        selfKeepAliveConnection,
+                        Context.BIND_AUTO_CREATE or Context.BIND_IMPORTANT or Context.BIND_ABOVE_CLIENT
+                    )
+                    Log.w(P2P_FORENSIC_TAG, "incall_self_keepalive_bind requested result=$isSelfKeepAliveBound")
+                }.onFailure { e ->
+                    Log.e(P2P_FORENSIC_TAG, "incall_self_keepalive_bind failed: ${e.message}", e)
+                }
+            }
+
+            private fun releaseSelfKeepAliveBinding() {
+                if (!isSelfKeepAliveBound) return
+                isSelfKeepAliveBound = false
+                runCatching {
+                    applicationContext.unbindService(selfKeepAliveConnection)
+                    Log.w(P2P_FORENSIC_TAG, "incall_self_keepalive_unbind success")
+                }.onFailure { e ->
+                    Log.w(P2P_FORENSIC_TAG, "incall_self_keepalive_unbind ignored: ${e.message}")
+                }
+            }
+
+            private fun isTelecomFrameworkInCall(): Boolean {
+                return runCatching {
+                    (getSystemService(Context.TELECOM_SERVICE) as? TelecomManager)?.isInCall == true
+                }.getOrDefault(false)
+            }
+
+            private fun hasLiveOrStickyCallSession(): Boolean {
+                if (getLiveCalls().isNotEmpty()) return true
+                if (lastCallUiSnapshot?.isInCall == true && !bubbleSuppressedForTermination) return true
+                return !bubbleSuppressedForTermination && isTelecomFrameworkInCall()
+            }
 
             /**
-             * Only excludes CallActivity and WidgetCallActivity from Recents.
-             * MainActivity is kept as a standard launcher task (excludeFromRecents=false)
-             * so Android OS ActivityManager never SIGKILLs the process when the user swipes Recents.
+             * Excludes all app tasks (including MainActivity) from Recents while a call is active
+             * (excluded == true) so swiping in Recents cannot kill the shared process hosting
+             * MyInCallService and trigger OEM/system dialer fallback. When the call ends
+             * (excluded == false), CallActivity/WidgetCallActivity stay excluded and MainActivity
+             * is restored to Recents.
              */
             private fun setAllAppTasksExcludedFromRecents(excluded: Boolean) {
                 runCatching {
@@ -277,11 +343,7 @@ class MyInCallService : InCallService() {
                         }.getOrDefault("")
                         val isCallTask = baseClass.endsWith("CallActivity") ||
                             baseClass.endsWith("WidgetCallActivity")
-                        if (isCallTask) {
-                            task.setExcludeFromRecents(true)
-                        } else {
-                            task.setExcludeFromRecents(false)
-                        }
+                        task.setExcludeFromRecents(if (isCallTask) true else excluded)
                     }
                     Log.w(
                         P2P_FORENSIC_TAG,
@@ -290,12 +352,32 @@ class MyInCallService : InCallService() {
                 }
             }
 
+            private fun acquireSurvivalWakeLockIfNeeded() {
+                runCatching {
+                    if (transitionWakeLock == null) {
+                        val powerManager = getSystemService(Context.POWER_SERVICE) as PowerManager
+                        transitionWakeLock = powerManager.newWakeLock(
+                            PowerManager.PARTIAL_WAKE_LOCK,
+                            "CallerApp::InCallSurvivalLock"
+                        ).apply {
+                            setReferenceCounted(false)
+                        }
+                    }
+                    if (transitionWakeLock?.isHeld == false) {
+                        transitionWakeLock?.acquire(4 * 60 * 60 * 1000L)
+                    }
+                    InCallServiceEnhancements.warmUpProcess(this)
+                }
+            }
+
             /**
-             * Explicitly calls startForegroundService() on MyInCallService so Android sets
-             * ServiceRecord.startRequested = true. Without this, onTaskRemoved() never fires
-             * and OEM Recents cleaners kill the bound-only InCallService process on swipe.
+             * Explicitly promotes MyInCallService to a started + bound ForegroundService
+             * (ServiceRecord.startRequested = true, hasForegroundServices = true) independent of
+             * CallActivity or MainActivity lifecycle.
              */
             private fun ensureServiceExplicitlyStarted(call: Call? = null) {
+                acquireSurvivalWakeLockIfNeeded()
+                ensureSelfKeepAliveBound()
                 val targetCall = call ?: getLiveCalls().firstOrNull()
                 if (targetCall != null) {
                     val isConf = targetCall.details?.hasProperty(Call.Details.PROPERTY_CONFERENCE) == true
@@ -312,6 +394,16 @@ class MyInCallService : InCallService() {
                             callState = stateHint
                         )
                     }
+                } else if (lastCallUiSnapshot?.isInCall == true) {
+                    val snap = lastCallUiSnapshot!!
+                    if (snap.primaryState != "RINGING") {
+                        startImmediateCallForeground(
+                            phoneNumber = snap.primaryNumber,
+                            contactName = snap.primaryName.ifBlank { snap.primaryNumber.ifBlank { "Ongoing Call" } },
+                            isConf = snap.isConference,
+                            callState = snap.primaryState.ifBlank { "ACTIVE" }
+                        )
+                    }
                 }
                 if (!isServiceExplicitlyStarted) {
                     runCatching {
@@ -326,6 +418,55 @@ class MyInCallService : InCallService() {
                     }
                 }
                 setAllAppTasksExcludedFromRecents(true)
+            }
+
+            /**
+             * Invoked when the user leaves CallActivity or MainActivity via Back, Home, or Recents gesture
+             * while a call is active. Keeps the service independent and surfaces the floating call bubble.
+             */
+            fun onActivityLeftDuringCall(source: String) {
+                if (!hasLiveOrStickyCallSession()) return
+                Log.w(P2P_FORENSIC_TAG, "incall_activity_left source=$source liveCalls=${getLiveCalls().size}")
+                CallBubbleOverlay.isCallActivityVisible = false
+                ensureServiceExplicitlyStarted(getLiveCalls().firstOrNull())
+                startNotificationRepost(forceRefresh = true)
+                showCallBubbleIfNeeded(launchFullScreenWhenOverlayUnavailable = false)
+            }
+
+            /**
+             * Invoked when CallActivity or MainActivity is destroyed (e.g. swiped from Recents)
+             * while a call is still active. Immediately re-asserts foreground service priority,
+             * WakeLock, notification, and overlay so Telecom never hands over to the system dialer.
+             */
+            fun onCallUiHostDestroyed(source: String) {
+                if (!hasLiveOrStickyCallSession()) return
+                Log.w(
+                    P2P_FORENSIC_TAG,
+                    "incall_host_activity_destroyed source=$source liveCalls=${getLiveCalls().size} terminationSuppressed=$bubbleSuppressedForTermination"
+                )
+                CallBubbleOverlay.isCallActivityVisible = false
+                acquireSurvivalWakeLockIfNeeded()
+                setAllAppTasksExcludedFromRecents(true)
+                isServiceExplicitlyStarted = false
+                ensureServiceExplicitlyStarted(getLiveCalls().firstOrNull())
+
+                val currentState = runCatching { getCurrentCallStateFromSync() }.getOrNull()
+                    ?.takeIf { it.isInCall }
+                    ?: lastCallUiSnapshot?.takeIf { it.isInCall }
+                if (currentState != null) {
+                    if (currentState.primaryState == "RINGING") {
+                        showIncomingCallNotification(currentState.primaryNumber, currentState.primaryName)
+                    } else {
+                        showOngoingCallNotification(
+                            currentState.primaryNumber,
+                            currentState.primaryName,
+                            currentState.isConference,
+                            currentState.primaryState.ifBlank { "ACTIVE" }
+                        )
+                    }
+                }
+                startNotificationRepost(forceRefresh = true)
+                showCallBubbleIfNeeded(launchFullScreenWhenOverlayUnavailable = false)
             }
 
             // --- CALL STATE MACHINE TRACKERS ---
@@ -1339,6 +1480,7 @@ class MyInCallService : InCallService() {
                     }
 
                     isServiceExplicitlyStarted = false
+                    releaseSelfKeepAliveBinding()
                     setAllAppTasksExcludedFromRecents(false)
 
                     // Drop foreground status to allow normal process priority
@@ -1532,7 +1674,12 @@ class MyInCallService : InCallService() {
                     startForeground(Constants.NOTIFICATION_ID_ONGOING_CALL, notification)
                     return
                 }
-                startForeground(Constants.NOTIFICATION_ID_ONGOING_CALL, notification, ServiceInfo.FOREGROUND_SERVICE_TYPE_PHONE_CALL)
+                try {
+                    startForeground(Constants.NOTIFICATION_ID_ONGOING_CALL, notification, ServiceInfo.FOREGROUND_SERVICE_TYPE_PHONE_CALL)
+                } catch (e: Exception) {
+                    Log.w("MyInCallService", "Typed startForeground failed, falling back to untyped startForeground: ${e.message}")
+                    startForeground(Constants.NOTIFICATION_ID_ONGOING_CALL, notification)
+                }
             }
 
             private fun startImmediateCallForeground(phoneNumber: String, contactName: String, isConf: Boolean, callState: String = "ACTIVE") {
@@ -1884,21 +2031,24 @@ class MyInCallService : InCallService() {
             override fun onTaskRemoved(rootIntent: Intent?) {
                 super.onTaskRemoved(rootIntent)
                 val liveCalls = getLiveCalls()
+                val hasActiveSession = hasLiveOrStickyCallSession()
                 Log.w(
                     P2P_FORENSIC_TAG,
-                    "call_task_removed liveCalls=${liveCalls.size} terminationSuppressed=$bubbleSuppressedForTermination rootIntent=${rootIntent?.component}"
+                    "call_task_removed liveCalls=${liveCalls.size} hasActiveSession=$hasActiveSession terminationSuppressed=$bubbleSuppressedForTermination rootIntent=${rootIntent?.component}"
                 )
-                if (liveCalls.isEmpty()) return
+                if (!hasActiveSession) return
 
-                // Re-assert WakeLock, Recents exclusion, and started Foreground Service state immediately
-                if (transitionWakeLock?.isHeld == false) {
-                    transitionWakeLock?.acquire(4 * 60 * 60 * 1000L)
-                }
+                // Task was swiped from Recents: immediately clear activity-visible gate so the overlay
+                // pill can attach right away and anchor VISIBLE_APP_ADJ priority.
+                CallBubbleOverlay.isCallActivityVisible = false
+                acquireSurvivalWakeLockIfNeeded()
                 setAllAppTasksExcludedFromRecents(true)
                 isServiceExplicitlyStarted = false
                 ensureServiceExplicitlyStarted(liveCalls.firstOrNull())
 
                 val currentState = runCatching { getCurrentCallStateFromSync() }.getOrNull()
+                    ?.takeIf { it.isInCall }
+                    ?: lastCallUiSnapshot?.takeIf { it.isInCall }
                 if (currentState != null && currentState.isInCall) {
                     if (currentState.primaryState == "RINGING") {
                         showIncomingCallNotification(currentState.primaryNumber, currentState.primaryName)
@@ -1931,16 +2081,37 @@ class MyInCallService : InCallService() {
                 // COMPREHENSIVE CLEANUP AND OEM FALLBACK DETECTION
                 logOemDialerFallbackServiceEvent("onDestroy")
 
-                
-                // ROOT CAUSE CLEANUP: Release all wake locks and resources
-                InCallServiceEnhancements.releaseProcessWakeLock()
-                transitionWakeLock?.let {
-                    if (it.isHeld) {
-                        it.release()
-                        android.util.Log.e("OEM_FALLBACK_TRACE", "MyInCallService: Transition wake lock released")
+                val destroyedDuringLiveCall = !bubbleSuppressedForTermination &&
+                    (getLiveCalls().isNotEmpty() || isTelecomFrameworkInCall())
+                if (destroyedDuringLiveCall) {
+                    val sticky = lastCallUiSnapshot
+                    if (sticky?.isInCall == true && sticky.primaryNumber.isNotBlank()) {
+                        CallStateManager.markPending(
+                            this,
+                            sticky.primaryNumber,
+                            sticky.primaryState.ifBlank { "ACTIVE" },
+                            sticky.primaryName
+                        )
                     }
+                    runCatching {
+                        val restartIntent = Intent(applicationContext, MyInCallService::class.java).apply {
+                            action = ACTION_START_INCALL_KEEPALIVE
+                        }
+                        ContextCompat.startForegroundService(applicationContext, restartIntent)
+                    }
+                } else {
+                    // ROOT CAUSE CLEANUP: Release all wake locks and resources only when call is truly over
+                    InCallServiceEnhancements.releaseProcessWakeLock()
+                    transitionWakeLock?.let {
+                        if (it.isHeld) {
+                            it.release()
+                            android.util.Log.e("OEM_FALLBACK_TRACE", "MyInCallService: Transition wake lock released")
+                        }
+                    }
+                    transitionWakeLock = null
+                    clearLastCallUiSnapshot("onDestroy")
+                    clearTerminalUiSnapshot("onDestroy")
                 }
-                transitionWakeLock = null
                 
                 // Stop ringtone and cleanup audio resources
                 try {
@@ -1948,9 +2119,6 @@ class MyInCallService : InCallService() {
                 } catch (_: Exception) {}
                 incomingRingtone = null
 
-                // Clear all cached state
-                clearLastCallUiSnapshot("onDestroy")
-                clearTerminalUiSnapshot("onDestroy")
                 callDirectionTracker.clear()
                 callAnswerTracker.clear()
                 callMachineCallbackTracker.clear()
@@ -1965,14 +2133,15 @@ class MyInCallService : InCallService() {
                 notificationReposterActive.set(false)
                 lastNotificationStateKey = null
                 
-                // Clear listeners
-                callStateListener = null
-                callUIListener = null
-                
                 isServiceExplicitlyStarted = false
-                setAllAppTasksExcludedFromRecents(false)
+                releaseSelfKeepAliveBinding()
+                if (!destroyedDuringLiveCall) {
+                    setAllAppTasksExcludedFromRecents(false)
+                }
                 super.onDestroy()
-                instance = null
+                if (instance === this) {
+                    instance = null
+                }
                 unregisterScreenStateReceiver()
                 bgHandler.removeCallbacks(notificationReposter)
                 transientEmptyRecoveryRunnable?.let { bgHandler.removeCallbacks(it) }
@@ -2045,21 +2214,28 @@ class MyInCallService : InCallService() {
 
             override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
                 when (intent?.action) {
-                    ACTION_START_INCALL_KEEPALIVE, null -> {
+                    ACTION_START_INCALL_KEEPALIVE, "START_FOREGROUND_SERVICE", null -> {
                         isServiceExplicitlyStarted = true
                         val liveCalls = getLiveCalls()
-                        if (liveCalls.isNotEmpty()) {
+                        val stickySnapshot = lastCallUiSnapshot?.takeIf { it.isInCall && !bubbleSuppressedForTermination }
+                        if (liveCalls.isNotEmpty() || stickySnapshot != null || (!bubbleSuppressedForTermination && isTelecomFrameworkInCall())) {
+                            acquireSurvivalWakeLockIfNeeded()
+                            ensureSelfKeepAliveBound()
                             setAllAppTasksExcludedFromRecents(true)
-                            val currentState = getCurrentCallStateFromSync()
-                            if (currentState.primaryState == "RINGING") {
-                                showIncomingCallNotification(currentState.primaryNumber, currentState.primaryName)
+                            val currentState = getCurrentCallStateFromSync().takeIf { it.isInCall } ?: stickySnapshot
+                            if (currentState != null) {
+                                if (currentState.primaryState == "RINGING") {
+                                    showIncomingCallNotification(currentState.primaryNumber, currentState.primaryName)
+                                } else {
+                                    showOngoingCallNotification(
+                                        currentState.primaryNumber,
+                                        currentState.primaryName,
+                                        currentState.isConference,
+                                        currentState.primaryState.ifBlank { "ACTIVE" }
+                                    )
+                                }
                             } else {
-                                showOngoingCallNotification(
-                                    currentState.primaryNumber,
-                                    currentState.primaryName,
-                                    currentState.isConference,
-                                    currentState.primaryState.ifBlank { "ACTIVE" }
-                                )
+                                startImmediateCallForeground("", "Ongoing Call", false, "ACTIVE")
                             }
                             startNotificationRepost(forceRefresh = true)
                             return START_STICKY
@@ -2071,6 +2247,7 @@ class MyInCallService : InCallService() {
                                 stopForeground(STOP_FOREGROUND_REMOVE)
                             }
                             isServiceExplicitlyStarted = false
+                            releaseSelfKeepAliveBinding()
                             setAllAppTasksExcludedFromRecents(false)
                             stopSelfResult(startId)
                             return START_NOT_STICKY
@@ -4106,15 +4283,3 @@ class MyInCallService : InCallService() {
             }
 
             }
-
-
-
-
-
-
-
-
-
-
-
-

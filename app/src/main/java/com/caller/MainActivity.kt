@@ -959,6 +959,7 @@ class MainActivity : ComponentActivity() {
     private var duplicatesRemaining by mutableStateOf(0)
     private var activeMergedContactEntry by mutableStateOf<ContactDisplayEntry?>(null)
     private var isMainActivityVisible = false
+    private var inCallStateListenerRef: ((UnifiedCallState) -> Unit)? = null
     private var showBatteryOptimizationPrompt by mutableStateOf(false)
     private var showXiaomiOtherPermissionsPrompt by mutableStateOf(false)
     private val forensicProbeHandler = Handler(Looper.getMainLooper())
@@ -1273,11 +1274,17 @@ class MainActivity : ComponentActivity() {
         }
 
         val activeInCallService = MyInCallService.getInstance()
-        if (activeInCallService != null && activeInCallService.hasActiveCall()) {
+        if (activeInCallService != null && activeInCallService.hasActiveCall() && intent?.action != "ADD_CALL_FROM_INCALL") {
             Log.w(P2P_FORENSIC_TAG, "main_onResume: live call active — auto-recovering CallActivity UI")
             startActivity(Intent(this, CallActivity::class.java).apply {
                 action = CALL_UI_ACTION_WAKE
-                addFlags(Intent.FLAG_ACTIVITY_SINGLE_TOP or Intent.FLAG_ACTIVITY_CLEAR_TOP or Intent.FLAG_ACTIVITY_REORDER_TO_FRONT)
+                addFlags(
+                    Intent.FLAG_ACTIVITY_NEW_TASK or
+                        Intent.FLAG_ACTIVITY_SINGLE_TOP or
+                        Intent.FLAG_ACTIVITY_CLEAR_TOP or
+                        Intent.FLAG_ACTIVITY_REORDER_TO_FRONT or
+                        Intent.FLAG_ACTIVITY_EXCLUDE_FROM_RECENTS
+                )
             })
         }
 
@@ -1328,7 +1335,7 @@ class MainActivity : ComponentActivity() {
 
         unregisterAppPhoneAccountsSafely()
 
-        MyInCallService.setCallStateListener { stateObj ->
+        val stateListener: (UnifiedCallState) -> Unit = { stateObj ->
             runOnUiThread {
                 val mergedRecentCalls = mergeLiveRecentCallGroup(
                     groupedRecentCalls = uiState.groupedRecentCalls,
@@ -1377,6 +1384,8 @@ class MainActivity : ComponentActivity() {
                 }
             }
         }
+        inCallStateListenerRef = stateListener
+        MyInCallService.setCallStateListener(stateListener)
 
         MyInCallService.getInstance()?.forceUpdateUI()
 
@@ -2048,11 +2057,22 @@ class MainActivity : ComponentActivity() {
             .show()
     }
 
+    private fun isAnyCallActive(): Boolean {
+        return uiState.callState.isInCall ||
+            MyInCallService.getInstance()?.hasActiveCall() == true ||
+            MyInCallService.peekLastCallUiSnapshot()?.isInCall == true ||
+            hasLiveFrameworkCall()
+    }
+
     override fun onDestroy() {
         isMainActivityVisible = false
         incomingUiGateMainVisible = false
         AccountDeviceHistoryManager.removeStateListener(accountHistoryListener)
-        MyInCallService.setCallStateListener(null)
+        MyInCallService.clearCallStateListener(inCallStateListenerRef)
+        inCallStateListenerRef = null
+        if (!isChangingConfigurations && isAnyCallActive()) {
+            MyInCallService.getInstance()?.onCallUiHostDestroyed("MainActivity.onDestroy")
+        }
         super.onDestroy()
         pendingOemFallbackProbe?.let { forensicProbeHandler.removeCallbacks(it) }
         pendingOemFallbackProbe = null
@@ -2199,21 +2219,23 @@ class MainActivity : ComponentActivity() {
     }
     override fun onUserLeaveHint() {
         super.onUserLeaveHint()
-        if (!uiState.callState.isInCall) {
-            runCatching { finishAndRemoveTask() }
-        } else {
-            moveTaskToBack(true)
+        // Never call finishAndRemoveTask() or moveTaskToBack() here:
+        // 1) When MainActivity starts CallActivity, onUserLeaveHint() fires — calling finishAndRemoveTask()
+        //    or moveTaskToBack() tears down or backgrounds the task while CallActivity is launching.
+        // 2) Calling finishAndRemoveTask() triggers ActivityTaskSupervisor.removeTask(), which causes OEM
+        //    task cleaners to kill MyInCallService and hand the call over to the system dialer.
+        if (isAnyCallActive()) {
+            MyInCallService.getInstance()?.onActivityLeftDuringCall("MainActivity.onUserLeaveHint")
         }
     }
 
     @Deprecated("Deprecated in Java", ReplaceWith("OnBackPressedDispatcher"))
     override fun onBackPressed() {
-        if (uiState.callState.isInCall) {
+        if (isAnyCallActive()) {
+            MyInCallService.getInstance()?.onActivityLeftDuringCall("MainActivity.onBackPressed")
             moveTaskToBack(true)
         } else {
-            @Suppress("DEPRECATION")
-            super.onBackPressed()
-            runCatching { finishAndRemoveTask() }
+            moveTaskToBack(true)
         }
     }
 
@@ -3744,9 +3766,16 @@ class MainActivity : ComponentActivity() {
             )
         )
 
+        InCallServiceEnhancements.warmUpProcess(this)
         startActivity(Intent(this, CallActivity::class.java).apply {
             action = CALL_UI_ACTION_WAKE
-            addFlags(Intent.FLAG_ACTIVITY_SINGLE_TOP or Intent.FLAG_ACTIVITY_CLEAR_TOP or Intent.FLAG_ACTIVITY_REORDER_TO_FRONT)
+            addFlags(
+                Intent.FLAG_ACTIVITY_NEW_TASK or
+                    Intent.FLAG_ACTIVITY_SINGLE_TOP or
+                    Intent.FLAG_ACTIVITY_CLEAR_TOP or
+                    Intent.FLAG_ACTIVITY_REORDER_TO_FRONT or
+                    Intent.FLAG_ACTIVITY_EXCLUDE_FROM_RECENTS
+            )
             attachCallUiSeed(
                 phoneNumber = displayNumber,
                 contactName = resolvedContactName,
@@ -3954,7 +3983,13 @@ class MainActivity : ComponentActivity() {
                         }
                         val intent = Intent(ctx, CallActivity::class.java).apply {
                             action = "WAKE_UI"
-                            addFlags(Intent.FLAG_ACTIVITY_SINGLE_TOP or Intent.FLAG_ACTIVITY_CLEAR_TOP or Intent.FLAG_ACTIVITY_REORDER_TO_FRONT)
+                            addFlags(
+                                Intent.FLAG_ACTIVITY_NEW_TASK or
+                                    Intent.FLAG_ACTIVITY_SINGLE_TOP or
+                                    Intent.FLAG_ACTIVITY_CLEAR_TOP or
+                                    Intent.FLAG_ACTIVITY_REORDER_TO_FRONT or
+                                    Intent.FLAG_ACTIVITY_EXCLUDE_FROM_RECENTS
+                            )
                         }
                         ctx.startActivity(intent)
                     },
@@ -9033,17 +9068,3 @@ private fun SettingItemRow(
         }
     }
 }
-
-
-
-
-
-
-
-
-
-
-
-
-
-

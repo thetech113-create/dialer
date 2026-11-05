@@ -1666,7 +1666,33 @@ class CallActivity : ComponentActivity() {
      * under it. If the app was on screen when the call started, reopen it (Recents) instead; otherwise
      * go back to wherever the user was. Never opens the app over the lock screen.
      */
+    private fun setCallTaskExcludedFromRecents(excluded: Boolean = true) {
+        runCatching {
+            val am = getSystemService(Context.ACTIVITY_SERVICE) as? android.app.ActivityManager ?: return
+            am.appTasks.forEach { task -> task.setExcludeFromRecents(excluded) }
+        }
+    }
+
+    /**
+     * Moves CallActivity to the background during an active call instead of calling
+     * finish() / finishAndRemoveTask(), so Android/OEM task managers never see the in-call
+     * task destroyed while a call is still live.
+     */
+    private fun backgroundCallUiDuringActiveCall(reason: String) {
+        Log.w(CALL_UI_FORENSIC_TAG, "call_ui_background_active_call reason=$reason")
+        CallBubbleOverlay.isCallActivityVisible = false
+        setCallTaskExcludedFromRecents(true)
+        CallBubbleOverlay.showFromCallActivityExit(this)
+        MyInCallService.getInstance()?.onActivityLeftDuringCall("CallActivity.$reason")
+        runCatching { moveTaskToBack(true) }
+    }
+
     private fun finishCallUiAfterCall(reason: String) {
+        if (hasLiveCall() && !isEndCallRequested) {
+            Log.w(CALL_UI_FORENSIC_TAG, "call_ui_finish_blocked_live_call reason=$reason -> backgrounding instead")
+            backgroundCallUiDuringActiveCall("finish_blocked:$reason")
+            return
+        }
         if (isFinishingCallUi || isFinishing || isDestroyed) {
             Log.w(CALL_UI_FORENSIC_TAG, "call_ui_finish skipped reason=$reason (already finishing)")
             return
@@ -1870,11 +1896,7 @@ class CallActivity : ComponentActivity() {
             object : OnBackPressedCallback(true) {
                 override fun handleOnBackPressed() {
                     if (hasLiveCall() && !isFinishingCallUi && !isEndCallRequested) {
-                        CallBubbleOverlay.showFromCallActivityExit(this@CallActivity)
-                        MyInCallService.getInstance()?.showCallBubbleIfNeeded()
-                        if (!isFinishing && !isDestroyed) {
-                            finish()
-                        }
+                        backgroundCallUiDuringActiveCall("dispatcher_back")
                     } else {
                         finishCallUiAfterCall("dispatcher_back")
                     }
@@ -2003,7 +2025,7 @@ class CallActivity : ComponentActivity() {
                 }
 
                 DisposableEffect(Unit) {
-                    MyInCallService.setCallUIListener { stateObj ->
+                    val uiListener: (UnifiedCallState) -> Unit = { stateObj ->
                         runOnUiThread {
                             val newState = stateObj.toCallUiState()
                             val stickyLiveState = MyInCallService.peekLastCallUiSnapshot()?.toCallUiState()
@@ -2075,11 +2097,12 @@ class CallActivity : ComponentActivity() {
                             }
                         }
                     }
+                    MyInCallService.setCallUIListener(uiListener)
                     MyInCallService.getInstance()?.forceUpdateUI()
                     onDispose {
                         endCallJob?.cancel()
                         endCallJob = null
-                        MyInCallService.setCallUIListener(null)
+                        MyInCallService.clearCallUIListener(uiListener)
                     }
                 }
 
@@ -2136,8 +2159,14 @@ class CallActivity : ComponentActivity() {
     }
 
     override fun onDestroy() {
-        logCall("InCallActivity.onDestroy isFinishing=$isFinishing hasActiveCall=${hasLiveCall()}")
+        val liveCallOnDestroy = hasLiveCall()
+        logCall("InCallActivity.onDestroy isFinishing=$isFinishing hasActiveCall=$liveCallOnDestroy")
         logCallActivityLifecycle("onDestroy")
+        CallBubbleOverlay.isCallActivityVisible = false
+        if (!isChangingConfigurations && liveCallOnDestroy && !isEndCallRequested) {
+            CallBubbleOverlay.showFromCallActivityExit(this)
+            MyInCallService.getInstance()?.onCallUiHostDestroyed("CallActivity.onDestroy")
+        }
         try {
             finishReceiver?.let { unregisterReceiver(it) }
         } catch (_: Exception) {
@@ -2149,12 +2178,14 @@ class CallActivity : ComponentActivity() {
 
     override fun onStart() {
         super.onStart()
+        setCallTaskExcludedFromRecents(true)
         logCall("InCallActivity.onStart hasActiveCall=${hasLiveCall()}")
         logCallActivityLifecycle("onStart")
     }
 
     override fun onResume() {
         super.onResume()
+        setCallTaskExcludedFromRecents(true)
         CallBubbleOverlay.isCallActivityVisible = true
         CallBubbleOverlay.hide(this)
         logCall("InCallActivity.onResume hasActiveCall=${hasLiveCall()}")
@@ -2173,11 +2204,12 @@ class CallActivity : ComponentActivity() {
         logCall("InCallActivity.onUserLeaveHint hasActiveCall=${hasLiveCall()}")
         logCallActivityLifecycle("onUserLeaveHint")
         if (!isFinishing && !isFinishingCallUi && !isEndCallRequested && hasLiveCall()) {
+            // Do NOT call finishAndRemoveTask() here: removing the task on swipe-up/Home destroys
+            // CallActivity and triggers task removal cleanup in the OS, causing OEM dialer handover.
+            CallBubbleOverlay.isCallActivityVisible = false
+            setCallTaskExcludedFromRecents(true)
             CallBubbleOverlay.showFromCallActivityExit(this)
-            MyInCallService.getInstance()?.showCallBubbleIfNeeded()
-            if (CallBubbleOverlay.canShow(this)) {
-                finishAndRemoveTask()
-            }
+            MyInCallService.getInstance()?.onActivityLeftDuringCall("CallActivity.onUserLeaveHint")
         }
     }
 
@@ -2187,18 +2219,15 @@ class CallActivity : ComponentActivity() {
         CallBubbleOverlay.isCallActivityVisible = false
         super.onStop()
         if (!isFinishing && !isFinishingCallUi && !isEndCallRequested && hasLiveCall()) {
+            setCallTaskExcludedFromRecents(true)
             CallBubbleOverlay.showFromCallActivityExit(this)
-            MyInCallService.getInstance()?.showCallBubbleIfNeeded()
+            MyInCallService.getInstance()?.onActivityLeftDuringCall("CallActivity.onStop")
         }
     }
 
     override fun onBackPressed() {
         if (hasLiveCall() && !isFinishingCallUi && !isEndCallRequested) {
-            CallBubbleOverlay.showFromCallActivityExit(this)
-            MyInCallService.getInstance()?.showCallBubbleIfNeeded()
-            if (!isFinishing && !isDestroyed) {
-                finish()
-            }
+            backgroundCallUiDuringActiveCall("back_press")
         } else {
             finishCallUiAfterCall("back_press")
         }
