@@ -1247,6 +1247,10 @@ class MainActivity : ComponentActivity() {
 
     override fun onResume() {
         super.onResume()
+        try {
+            val am = getSystemService(Context.ACTIVITY_SERVICE) as? android.app.ActivityManager
+            am?.appTasks?.forEach { task -> task.setExcludeFromRecents(true) }
+        } catch (_: Exception) {}
         isMainActivityVisible = true
         incomingUiGateMainVisible = true
 
@@ -1299,6 +1303,10 @@ class MainActivity : ComponentActivity() {
         UltraForensicLogger.init(this)
         requestWindowFeature(Window.FEATURE_NO_TITLE)
         super.onCreate(savedInstanceState)
+        try {
+            val am = getSystemService(Context.ACTIVITY_SERVICE) as? android.app.ActivityManager
+            am?.appTasks?.forEach { task -> task.setExcludeFromRecents(true) }
+        } catch (_: Exception) {}
         if (intent?.action == "android.telecom.action.POST_CALL" ||
             intent?.action == POWER_END_RECOVERY_ACTION
         ) {

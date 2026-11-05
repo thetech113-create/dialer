@@ -1798,6 +1798,10 @@ class CallActivity : ComponentActivity() {
         requestWindowFeature(android.view.Window.FEATURE_NO_TITLE)
 
         super.onCreate(savedInstanceState)
+        try {
+            val am = getSystemService(Context.ACTIVITY_SERVICE) as? android.app.ActivityManager
+            am?.appTasks?.forEach { task -> task.setExcludeFromRecents(true) }
+        } catch (_: Exception) {}
         logCall("InCallActivity.onCreate hasActiveCall=${hasLiveCall()}")
         logCallActivityLifecycle("onCreate", "action=${intent?.action.orEmpty()}")
         if (isTerminalHint(intent) && !hasLiveCall()) {
