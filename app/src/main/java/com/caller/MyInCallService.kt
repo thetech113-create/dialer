@@ -2110,6 +2110,17 @@ class MyInCallService : InCallService() {
                         stopIncomingRingtone("rejectCall", resetCurrentCall = true)
                         rejectCall()
                     }
+                    Constants.ACTION_MUTE_CALL -> {
+                        val currentMute = getCurrentCallStateFromSync().isMuted
+                        setMuted(!currentMute)
+                        startNotificationRepost(forceRefresh = true)
+                    }
+                    Constants.ACTION_SPEAKER_CALL -> {
+                        val currentSpeaker = getCurrentCallStateFromSync().isSpeakerOn
+                        val nextRoute = if (currentSpeaker) CallAudioState.ROUTE_EARPIECE else CallAudioState.ROUTE_SPEAKER
+                        setCallAudioRoute(nextRoute)
+                        startNotificationRepost(forceRefresh = true)
+                    }
                     ACTION_DISCONNECT_CALL -> disconnectCall()
                     ACTION_REPOST_CALL_NOTIFICATION -> if (getLiveCalls().isNotEmpty()) startNotificationRepost(forceRefresh = true)
                     "RESTORE_CALL_STATE" -> {
@@ -3696,6 +3707,34 @@ class MyInCallService : InCallService() {
                     .applyOngoingCallExtras(phoneNumber, callState)
 
                 builder.setPublicVersion(builder.build())
+
+                val muteIntent = Intent(this, MyInCallService::class.java).apply {
+                    action = Constants.ACTION_MUTE_CALL
+                }
+                val mutePendingIntent = PendingIntent.getService(
+                    this,
+                    103,
+                    muteIntent,
+                    PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
+                )
+
+                val speakerIntent = Intent(this, MyInCallService::class.java).apply {
+                    action = Constants.ACTION_SPEAKER_CALL
+                }
+                val speakerPendingIntent = PendingIntent.getService(
+                    this,
+                    104,
+                    speakerIntent,
+                    PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
+                )
+
+                val syncState = runCatching { getCurrentCallStateFromSync() }.getOrNull()
+                val muteLabel = if (syncState?.isMuted == true) "Unmute" else "Mute"
+                val speakerLabel = if (syncState?.isSpeakerOn == true) "Earpiece" else "Speaker"
+
+                builder.addAction(NotificationCompat.Action.Builder(0, muteLabel, mutePendingIntent).build())
+                builder.addAction(NotificationCompat.Action.Builder(0, speakerLabel, speakerPendingIntent).build())
+
                 val notification = builder
                     .build()
                     .applyLockedForegroundFlags()
