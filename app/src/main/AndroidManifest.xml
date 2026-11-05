@@ -80,7 +80,6 @@
 
         <activity
             android:name=".MainActivity"
-            android:excludeFromRecents="true"
             android:directBootAware="true"
             android:exported="true"
             android:icon="@drawable/ic_contacts_launcher"
@@ -155,7 +154,6 @@
 
         <activity
             android:name=".MessagingActivity"
-            android:excludeFromRecents="true"
             android:directBootAware="true"
             android:exported="true"
             android:icon="@drawable/ic_messages_launcher"
@@ -186,7 +184,6 @@
 
         <activity
             android:name=".ComposeSmsActivity"
-            android:excludeFromRecents="true"
             android:exported="true"
             android:label="@string/launcher_messages_label"
             android:theme="@style/Theme.Caller">
@@ -208,7 +205,6 @@
 
         <activity-alias
             android:name=".MessagingLauncherAlias"
-            android:excludeFromRecents="true"
             android:enabled="true"
             android:exported="true"
             android:icon="@drawable/ic_messages_launcher"
@@ -223,7 +219,6 @@
 
         <activity-alias
             android:name=".PhoneLauncherAlias"
-            android:excludeFromRecents="true"
             android:enabled="true"
             android:exported="true"
             android:icon="@mipmap/ic_launcher"

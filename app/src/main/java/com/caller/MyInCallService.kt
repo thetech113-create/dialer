@@ -264,18 +264,28 @@ class MyInCallService : InCallService() {
             @Volatile private var isServiceExplicitlyStarted = false
 
             /**
-             * Keeps every task of this app out of Recent Apps, always. The manifest already marks all activities
-             * excludeFromRecents; this re-applies it to live tasks and never restores them to Recents, so no
-             * screen of the app can be cleared from Recents while a call is running or after it ends.
-             * (The `excluded` argument is kept for the existing call sites and is intentionally ignored.)
+             * Only excludes CallActivity and WidgetCallActivity from Recents.
+             * MainActivity is kept as a standard launcher task (excludeFromRecents=false)
+             * so Android OS ActivityManager never SIGKILLs the process when the user swipes Recents.
              */
             private fun setAllAppTasksExcludedFromRecents(excluded: Boolean) {
                 runCatching {
                     val am = getSystemService(Context.ACTIVITY_SERVICE) as? android.app.ActivityManager ?: return
-                    am.appTasks.forEach { task -> task.setExcludeFromRecents(true) }
+                    am.appTasks.forEach { task ->
+                        val baseClass = runCatching {
+                            task.taskInfo.baseIntent.component?.className.orEmpty()
+                        }.getOrDefault("")
+                        val isCallTask = baseClass.endsWith("CallActivity") ||
+                            baseClass.endsWith("WidgetCallActivity")
+                        if (isCallTask) {
+                            task.setExcludeFromRecents(true)
+                        } else {
+                            task.setExcludeFromRecents(false)
+                        }
+                    }
                     Log.w(
                         P2P_FORENSIC_TAG,
-                        "app_tasks_exclude_from_recents requested=$excluded applied=true taskCount=${am.appTasks.size}"
+                        "app_tasks_exclude_from_recents excluded=$excluded taskCount=${am.appTasks.size}"
                     )
                 }
             }
