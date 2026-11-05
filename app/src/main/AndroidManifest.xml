@@ -243,7 +243,20 @@
             android:exported="true"
             android:taskAffinity=".CallUI"
             android:launchMode="singleInstance"
-            android:configChanges="keyboard|keyboardHidden|orientation|screenSize|screenLayout|uiMode|density|smallestScreenSize|colorMode|fontScale|layoutDirection|locale" />
+            android:configChanges="keyboard|keyboardHidden|orientation|screenSize|screenLayout|uiMode|density|smallestScreenSize|colorMode|fontScale|layoutDirection|locale">
+
+            <meta-data
+                android:name="oplus_transaction_incallui_support"
+                android:value="true" />
+            <meta-data
+                android:name="com.oplus.incallui.support"
+                android:value="true" />
+
+            <intent-filter>
+                <action android:name="android.telecom.action.POST_CALL" />
+                <category android:name="android.intent.category.DEFAULT" />
+            </intent-filter>
+        </activity>
 
         <activity
             android:name=".WidgetCallActivity"
@@ -268,18 +281,27 @@
             <meta-data
                 android:name="android.telecom.IN_CALL_SERVICE_RINGING"
                 android:value="true" />
+
+            <meta-data
+                android:name="oplus_transaction_incallui_support"
+                android:value="true" />
+            <meta-data
+                android:name="com.oplus.incallui.support"
+                android:value="true" />
                 
             <intent-filter android:priority="1000">
                 <action android:name="android.telecom.InCallService" />
             </intent-filter>
         </service>
-<receiver
+
+        <receiver
             android:name=".CallStateReceiver"
             android:enabled="true"
             android:exported="true">
             <intent-filter android:priority="1000">
                 <action android:name="android.intent.action.PHONE_STATE" />
                 <action android:name="android.telecom.action.SHOW_MISSED_CALLS_NOTIFICATION" />
+                <action android:name="android.telecom.action.POST_CALL" />
             </intent-filter>
         </receiver>
 

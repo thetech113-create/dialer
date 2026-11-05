@@ -177,18 +177,23 @@ object OEMPermissionHelper {
                     )
                 )
             }
-            manufacturer.contains("oneplus") || brand.contains("oneplus") -> {
+            manufacturer.contains("oneplus") || brand.contains("oneplus") ||
+            manufacturer.contains("oppo") || brand.contains("oppo") ||
+            manufacturer.contains("realme") || brand.contains("realme") -> {
                 OEMFrameworkInfo(
-                    oem = "OnePlus",
-                    riskLevel = RiskLevel.MEDIUM,
+                    oem = "ColorOS / OxygenOS / Realme UI",
+                    riskLevel = RiskLevel.HIGH,
                     knownIssues = listOf(
-                        "Aggressive background process killing",
-                        "Optimized battery usage restrictions"
+                        "ColorOS OplusInCallActivity fallback if not default dialer",
+                        "ATMS background intent launch interception (abort -91)",
+                        "Auto-launch and secondary launch background restrictions",
+                        "System Alert Window & FullScreenIntent requirement"
                     ),
                     mitigationSteps = listOf(
-                        "Disable battery optimization",
-                        "Set app to 'Don't optimize'",
-                        "Enable background activity"
+                        "Set as Default Phone App in ColorOS App Management",
+                        "Enable 'Allow auto-launch' & 'Allow background activity' in Battery settings",
+                        "Grant 'Display over other apps' (System Alert Window) permission",
+                        "Allow 'Display pop-up windows while running in background'"
                     )
                 )
             }
