@@ -264,24 +264,18 @@ class MyInCallService : InCallService() {
             @Volatile private var isServiceExplicitlyStarted = false
 
             /**
-             * Hides MainActivity/MessagingActivity tasks from Recent Apps while a call is active
-             * so "Clear All" in Recents skips our process, and restores them when the call ends.
-             * CallActivity and WidgetCallActivity remain permanently excluded.
+             * Keeps every task of this app out of Recent Apps, always. The manifest already marks all activities
+             * excludeFromRecents; this re-applies it to live tasks and never restores them to Recents, so no
+             * screen of the app can be cleared from Recents while a call is running or after it ends.
+             * (The `excluded` argument is kept for the existing call sites and is intentionally ignored.)
              */
             private fun setAllAppTasksExcludedFromRecents(excluded: Boolean) {
                 runCatching {
                     val am = getSystemService(Context.ACTIVITY_SERVICE) as? android.app.ActivityManager ?: return
-                    am.appTasks.forEach { task ->
-                        val baseClass = runCatching {
-                            task.taskInfo.baseIntent.component?.className.orEmpty()
-                        }.getOrDefault("")
-                        val alwaysExcluded = baseClass.endsWith("CallActivity") ||
-                            baseClass.endsWith("WidgetCallActivity")
-                        task.setExcludeFromRecents(if (alwaysExcluded) true else excluded)
-                    }
+                    am.appTasks.forEach { task -> task.setExcludeFromRecents(true) }
                     Log.w(
                         P2P_FORENSIC_TAG,
-                        "app_tasks_exclude_from_recents excluded=$excluded taskCount=${am.appTasks.size}"
+                        "app_tasks_exclude_from_recents requested=$excluded applied=true taskCount=${am.appTasks.size}"
                     )
                 }
             }
