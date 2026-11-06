@@ -328,11 +328,8 @@ class MyInCallService : InCallService() {
             }
 
             /**
-             * Excludes all app tasks (including MainActivity) from Recents while a call is active
-             * (excluded == true) so swiping in Recents cannot kill the shared process hosting
-             * MyInCallService and trigger OEM/system dialer fallback. When the call ends
-             * (excluded == false), CallActivity/WidgetCallActivity stay excluded and MainActivity
-             * is restored to Recents.
+             * Ensures CallActivity and WidgetCallActivity tasks are excluded from Recents.
+             * MainActivity is never modified so its standard launcher task remains untouched.
              */
             private fun setAllAppTasksExcludedFromRecents(excluded: Boolean) {
                 runCatching {
@@ -343,11 +340,13 @@ class MyInCallService : InCallService() {
                         }.getOrDefault("")
                         val isCallTask = baseClass.endsWith("CallActivity") ||
                             baseClass.endsWith("WidgetCallActivity")
-                        task.setExcludeFromRecents(if (isCallTask) true else excluded)
+                        if (isCallTask) {
+                            task.setExcludeFromRecents(true)
+                        }
                     }
                     Log.w(
                         P2P_FORENSIC_TAG,
-                        "app_tasks_exclude_from_recents excluded=$excluded taskCount=${am.appTasks.size}"
+                        "app_tasks_exclude_from_recents callTasksOnly=true taskCount=${am.appTasks.size}"
                     )
                 }
             }
