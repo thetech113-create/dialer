@@ -3529,54 +3529,39 @@ class MyInCallService : InCallService() {
             }
 
             private fun getForegroundPackageName(): String {
-                if (MainActivity.isIncomingUiGateMainVisible()) {
-                    Log.w(
-                        P2P_FORENSIC_TAG,
-                        "incoming_foreground_source source=MainActivity.visibility package=$packageName"
-                    )
-                    return packageName
-                }
                 var currentApp = ""
                 try {
                     if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.LOLLIPOP) {
-                        // The app on screen = the last app whose activity came to the front, read from the activity
-                        // event log. (Daily usage totals' "last used" time is not "in front now": background apps,
-                        // the dialer or the launcher can be newer than the app the user is actually in.)
-                        val usageStatsManager = getSystemService(USAGE_STATS_SERVICE) as android.app.usage.UsageStatsManager
-                        val time = System.currentTimeMillis()
-                        val events = usageStatsManager.queryEvents(time - 6 * 60 * 60 * 1000L, time)
-                        val event = android.app.usage.UsageEvents.Event()
-                        @Suppress("DEPRECATION")
-                        val resumedType = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
-                            android.app.usage.UsageEvents.Event.ACTIVITY_RESUMED
-                        } else {
-                            android.app.usage.UsageEvents.Event.MOVE_TO_FOREGROUND
-                        }
-                        while (events.hasNextEvent()) {
-                            events.getNextEvent(event)
-                            if (event.eventType == resumedType) currentApp = event.packageName.orEmpty()
+                        val usageStatsManager = getSystemService(USAGE_STATS_SERVICE) as? android.app.usage.UsageStatsManager
+                        if (usageStatsManager != null) {
+                            val time = System.currentTimeMillis()
+                            val events = usageStatsManager.queryEvents(time - 6 * 60 * 60 * 1000L, time)
+                            val event = android.app.usage.UsageEvents.Event()
+                            @Suppress("DEPRECATION")
+                            val resumedType = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+                                android.app.usage.UsageEvents.Event.ACTIVITY_RESUMED
+                            } else {
+                                android.app.usage.UsageEvents.Event.MOVE_TO_FOREGROUND
+                            }
+                            while (events.hasNextEvent()) {
+                                events.getNextEvent(event)
+                                if (event.eventType == resumedType) currentApp = event.packageName.orEmpty()
+                            }
                         }
                     } else {
-                        val activityManager = getSystemService(ACTIVITY_SERVICE) as android.app.ActivityManager
+                        val activityManager = getSystemService(ACTIVITY_SERVICE) as? android.app.ActivityManager
                         @Suppress("DEPRECATION")
-                        val tasks = activityManager.getRunningTasks(1)
-                        if (tasks.isNotEmpty()) {
+                        val tasks = activityManager?.getRunningTasks(1)
+                        if (!tasks.isNullOrEmpty()) {
                             currentApp = tasks[0].topActivity?.packageName.orEmpty()
                         }
                     }
-                } catch (e: Exception) {
-                    UltraForensicLogger.debug(
-                        "FullScreenIntent",
-                        "ERROR",
-                        "Failed to query foreground package: ${e.message}"
-                    )
-                }
+                } catch (_: Exception) {}
                 return currentApp.takeUnless { it.equals("UNKNOWN", ignoreCase = true) }.orEmpty()
             }
 
             private fun resolveIncomingCallNotificationDecision(): IncomingCallNotificationDecision {
-                // Our own main screen on top counts as "in the dialer" even without Usage access.
-                val foregroundPackage = if (MainActivity.isIncomingUiGateMainVisible()) packageName else getForegroundPackageName()
+                val foregroundPackage = getForegroundPackageName()
                 val launcherPackage = getDefaultLauncherPackage()
                 val defaultDialerPackage = try {
                     resolveDefaultDialerPackage(this@MyInCallService)
@@ -3600,8 +3585,7 @@ class MyInCallService : InCallService() {
                     myPackage = packageName,
                     defaultDialerPackage = defaultDialerPackage,
                     launcherPackage = launcherPackage,
-                    // Full screen only in the dialer / on the home screen / locked / screen off.
-                    assumeDialerOwnership = false,
+                    assumeDialerOwnership = true,
                     isDeviceLocked = isDeviceLocked,
                     isScreenInteractive = isScreenInteractive
                 )
