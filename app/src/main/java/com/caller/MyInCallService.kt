@@ -3715,21 +3715,6 @@ class MyInCallService : InCallService() {
                     showCallBubbleIfNeeded(launchFullScreenWhenOverlayUnavailable = false)
                 }
 
-                val publicIncomingNotification = NotificationCompat.Builder(this, incomingCallChannelId)
-                    .setSmallIcon(android.R.drawable.ic_menu_call)
-                    .setContentTitle("Incoming Call")
-                    .setContentText(displayText)
-                    .setPriority(NotificationCompat.PRIORITY_MAX)
-                    .setCategory(NotificationCompat.CATEGORY_CALL)
-                    .setVisibility(NotificationCompat.VISIBILITY_PUBLIC)
-                    .setContentIntent(fullScreenPendingIntent)
-                    .setStyle(style)
-                    .setOngoing(true)
-                    .setAutoCancel(false)
-                    .setOnlyAlertOnce(true)
-                    .build()
-
-                builder.setPublicVersion(publicIncomingNotification)
                 val notification = builder.build().applyLockedForegroundFlags()
 
                 try {
@@ -3825,26 +3810,6 @@ class MyInCallService : InCallService() {
 
                 builder.addAction(muteAction)
                 builder.addAction(speakerAction)
-
-                val publicBuilder = NotificationCompat.Builder(this, channelId)
-                    .setSmallIcon(android.R.drawable.ic_menu_call)
-                    .setContentTitle(title)
-                    .setContentText(text)
-                    .setPriority(NotificationCompat.PRIORITY_MAX)
-                    .setCategory(NotificationCompat.CATEGORY_CALL)
-                    .setVisibility(NotificationCompat.VISIBILITY_PUBLIC)
-                    .setContentIntent(pendingIntent)
-                    .setStyle(style)
-                    .setOngoing(true)
-                    .setSilent(true)
-                    .setOnlyAlertOnce(true)
-                    .setAutoCancel(false)
-                    .applyOngoingCallExtras(phoneNumber, callState)
-                    .addAction(muteAction)
-                    .addAction(speakerAction)
-
-                val publicNotification = publicBuilder.build()
-                builder.setPublicVersion(publicNotification)
 
                 return builder.build().applyLockedForegroundFlags()
             }
