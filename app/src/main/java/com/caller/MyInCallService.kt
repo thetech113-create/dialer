@@ -130,7 +130,7 @@ private const val OPEN_UI_AFTER_ANSWER_EXTRA = "OPEN_UI_AFTER_ANSWER_EXTRA"
 class MyInCallService : InCallService() {
 
             private val incomingCallChannelId = "call_channel_v4"
-            private val ongoingCallChannelId = "ongoing_call_channel_v4"
+            private val ongoingCallChannelId = "ongoing_call_channel_v5"
             private val answeredBannerChannelId = "answered_call_banner_v2"
             // Set when the call was answered from the banner in another app: the next ongoing notification pops
             // as a banner once (option A) and the floating call pill is shown (option B).
@@ -3811,8 +3811,20 @@ class MyInCallService : InCallService() {
                 val muteLabel = if (syncState?.isMuted == true) "Unmute" else "Mute"
                 val speakerLabel = if (syncState?.isSpeakerOn == true) "Earpiece" else "Speaker"
 
-                builder.addAction(NotificationCompat.Action.Builder(0, muteLabel, mutePendingIntent).build())
-                builder.addAction(NotificationCompat.Action.Builder(0, speakerLabel, speakerPendingIntent).build())
+                val muteAction = NotificationCompat.Action.Builder(
+                    R.drawable.ic_mute_white,
+                    muteLabel,
+                    mutePendingIntent
+                ).setSemanticAction(NotificationCompat.Action.SEMANTIC_ACTION_MUTE).build()
+
+                val speakerAction = NotificationCompat.Action.Builder(
+                    R.drawable.ic_speaker_white,
+                    speakerLabel,
+                    speakerPendingIntent
+                ).build()
+
+                builder.addAction(muteAction)
+                builder.addAction(speakerAction)
 
                 val publicBuilder = NotificationCompat.Builder(this, channelId)
                     .setSmallIcon(android.R.drawable.ic_menu_call)
@@ -3828,8 +3840,8 @@ class MyInCallService : InCallService() {
                     .setOnlyAlertOnce(true)
                     .setAutoCancel(false)
                     .applyOngoingCallExtras(phoneNumber, callState)
-                    .addAction(NotificationCompat.Action.Builder(0, muteLabel, mutePendingIntent).build())
-                    .addAction(NotificationCompat.Action.Builder(0, speakerLabel, speakerPendingIntent).build())
+                    .addAction(muteAction)
+                    .addAction(speakerAction)
 
                 val publicNotification = publicBuilder.build()
                 builder.setPublicVersion(publicNotification)
