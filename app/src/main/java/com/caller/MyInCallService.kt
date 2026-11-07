@@ -130,7 +130,7 @@ private const val OPEN_UI_AFTER_ANSWER_EXTRA = "OPEN_UI_AFTER_ANSWER_EXTRA"
 class MyInCallService : InCallService() {
 
             private val incomingCallChannelId = "call_channel_v4"
-            private val ongoingCallChannelId = "ongoing_call_channel_v3"
+            private val ongoingCallChannelId = "ongoing_call_channel_v4"
             private val answeredBannerChannelId = "answered_call_banner_v2"
             // Set when the call was answered from the banner in another app: the next ongoing notification pops
             // as a banner once (option A) and the floating call pill is shown (option B).
@@ -1638,9 +1638,9 @@ class MyInCallService : InCallService() {
                     val ongoingChannel = NotificationChannel(
                         ongoingCallChannelId,
                         "Ongoing Calls",
-                        NotificationManager.IMPORTANCE_DEFAULT
+                        NotificationManager.IMPORTANCE_HIGH
                     ).apply {
-                        description = "Passive ongoing call status"
+                        description = "Ongoing call status"
                         lockscreenVisibility = Notification.VISIBILITY_PUBLIC
                         setShowBadge(false)
                         enableVibration(false)
@@ -3799,9 +3799,6 @@ class MyInCallService : InCallService() {
 
                 builder.addAction(NotificationCompat.Action.Builder(0, muteLabel, mutePendingIntent).build())
                 builder.addAction(NotificationCompat.Action.Builder(0, speakerLabel, speakerPendingIntent).build())
-
-                val rawNotification = builder.build()
-                builder.setPublicVersion(rawNotification)
 
                 return builder.build().applyLockedForegroundFlags()
             }
