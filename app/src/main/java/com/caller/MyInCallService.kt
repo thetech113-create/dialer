@@ -3726,100 +3726,22 @@ class MyInCallService : InCallService() {
                 }
             }
 
-            private fun buildImmediateCallNotification(phoneNumber: String, contactName: String, isConf: Boolean, callState: String = "ACTIVE"): android.app.Notification {
-                // Quick notification builder for immediate foreground service elevation
-                val intent = Intent(this, CallActivity::class.java).apply {
-                    action = CALL_UI_ACTION_WAKE
-                    putExtra("WAKE_REASON", "immediate_foreground_$callState")
-                    attachCallUiHint(phoneNumber, callState, contactName, isConf)
-                    addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_SINGLE_TOP or Intent.FLAG_ACTIVITY_CLEAR_TOP or Intent.FLAG_ACTIVITY_REORDER_TO_FRONT)
-                }
-                
-                val flags = PendingIntent.FLAG_CANCEL_CURRENT or PendingIntent.FLAG_IMMUTABLE
-                val pendingIntent = PendingIntent.getActivity(
-                    this,
-                    2003,
-                    intent,
-                    flags
-                )
-
-                val title = when {
-                    isConf -> "Conference Call"
-                    callState == "HOLDING" -> "On Hold"
-                    contactName == "Unknown" -> "Ongoing Call"
-                    else -> contactName
-                }
-                val text = when {
-                    isConf -> "Tap to return to conference"
-                    callState == "HOLDING" -> if (contactName == "Unknown") "On hold: $phoneNumber" else "On hold: $contactName"
-                    contactName == "Unknown" -> "Tap to return: $phoneNumber"
-                    else -> phoneNumber
-                }
-                val immediateNotificationCallKey = lastCallUiSnapshot
-                    ?.takeIf { it.isInCall && it.primaryNumber == phoneNumber }
-                    ?.primaryCallId
-                    .orEmpty()
-                    .ifBlank { buildCallResolutionKey(null, phoneNumber) }
-                logCallerDisplayResolution(
-                    event = "notification_publish",
-                    callKey = immediateNotificationCallKey,
-                    rawNumber = phoneNumber,
-                    extra = "surface=immediate state=$callState",
-                    windowMs = 1000L
-                )
-
-                val displayName = when {
-                    isConf -> "Conference Call"
-                    contactName == "Unknown" -> phoneNumber
-                    else -> contactName
-                }
-                val person = buildCallStylePerson(displayName)
-                val style = NotificationCompat.CallStyle.forOngoingCall(
-                    person,
-                    buildDisconnectPendingIntent()
-                )
-
-                val builder = NotificationCompat.Builder(this, ongoingCallChannelId)
-                    .setSmallIcon(android.R.drawable.ic_menu_call)
-                    .setContentTitle(title)
-                    .setContentText(text)
-                    .setPriority(NotificationCompat.PRIORITY_HIGH)
-                    .setCategory(NotificationCompat.CATEGORY_CALL)
-                    .setVisibility(NotificationCompat.VISIBILITY_PUBLIC)
-                    .setContentIntent(pendingIntent)
-                    .setStyle(style)
-                    .setOngoing(true)
-                    .setSilent(true)
-                    .setOnlyAlertOnce(true)
-                    .setAutoCancel(false)
-                    .applyOngoingCallExtras(phoneNumber, callState)
-
-                builder.setPublicVersion(builder.build())
-                return builder.build().applyLockedForegroundFlags()
-            }
-
-            private fun showOngoingCallNotification(phoneNumber: String, contactName: String, isConf: Boolean, callState: String = "ACTIVE") {
-                stopIncomingRingtone("showOngoingCallNotification", resetCurrentCall = true)
+            private fun buildUnifiedOngoingCallNotification(
+                phoneNumber: String,
+                contactName: String,
+                isConf: Boolean,
+                callState: String = "ACTIVE",
+                popAsBanner: Boolean = false
+            ): android.app.Notification {
                 val intent = Intent(this, CallActivity::class.java).apply {
                     action = CALL_UI_ACTION_WAKE
                     putExtra("WAKE_REASON", "ongoing_notification_$callState")
                     attachCallUiHint(phoneNumber, callState, contactName, isConf)
-                    addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_SINGLE_TOP or Intent.FLAG_ACTIVITY_CLEAR_TOP)
+                    addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_SINGLE_TOP or Intent.FLAG_ACTIVITY_CLEAR_TOP or Intent.FLAG_ACTIVITY_REORDER_TO_FRONT)
                 }
                 
-                val flags = PendingIntent.FLAG_CANCEL_CURRENT or PendingIntent.FLAG_IMMUTABLE
-                val pendingIntent = PendingIntent.getActivity(
-                    this,
-                    2002,
-                    intent,
-                    flags
-                )
-
-                val shouldWakeOutgoingUi = false
-                Log.w(
-                    P2P_FORENSIC_TAG,
-                    "ongoing_notification_wake raw=${maskP2PNumberForLog(phoneNumber)} state=$callState shouldWakeOutgoingUi=$shouldWakeOutgoingUi"
-                )
+                val flags = PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
+                val pendingIntent = PendingIntent.getActivity(this, 2002, intent, flags)
 
                 val title = when {
                     isConf -> "Conference Call"
@@ -3833,18 +3755,6 @@ class MyInCallService : InCallService() {
                     contactName == "Unknown" -> "Tap to return: $phoneNumber"
                     else -> phoneNumber
                 }
-                val ongoingNotificationCallKey = lastCallUiSnapshot
-                    ?.takeIf { it.isInCall && it.primaryNumber == phoneNumber }
-                    ?.primaryCallId
-                    .orEmpty()
-                    .ifBlank { buildCallResolutionKey(null, phoneNumber) }
-                logCallerDisplayResolution(
-                    event = "notification_publish",
-                    callKey = ongoingNotificationCallKey,
-                    rawNumber = phoneNumber,
-                    extra = "surface=ongoing state=$callState",
-                    windowMs = 1000L
-                )
 
                 val displayName = when {
                     isConf -> "Conference Call"
@@ -3857,15 +3767,12 @@ class MyInCallService : InCallService() {
                     buildDisconnectPendingIntent()
                 )
 
-                // Answered from the banner in another app: this one post alerts on the silent high-priority channel,
-                // so the banner on screen turns into the call (name, timer, Hang up) for a few seconds.
-                val popAsBanner = answeredFromBannerPopPending && callState == "ACTIVE"
-                if (popAsBanner) answeredFromBannerPopPending = false
-                val builder = NotificationCompat.Builder(this, if (popAsBanner) answeredBannerChannelId else ongoingCallChannelId)
+                val channelId = if (popAsBanner) answeredBannerChannelId else ongoingCallChannelId
+                val builder = NotificationCompat.Builder(this, channelId)
                     .setSmallIcon(android.R.drawable.ic_menu_call)
                     .setContentTitle(title)
                     .setContentText(text)
-                    .setPriority(NotificationCompat.PRIORITY_HIGH)
+                    .setPriority(NotificationCompat.PRIORITY_MAX)
                     .setCategory(NotificationCompat.CATEGORY_CALL)
                     .setVisibility(NotificationCompat.VISIBILITY_PUBLIC)
                     .setContentIntent(pendingIntent)
@@ -3876,27 +3783,15 @@ class MyInCallService : InCallService() {
                     .setAutoCancel(false)
                     .applyOngoingCallExtras(phoneNumber, callState)
 
-                builder.setPublicVersion(builder.build())
-
                 val muteIntent = Intent(this, MyInCallService::class.java).apply {
                     action = Constants.ACTION_MUTE_CALL
                 }
-                val mutePendingIntent = PendingIntent.getService(
-                    this,
-                    103,
-                    muteIntent,
-                    PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
-                )
+                val mutePendingIntent = PendingIntent.getService(this, 103, muteIntent, PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE)
 
                 val speakerIntent = Intent(this, MyInCallService::class.java).apply {
                     action = Constants.ACTION_SPEAKER_CALL
                 }
-                val speakerPendingIntent = PendingIntent.getService(
-                    this,
-                    104,
-                    speakerIntent,
-                    PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
-                )
+                val speakerPendingIntent = PendingIntent.getService(this, 104, speakerIntent, PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE)
 
                 val syncState = runCatching { getCurrentCallStateFromSync() }.getOrNull()
                 val muteLabel = if (syncState?.isMuted == true) "Unmute" else "Mute"
@@ -3905,14 +3800,27 @@ class MyInCallService : InCallService() {
                 builder.addAction(NotificationCompat.Action.Builder(0, muteLabel, mutePendingIntent).build())
                 builder.addAction(NotificationCompat.Action.Builder(0, speakerLabel, speakerPendingIntent).build())
 
-                val notification = builder
-                    .build()
-                    .applyLockedForegroundFlags()
+                val rawNotification = builder.build()
+                builder.setPublicVersion(rawNotification)
+
+                return builder.build().applyLockedForegroundFlags()
+            }
+
+            private fun buildImmediateCallNotification(phoneNumber: String, contactName: String, isConf: Boolean, callState: String = "ACTIVE"): android.app.Notification {
+                return buildUnifiedOngoingCallNotification(phoneNumber, contactName, isConf, callState, popAsBanner = false)
+            }
+
+            private fun showOngoingCallNotification(phoneNumber: String, contactName: String, isConf: Boolean, callState: String = "ACTIVE") {
+                stopIncomingRingtone("showOngoingCallNotification", resetCurrentCall = true)
+                val popAsBanner = answeredFromBannerPopPending && callState == "ACTIVE"
+                if (popAsBanner) answeredFromBannerPopPending = false
+
+                val notification = buildUnifiedOngoingCallNotification(phoneNumber, contactName, isConf, callState, popAsBanner = popAsBanner)
 
                 try {
                     startCallForeground(notification)
                 } catch (e: Exception) {
-                    com.caller.logging.UltraForensicLogger.deepest("Failed to start foreground service: ${e.message}")
+                    UltraForensicLogger.deepest("Failed to start foreground service: ${e.message}")
                     getSystemService(NotificationManager::class.java).notify(Constants.NOTIFICATION_ID_ONGOING_CALL, notification)
                 }
             }
