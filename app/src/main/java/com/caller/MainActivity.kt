@@ -2235,7 +2235,8 @@ class MainActivity : ComponentActivity() {
             MyInCallService.getInstance()?.onActivityLeftDuringCall("MainActivity.onBackPressed")
             moveTaskToBack(true)
         } else {
-            moveTaskToBack(true)
+            @Suppress("DEPRECATION")
+            super.onBackPressed()
         }
     }
 
