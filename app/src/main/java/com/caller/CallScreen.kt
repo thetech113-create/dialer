@@ -51,6 +51,8 @@ import android.telecom.VideoProfile
 import android.view.Surface
 import android.view.WindowManager
 import android.widget.Toast
+import androidx.compose.ui.layout.onGloballyPositioned
+import androidx.compose.ui.layout.positionInWindow
 import androidx.compose.ui.viewinterop.AndroidView
 import androidx.core.content.ContextCompat
 import androidx.activity.ComponentActivity
@@ -1323,7 +1325,11 @@ private fun ModernCallingScreenLayout(
                         }
                     } else {
                         Card(
-                            modifier = Modifier.fillMaxWidth(),
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .onGloballyPositioned {
+                                    Log.w(CALL_UI_FORENSIC_TAG, "bottom_card topY=${it.positionInWindow().y} h=${it.size.height} root=${it.parentLayoutCoordinates?.size}")
+                                },
                             shape = RoundedCornerShape(32.dp),
                             colors = CardDefaults.cardColors(containerColor = palette.cardSurface)
                         ) {
@@ -1869,10 +1875,6 @@ class CallActivity : ComponentActivity() {
         // 2. FORCED SYSTEM BAR REMOVAL
         actionBar?.hide()
         enableEdgeToEdge()
-        window.setFlags(
-            android.view.WindowManager.LayoutParams.FLAG_LAYOUT_NO_LIMITS,
-            android.view.WindowManager.LayoutParams.FLAG_LAYOUT_NO_LIMITS
-        )
 
         window.statusBarColor = android.graphics.Color.TRANSPARENT
         window.navigationBarColor = android.graphics.Color.TRANSPARENT

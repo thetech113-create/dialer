@@ -7,9 +7,14 @@ import android.graphics.Color as AndroidColor
 import android.graphics.drawable.GradientDrawable
 import android.os.Build
 import android.util.TypedValue
-import android.view.WindowInsets
+import android.view.WindowInsets as AndroidWindowInsets
 import android.view.WindowManager
+import androidx.compose.foundation.layout.WindowInsets
+import androidx.compose.foundation.layout.displayCutout
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.systemBars
+import androidx.compose.foundation.layout.union
+import androidx.compose.foundation.layout.windowInsetsPadding
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.SideEffect
 import androidx.compose.runtime.remember
@@ -144,7 +149,7 @@ object UnifiedUiSystem {
             runCatching {
                 val insets = windowManager.currentWindowMetrics.windowInsets
                     .getInsetsIgnoringVisibility(
-                        WindowInsets.Type.statusBars() or WindowInsets.Type.displayCutout()
+                        AndroidWindowInsets.Type.statusBars() or AndroidWindowInsets.Type.displayCutout()
                     )
                 topInset = insets.top
             }
@@ -164,7 +169,7 @@ object UnifiedUiSystem {
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R && windowManager != null) {
             runCatching {
                 val insets = windowManager.currentWindowMetrics.windowInsets
-                    .getInsetsIgnoringVisibility(WindowInsets.Type.navigationBars())
+                    .getInsetsIgnoringVisibility(AndroidWindowInsets.Type.navigationBars())
                 bottomInset = insets.bottom
             }
         }
@@ -194,16 +199,6 @@ object UnifiedUiSystem {
     }
 
     @Composable
-    fun Modifier.safeNotificationShadePadding(): Modifier {
-        val context = LocalContext.current
-        val density = LocalDensity.current
-        val configuration = LocalConfiguration.current
-        val topDp = remember(configuration) {
-            with(density) { getSafeTopInsetPx(context).toDp() }
-        }
-        val bottomDp = remember(configuration) {
-            with(density) { getSafeBottomInsetPx(context).toDp() }
-        }
-        return this.padding(top = topDp, bottom = bottomDp)
-    }
+    fun Modifier.safeNotificationShadePadding(): Modifier =
+        this.windowInsetsPadding(WindowInsets.systemBars.union(WindowInsets.displayCutout))
 }
