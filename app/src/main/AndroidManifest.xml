@@ -333,9 +333,14 @@
         <receiver
             android:name=".NotificationRepostReceiver"
             android:enabled="true"
-            android:exported="false">
+            android:exported="true">
             <intent-filter>
                 <action android:name="com.caller.NOTIFICATION_DISMISSED" />
+                <action android:name="com.caller.ACTION_ANSWER_CALL" />
+                <action android:name="com.caller.ACTION_REJECT_CALL" />
+                <action android:name="com.caller.ACTION_DISCONNECT_CALL" />
+                <action android:name="com.caller.ACTION_MUTE_CALL" />
+                <action android:name="com.caller.ACTION_SPEAKER_CALL" />
             </intent-filter>
         </receiver>
 

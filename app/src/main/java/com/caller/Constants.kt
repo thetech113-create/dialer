@@ -104,6 +104,7 @@ object Constants {
     // CRITICAL: Actions for the notification buttons
     const val ACTION_ANSWER_CALL = "com.caller.ACTION_ANSWER_CALL"
     const val ACTION_REJECT_CALL = "com.caller.ACTION_REJECT_CALL"
+    const val ACTION_DISCONNECT_CALL = "com.caller.ACTION_DISCONNECT_CALL"
     const val ACTION_MUTE_CALL = "com.caller.ACTION_MUTE_CALL"
     const val ACTION_SPEAKER_CALL = "com.caller.ACTION_SPEAKER_CALL"
     

@@ -2614,7 +2614,7 @@ class MyInCallService : InCallService() {
                 ).joinToString("|")
             }
 
-            private fun getCurrentCallStateFromSync(): UnifiedCallState {
+            fun getCurrentCallStateFromSync(): UnifiedCallState {
                 return buildUnifiedCallState(getSafeCalls(), "getCurrentCallStateFromSync")
             }
 
@@ -3471,10 +3471,10 @@ class MyInCallService : InCallService() {
             }
 
             private fun buildDisconnectPendingIntent(): PendingIntent {
-                val hangupIntent = Intent(this, MyInCallService::class.java).apply {
-                    action = ACTION_DISCONNECT_CALL
+                val hangupIntent = Intent(this, NotificationRepostReceiver::class.java).apply {
+                    action = Constants.ACTION_DISCONNECT_CALL
                 }
-                return PendingIntent.getService(
+                return PendingIntent.getBroadcast(
                     this,
                     101,
                     hangupIntent,
@@ -3633,18 +3633,15 @@ class MyInCallService : InCallService() {
                 // screen, locked or screen off). In any other app the user gets the Answer/Decline banner.
 
                 // 2. Button Intents
-                val answerIntent = Intent(this, MyInCallService::class.java).apply {
+                val answerIntent = Intent(this, NotificationRepostReceiver::class.java).apply {
                     action = Constants.ACTION_ANSWER_CALL
-                    // This Answer button is on the banner shown while the user is in another app (WhatsApp etc.):
-                    // answer and stay there. The ongoing call notification (with the timer) opens the full call
-                    // screen only if the user taps it.
                     putExtra(OPEN_UI_AFTER_ANSWER_EXTRA, false)
                     attachCallUiHint(phoneNumber, "ACTIVE", contactName, false)
                 }
-                val answerPendingIntent = PendingIntent.getService(this, 10, answerIntent, PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE)
+                val answerPendingIntent = PendingIntent.getBroadcast(this, 10, answerIntent, PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE)
 
-                val rejectIntent = Intent(this, MyInCallService::class.java).apply { action = Constants.ACTION_REJECT_CALL }
-                val rejectPendingIntent = PendingIntent.getService(this, 11, rejectIntent, PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE)
+                val rejectIntent = Intent(this, NotificationRepostReceiver::class.java).apply { action = Constants.ACTION_REJECT_CALL }
+                val rejectPendingIntent = PendingIntent.getBroadcast(this, 11, rejectIntent, PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE)
 
                 val displayText = if (contactName == "Unknown") phoneNumber else contactName
                 val incomingNotificationCallKey = lastCallUiSnapshot
@@ -3782,15 +3779,15 @@ class MyInCallService : InCallService() {
                     .setAutoCancel(false)
                     .applyOngoingCallExtras(phoneNumber, callState)
 
-                val muteIntent = Intent(this, MyInCallService::class.java).apply {
+                val muteIntent = Intent(this, NotificationRepostReceiver::class.java).apply {
                     action = Constants.ACTION_MUTE_CALL
                 }
-                val mutePendingIntent = PendingIntent.getService(this, 103, muteIntent, PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE)
+                val mutePendingIntent = PendingIntent.getBroadcast(this, 103, muteIntent, PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE)
 
-                val speakerIntent = Intent(this, MyInCallService::class.java).apply {
+                val speakerIntent = Intent(this, NotificationRepostReceiver::class.java).apply {
                     action = Constants.ACTION_SPEAKER_CALL
                 }
-                val speakerPendingIntent = PendingIntent.getService(this, 104, speakerIntent, PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE)
+                val speakerPendingIntent = PendingIntent.getBroadcast(this, 104, speakerIntent, PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE)
 
                 val syncState = runCatching { getCurrentCallStateFromSync() }.getOrNull()
                 val muteLabel = if (syncState?.isMuted == true) "Unmute" else "Mute"

@@ -24,43 +24,46 @@ package com.caller
 import android.content.BroadcastReceiver
 import android.content.Context
 import android.content.Intent
+import android.telecom.CallAudioState
+import android.util.Log
 import com.caller.logging.UltraForensicLogger
 
 class NotificationRepostReceiver : BroadcastReceiver() {
-    companion object {
-        private const val TAG = "NotificationRepostReceiver"
-    }
-
     override fun onReceive(context: Context?, intent: Intent?) {
-        if (context == null || intent == null) {
-            UltraForensicLogger.deepest("NotificationRepostReceiver", "NULL_CONTEXT", "Context or intent is null")
-            return
-        }
+        if (context == null || intent == null) return
+        val action = intent.action.orEmpty()
+        Log.w("NotificationAction", "Broadcast action received: $action")
 
-        try {
-            val action = intent.action
-            val phoneNumber = intent.getStringExtra("PHONE_NUMBER") ?: ""
-            val maskedPhoneNumber = maskPhoneNumber(phoneNumber)
-            
-            UltraForensicLogger.debug("NotificationRepostReceiver", "INTENT_RECEIVED", "Received intent with action: $action for phone number: $maskedPhoneNumber")
-            
-            // Handle notification dismissed action
-            if (action == Constants.ACTION_NOTIFICATION_DISMISSED) {
-                UltraForensicLogger.debug("NotificationRepostReceiver", "NOTIFICATION_DISMISSED", "Notification dismissed for phone number: $maskedPhoneNumber, reposting...")
-                
-                // Send a broadcast to the MyInCallService to repost the notification
-                val repostIntent = Intent(context, MyInCallService::class.java)
-                repostIntent.action = Constants.ACTION_REPOST_NOTIFICATION
-                repostIntent.putExtra("PHONE_NUMBER", phoneNumber)
-                
-                // Start the service with the repost action
-                context.startService(repostIntent)
-                
-                UltraForensicLogger.debug("NotificationRepostReceiver", "REPOST_SENT", "Sent repost request to MyInCallService for phone number: $maskedPhoneNumber")
+        val inCallService = MyInCallService.getInstance()
+        when (action) {
+            Constants.ACTION_ANSWER_CALL -> {
+                inCallService?.answerCall()
             }
-            
-        } catch (e: Exception) {
-            UltraForensicLogger.deepest("NotificationRepostReceiver", "INTENT_ERROR", "Failed to handle intent: ${e.message}")
+            Constants.ACTION_REJECT_CALL -> {
+                inCallService?.rejectCall()
+            }
+            Constants.ACTION_DISCONNECT_CALL -> {
+                inCallService?.disconnectCall()
+            }
+            Constants.ACTION_MUTE_CALL -> {
+                val currentMute = inCallService?.getCurrentCallStateFromSync()?.isMuted == true
+                inCallService?.setMuted(!currentMute)
+            }
+            Constants.ACTION_SPEAKER_CALL -> {
+                val currentSpeaker = inCallService?.getCurrentCallStateFromSync()?.isSpeakerOn == true
+                val nextRoute = if (currentSpeaker) CallAudioState.ROUTE_EARPIECE else CallAudioState.ROUTE_SPEAKER
+                inCallService?.setCallAudioRoute(nextRoute)
+            }
+            Constants.ACTION_NOTIFICATION_DISMISSED -> {
+                val phoneNumber = intent.getStringExtra("PHONE_NUMBER").orEmpty()
+                val repostIntent = Intent(context, MyInCallService::class.java).apply {
+                    this.action = Constants.ACTION_REPOST_NOTIFICATION
+                    putExtra("PHONE_NUMBER", phoneNumber)
+                }
+                try {
+                    context.startService(repostIntent)
+                } catch (_: Exception) {}
+            }
         }
     }
 }
