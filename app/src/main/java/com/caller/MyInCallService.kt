@@ -3684,6 +3684,7 @@ class MyInCallService : InCallService() {
                     .setCategory(NotificationCompat.CATEGORY_CALL)
                     .setVisibility(NotificationCompat.VISIBILITY_PUBLIC)
                     .setContentIntent(fullScreenPendingIntent)
+                    .setStyle(style)
                     .setOngoing(true)
                     .setAutoCancel(false)
                     .setOnlyAlertOnce(true) // CRITICAL FIX: Stops repeated floating every 3 seconds
@@ -3703,19 +3704,32 @@ class MyInCallService : InCallService() {
                         isConferenceHint = false
                     )
                 } else {
-                    builder.setStyle(style)
                     Log.w(
                         P2P_FORENSIC_TAG,
                         "incoming_fullscreen_execution source=MyInCallService.showIncomingCallNotification action=withhold reason=${incomingDecision.policy.reason} notificationSurface=notification_with_answer_decline ringtoneOwner=MyInCallService"
                     )
-                    // When another app is in front, keep it in front.  In particular, Redmi 13C
+                    // When another app is in front, keep it in front. In particular, Redmi 13C
                     // (MIUI/HyperOS) can turn a normal incoming-call surface into a full-screen
-                    // activity.  Give the user the compact overlay instead, while retaining the
+                    // activity. Give the user the compact overlay instead, while retaining the
                     // CallStyle notification as the permission-denied fallback.
                     showCallBubbleIfNeeded(launchFullScreenWhenOverlayUnavailable = false)
                 }
 
-                builder.setPublicVersion(builder.build())
+                val publicIncomingNotification = NotificationCompat.Builder(this, incomingCallChannelId)
+                    .setSmallIcon(android.R.drawable.ic_menu_call)
+                    .setContentTitle("Incoming Call")
+                    .setContentText(displayText)
+                    .setPriority(NotificationCompat.PRIORITY_MAX)
+                    .setCategory(NotificationCompat.CATEGORY_CALL)
+                    .setVisibility(NotificationCompat.VISIBILITY_PUBLIC)
+                    .setContentIntent(fullScreenPendingIntent)
+                    .setStyle(style)
+                    .setOngoing(true)
+                    .setAutoCancel(false)
+                    .setOnlyAlertOnce(true)
+                    .build()
+
+                builder.setPublicVersion(publicIncomingNotification)
                 val notification = builder.build().applyLockedForegroundFlags()
 
                 try {
@@ -3799,6 +3813,26 @@ class MyInCallService : InCallService() {
 
                 builder.addAction(NotificationCompat.Action.Builder(0, muteLabel, mutePendingIntent).build())
                 builder.addAction(NotificationCompat.Action.Builder(0, speakerLabel, speakerPendingIntent).build())
+
+                val publicBuilder = NotificationCompat.Builder(this, channelId)
+                    .setSmallIcon(android.R.drawable.ic_menu_call)
+                    .setContentTitle(title)
+                    .setContentText(text)
+                    .setPriority(NotificationCompat.PRIORITY_MAX)
+                    .setCategory(NotificationCompat.CATEGORY_CALL)
+                    .setVisibility(NotificationCompat.VISIBILITY_PUBLIC)
+                    .setContentIntent(pendingIntent)
+                    .setStyle(style)
+                    .setOngoing(true)
+                    .setSilent(true)
+                    .setOnlyAlertOnce(true)
+                    .setAutoCancel(false)
+                    .applyOngoingCallExtras(phoneNumber, callState)
+                    .addAction(NotificationCompat.Action.Builder(0, muteLabel, mutePendingIntent).build())
+                    .addAction(NotificationCompat.Action.Builder(0, speakerLabel, speakerPendingIntent).build())
+
+                val publicNotification = publicBuilder.build()
+                builder.setPublicVersion(publicNotification)
 
                 return builder.build().applyLockedForegroundFlags()
             }
