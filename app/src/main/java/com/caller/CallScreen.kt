@@ -2213,6 +2213,7 @@ class CallActivity : ComponentActivity() {
             // Do NOT call finishAndRemoveTask() here: removing the task on swipe-up/Home destroys
             // CallActivity and triggers task removal cleanup in the OS, causing OEM dialer handover.
             CallBubbleOverlay.isCallActivityVisible = false
+            CallBubbleOverlay.onUserLeftToHome()
             keepCallTaskInRecents()
             CallBubbleOverlay.showFromCallActivityExit(this)
             MyInCallService.getInstance()?.onActivityLeftDuringCall("CallActivity.onUserLeaveHint")

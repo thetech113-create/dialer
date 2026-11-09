@@ -35,8 +35,15 @@ object CallBubbleOverlay {
     private var activeFallbackStatus: String = "Dialing..."
     private var receiverRegistered = false
 
+    /** Set when Recents opens; cleared once the call screen is on screen again or a new call starts. */
+    @Volatile private var recentsOpenedSinceCallUi = false
+
     @Volatile
     var isCallActivityVisible: Boolean = false
+        set(value) {
+            field = value
+            if (value) recentsOpenedSinceCallUi = false
+        }
 
     private var triggerDot: View? = null
 
@@ -88,6 +95,7 @@ object CallBubbleOverlay {
     /** Called only when Telecom reports a new call to the in-call service. */
     fun allowForNewOngoingCall() {
         terminationSuppression.value = false
+        recentsOpenedSinceCallUi = false
     }
 
     fun isOngoingCallUiActionAllowed(): Boolean {
@@ -135,7 +143,17 @@ object CallBubbleOverlay {
      */
     fun canShow(context: Context): Boolean = canDrawOverlays(context)
 
-    @Volatile private var lastRecentsOpenedAt = 0L
+    /**
+     * ColorOS sends "recentapps" at the START of every swipe-up gesture, including one that ends at Home,
+     * so that signal alone cannot tell Home from Recents. Activity.onUserLeaveHint fires for a Home exit
+     * but not for a Recents exit (checked on the OPPO against the launcher's own final state: Normal vs
+     * Overview), so it clears the Recents suppression before the pill is created.
+     */
+    fun onUserLeftToHome() {
+        Log.w(TAG, "user_left_to_home: Recents suppression cleared (was=$recentsOpenedSinceCallUi)")
+        recentsOpenedSinceCallUi = false
+    }
+
     private var recentsWatcherRegistered = false
 
     /**
@@ -149,7 +167,7 @@ object CallBubbleOverlay {
             val spare = hasSpareRecentsTask(ctx)
             Log.w(TAG, "close_system_dialogs reason=$reason spareRecentsTask=$spare pillShowing=${view != null}")
             if (reason != "recentapps") return
-            lastRecentsOpenedAt = SystemClock.elapsedRealtime()
+            recentsOpenedSinceCallUi = true
             if (!spare) hide(ctx)
         }
     }
@@ -170,8 +188,6 @@ object CallBubbleOverlay {
         }.onFailure { Log.e(TAG, "watchRecents failed: ${it.message}") }
     }
 
-    private fun recentsJustOpened(): Boolean =
-        SystemClock.elapsedRealtime() - lastRecentsOpenedAt < 2000L
 
     private fun resolveOverlayWindowContext(fallbackContext: Context): Context {
         // On Xiaomi MIUI/HyperOS (Redmi 13C), attaching the overlay via the active foreground
@@ -363,8 +379,8 @@ object CallBubbleOverlay {
             Log.w(TAG, "skip: overlay permission missing")
             return
         }
-        if (recentsJustOpened() && !hasSpareRecentsTask(context)) {
-            Log.w(TAG, "skip: Recents just opened and no spare Recents task")
+        if (recentsOpenedSinceCallUi && !hasSpareRecentsTask(context)) {
+            Log.w(TAG, "skip: Recents was opened since the call screen and no spare Recents task")
             return
         }
 
@@ -377,6 +393,7 @@ object CallBubbleOverlay {
             registerReceiverIfNeeded(appContext)
 
             if (view != null && nameView != null && timerView != null) {
+                Log.d(TAG, "bubble_already_attached: refresh only")
                 updateVisibleBubble(appContext, title, connectedAtMillis, statusText)
                 return@post
             }
@@ -539,6 +556,7 @@ object CallBubbleOverlay {
             try {
                 wm.addView(root, params)
                 view = root
+                Log.w(TAG, "bubble_attached")
                 handler.removeCallbacks(ticker)
                 if (resolvedConnectMs > 0L) {
                     handler.post(ticker)
@@ -554,6 +572,7 @@ object CallBubbleOverlay {
         handler.removeCallbacksAndMessages(null)
         unregisterReceiverIfNeeded(context)
         val current = view ?: return
+        Log.w(TAG, "bubble_removed")
         val wm = windowManagerRef
             ?: (context.applicationContext.getSystemService(Context.WINDOW_SERVICE) as? WindowManager)
         view = null

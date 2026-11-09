@@ -428,6 +428,8 @@ class MyInCallService : InCallService() {
                 if (!hasLiveOrStickyCallSession()) return
                 Log.w(P2P_FORENSIC_TAG, "incall_activity_left source=$source liveCalls=${getLiveCalls().size}")
                 CallBubbleOverlay.isCallActivityVisible = false
+                // CallActivity clears the suppression itself before its direct pill attempt.
+                if (source == "MainActivity.onUserLeaveHint") CallBubbleOverlay.onUserLeftToHome()
                 ensureServiceExplicitlyStarted(getLiveCalls().firstOrNull())
                 startNotificationRepost(forceRefresh = true)
                 showCallBubbleIfNeeded(launchFullScreenWhenOverlayUnavailable = false)
