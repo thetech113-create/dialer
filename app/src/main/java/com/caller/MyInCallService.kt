@@ -328,25 +328,26 @@ class MyInCallService : InCallService() {
             }
 
             /**
-             * Ensures CallActivity and WidgetCallActivity tasks are excluded from Recents.
+             * Keeps the CallActivity task visible in Recents and WidgetCallActivity's transient task hidden.
+             * ColorOS Athena skips its swipe kill only while another task of the package is in Recents
+             * (see CallBubbleOverlay.canShow), so the call card must stay a normal card.
              * MainActivity is never modified so its standard launcher task remains untouched.
              */
-            private fun setAllAppTasksExcludedFromRecents(excluded: Boolean) {
+            private fun syncCallTasksInRecents() {
                 runCatching {
                     val am = getSystemService(Context.ACTIVITY_SERVICE) as? android.app.ActivityManager ?: return
                     am.appTasks.forEach { task ->
                         val baseClass = runCatching {
                             task.taskInfo.baseIntent.component?.className.orEmpty()
                         }.getOrDefault("")
-                        val isCallTask = baseClass.endsWith("CallActivity") ||
-                            baseClass.endsWith("WidgetCallActivity")
-                        if (isCallTask) {
-                            task.setExcludeFromRecents(true)
+                        when (baseClass) {
+                            CallActivity::class.java.name -> task.setExcludeFromRecents(false)
+                            WidgetCallActivity::class.java.name -> task.setExcludeFromRecents(true)
                         }
                     }
                     Log.w(
                         P2P_FORENSIC_TAG,
-                        "app_tasks_exclude_from_recents callTasksOnly=true taskCount=${am.appTasks.size}"
+                        "app_tasks_sync_recents callTasksOnly=true taskCount=${am.appTasks.size}"
                     )
                 }
             }
@@ -416,7 +417,7 @@ class MyInCallService : InCallService() {
                         Log.e(P2P_FORENSIC_TAG, "incall_service_explicit_start failed: ${e.message}", e)
                     }
                 }
-                setAllAppTasksExcludedFromRecents(true)
+                syncCallTasksInRecents()
             }
 
             /**
@@ -445,7 +446,7 @@ class MyInCallService : InCallService() {
                 )
                 CallBubbleOverlay.isCallActivityVisible = false
                 acquireSurvivalWakeLockIfNeeded()
-                setAllAppTasksExcludedFromRecents(true)
+                syncCallTasksInRecents()
                 isServiceExplicitlyStarted = false
                 ensureServiceExplicitlyStarted(getLiveCalls().firstOrNull())
 
@@ -1480,7 +1481,7 @@ class MyInCallService : InCallService() {
 
                     isServiceExplicitlyStarted = false
                     releaseSelfKeepAliveBinding()
-                    setAllAppTasksExcludedFromRecents(false)
+                    syncCallTasksInRecents()
 
                     // Drop foreground status to allow normal process priority
                     stopForeground(STOP_FOREGROUND_REMOVE)
@@ -2029,6 +2030,9 @@ class MyInCallService : InCallService() {
 
             override fun onTaskRemoved(rootIntent: Intent?) {
                 super.onTaskRemoved(rootIntent)
+                // The swiped card may have been the spare task that made the pill safe: drop the pill
+                // before a second swipe can find it.
+                if (!CallBubbleOverlay.hasSpareRecentsTask(this)) CallBubbleOverlay.hide(this)
                 val liveCalls = getLiveCalls()
                 val hasActiveSession = hasLiveOrStickyCallSession()
                 Log.w(
@@ -2041,7 +2045,7 @@ class MyInCallService : InCallService() {
                 // pill can attach right away and anchor VISIBLE_APP_ADJ priority.
                 CallBubbleOverlay.isCallActivityVisible = false
                 acquireSurvivalWakeLockIfNeeded()
-                setAllAppTasksExcludedFromRecents(true)
+                syncCallTasksInRecents()
                 isServiceExplicitlyStarted = false
                 ensureServiceExplicitlyStarted(liveCalls.firstOrNull())
 
@@ -2135,7 +2139,7 @@ class MyInCallService : InCallService() {
                 isServiceExplicitlyStarted = false
                 releaseSelfKeepAliveBinding()
                 if (!destroyedDuringLiveCall) {
-                    setAllAppTasksExcludedFromRecents(false)
+                    syncCallTasksInRecents()
                 }
                 super.onDestroy()
                 if (instance === this) {
@@ -2220,7 +2224,7 @@ class MyInCallService : InCallService() {
                         if (liveCalls.isNotEmpty() || stickySnapshot != null || (!bubbleSuppressedForTermination && isTelecomFrameworkInCall())) {
                             acquireSurvivalWakeLockIfNeeded()
                             ensureSelfKeepAliveBound()
-                            setAllAppTasksExcludedFromRecents(true)
+                            syncCallTasksInRecents()
                             val currentState = getCurrentCallStateFromSync().takeIf { it.isInCall } ?: stickySnapshot
                             if (currentState != null) {
                                 if (currentState.primaryState == "RINGING") {
@@ -2247,7 +2251,7 @@ class MyInCallService : InCallService() {
                             }
                             isServiceExplicitlyStarted = false
                             releaseSelfKeepAliveBinding()
-                            setAllAppTasksExcludedFromRecents(false)
+                            syncCallTasksInRecents()
                             stopSelfResult(startId)
                             return START_NOT_STICKY
                         }
@@ -2432,6 +2436,8 @@ class MyInCallService : InCallService() {
                         onHangUp = { disconnectCall() }
                     )
                 } else {
+                    // Also drops a stale pill: it must not outlive the spare Recents task (canShow).
+                    CallBubbleOverlay.hide(this)
                     Log.w(
                         P2P_FORENSIC_TAG,
                         "call_bubble_skip reason=overlay_permission_missing fallbackFullScreen=$launchFullScreenWhenOverlayUnavailable"
@@ -2684,7 +2690,7 @@ class MyInCallService : InCallService() {
                 callStateListener?.invoke(currentState)
                 callUIListener?.invoke(lastTerminalUiSnapshot ?: currentState)
                 if (CallBubbleOverlay.isShowing()) {
-                    showCallBubbleIfNeeded()
+                    showCallBubbleIfNeeded(launchFullScreenWhenOverlayUnavailable = false)
                 }
             }
 
@@ -2694,6 +2700,7 @@ class MyInCallService : InCallService() {
                 // A newly added Telecom call begins a new session and may use the bubble again.
                 bubbleSuppressedForTermination = false
                 CallBubbleOverlay.allowForNewOngoingCall()
+                CallBubbleOverlay.watchRecents(this)
                 // First call of a session: remember whether the app was on screen, so the call screen can
                 // return to the app (not the home screen) when the call ends.
                 if (getLiveCalls().count { it !== call } == 0) {

@@ -112,8 +112,66 @@ object CallBubbleOverlay {
         return if (h > 0) "%d:%02d:%02d".format(h, m, s) else "%d:%02d".format(m, s)
     }
 
-    fun canShow(context: Context): Boolean =
+    /**
+     * ColorOS Athena kills the package when its last Recents card is swiped while it owns a visible
+     * overlay window like this pill, and skips the kill only while another task of the package is in
+     * Recents. So the pill may exist only while at least two of our tasks are visible in Recents.
+     */
+    fun hasSpareRecentsTask(context: Context): Boolean = runCatching {
+        val am = context.getSystemService(Context.ACTIVITY_SERVICE) as android.app.ActivityManager
+        am.appTasks.count { task ->
+            val flags = task.taskInfo.baseIntent?.flags ?: Intent.FLAG_ACTIVITY_EXCLUDE_FROM_RECENTS
+            flags and Intent.FLAG_ACTIVITY_EXCLUDE_FROM_RECENTS == 0
+        } >= 2
+    }.getOrDefault(false)
+
+    fun canDrawOverlays(context: Context): Boolean =
         Build.VERSION.SDK_INT < Build.VERSION_CODES.M || Settings.canDrawOverlays(context)
+
+    /**
+     * With a single Recents card the pill is still allowed, because it hides itself the moment Recents
+     * opens (see recentsReceiver), which always happens before a swipe. After any task removal the
+     * strict hasSpareRecentsTask check applies.
+     */
+    fun canShow(context: Context): Boolean = canDrawOverlays(context)
+
+    @Volatile private var lastRecentsOpenedAt = 0L
+    private var recentsWatcherRegistered = false
+
+    /**
+     * The system broadcasts ACTION_CLOSE_SYSTEM_DIALOGS with reason "recentapps" when Recents opens.
+     * Without a spare Recents card, ColorOS Athena would kill us on the next swipe while the pill exists.
+     */
+    private val recentsReceiver = object : BroadcastReceiver() {
+        override fun onReceive(context: Context?, intent: Intent?) {
+            val ctx = context ?: return
+            val reason = intent?.getStringExtra("reason").orEmpty()
+            val spare = hasSpareRecentsTask(ctx)
+            Log.w(TAG, "close_system_dialogs reason=$reason spareRecentsTask=$spare pillShowing=${view != null}")
+            if (reason != "recentapps") return
+            lastRecentsOpenedAt = SystemClock.elapsedRealtime()
+            if (!spare) hide(ctx)
+        }
+    }
+
+    /** Keeps watching for the whole process lifetime; it only reacts while a pill exists or is about to. */
+    fun watchRecents(context: Context) {
+        if (recentsWatcherRegistered) return
+        runCatching {
+            @Suppress("DEPRECATION")
+            val filter = IntentFilter(Intent.ACTION_CLOSE_SYSTEM_DIALOGS)
+            ContextCompat.registerReceiver(
+                context.applicationContext,
+                recentsReceiver,
+                filter,
+                ContextCompat.RECEIVER_NOT_EXPORTED
+            )
+            recentsWatcherRegistered = true
+        }.onFailure { Log.e(TAG, "watchRecents failed: ${it.message}") }
+    }
+
+    private fun recentsJustOpened(): Boolean =
+        SystemClock.elapsedRealtime() - lastRecentsOpenedAt < 2000L
 
     private fun resolveOverlayWindowContext(fallbackContext: Context): Context {
         // On Xiaomi MIUI/HyperOS (Redmi 13C), attaching the overlay via the active foreground
@@ -302,7 +360,11 @@ object CallBubbleOverlay {
         if (isCallActivityVisible) return
         if (!canShowForOngoingCall()) return
         if (!canShow(context)) {
-            Log.w(TAG, "skip: overlay permission not granted")
+            Log.w(TAG, "skip: overlay permission missing")
+            return
+        }
+        if (recentsJustOpened() && !hasSpareRecentsTask(context)) {
+            Log.w(TAG, "skip: Recents just opened and no spare Recents task")
             return
         }
 

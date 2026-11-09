@@ -1667,15 +1667,22 @@ class CallActivity : ComponentActivity() {
     }
 
     /**
-     * Call is over: close the call screen's own task. That task sits on top of whatever was on screen
-     * before the call, so on its own the phone falls back to the home screen if the app wasn't directly
-     * under it. If the app was on screen when the call started, reopen it (Recents) instead; otherwise
-     * go back to wherever the user was. Never opens the app over the lock screen.
+     * Keeps the call screen's own task visible in Recents. ColorOS Athena kills the package when its
+     * last Recents card is swiped while the floating call pill exists, and skips the kill only while
+     * another task of the package is in Recents (see CallBubbleOverlay.canShow). Only the CallActivity
+     * task is touched; MainActivity's task is never modified.
      */
-    private fun setCallTaskExcludedFromRecents(excluded: Boolean = true) {
+    private fun keepCallTaskInRecents() {
         runCatching {
             val am = getSystemService(Context.ACTIVITY_SERVICE) as? android.app.ActivityManager ?: return
-            am.appTasks.forEach { task -> task.setExcludeFromRecents(excluded) }
+            am.appTasks.forEach { task ->
+                val baseClass = runCatching {
+                    task.taskInfo.baseIntent.component?.className.orEmpty()
+                }.getOrDefault("")
+                if (baseClass == CallActivity::class.java.name) {
+                    task.setExcludeFromRecents(false)
+                }
+            }
         }
     }
 
@@ -1687,7 +1694,7 @@ class CallActivity : ComponentActivity() {
     private fun backgroundCallUiDuringActiveCall(reason: String) {
         Log.w(CALL_UI_FORENSIC_TAG, "call_ui_background_active_call reason=$reason")
         CallBubbleOverlay.isCallActivityVisible = false
-        setCallTaskExcludedFromRecents(true)
+        keepCallTaskInRecents()
         CallBubbleOverlay.showFromCallActivityExit(this)
         MyInCallService.getInstance()?.onActivityLeftDuringCall("CallActivity.$reason")
         runCatching { moveTaskToBack(true) }
@@ -1830,10 +1837,7 @@ class CallActivity : ComponentActivity() {
         requestWindowFeature(android.view.Window.FEATURE_NO_TITLE)
 
         super.onCreate(savedInstanceState)
-        try {
-            val am = getSystemService(Context.ACTIVITY_SERVICE) as? android.app.ActivityManager
-            am?.appTasks?.forEach { task -> task.setExcludeFromRecents(true) }
-        } catch (_: Exception) {}
+        keepCallTaskInRecents()
         logCall("InCallActivity.onCreate hasActiveCall=${hasLiveCall()}")
         logCallActivityLifecycle("onCreate", "action=${intent?.action.orEmpty()}")
         if (isTerminalHint(intent) && !hasLiveCall()) {
@@ -2180,14 +2184,14 @@ class CallActivity : ComponentActivity() {
 
     override fun onStart() {
         super.onStart()
-        setCallTaskExcludedFromRecents(true)
+        keepCallTaskInRecents()
         logCall("InCallActivity.onStart hasActiveCall=${hasLiveCall()}")
         logCallActivityLifecycle("onStart")
     }
 
     override fun onResume() {
         super.onResume()
-        setCallTaskExcludedFromRecents(true)
+        keepCallTaskInRecents()
         CallBubbleOverlay.isCallActivityVisible = true
         CallBubbleOverlay.hide(this)
         logCall("InCallActivity.onResume hasActiveCall=${hasLiveCall()}")
@@ -2209,7 +2213,7 @@ class CallActivity : ComponentActivity() {
             // Do NOT call finishAndRemoveTask() here: removing the task on swipe-up/Home destroys
             // CallActivity and triggers task removal cleanup in the OS, causing OEM dialer handover.
             CallBubbleOverlay.isCallActivityVisible = false
-            setCallTaskExcludedFromRecents(true)
+            keepCallTaskInRecents()
             CallBubbleOverlay.showFromCallActivityExit(this)
             MyInCallService.getInstance()?.onActivityLeftDuringCall("CallActivity.onUserLeaveHint")
         }
@@ -2221,7 +2225,7 @@ class CallActivity : ComponentActivity() {
         CallBubbleOverlay.isCallActivityVisible = false
         super.onStop()
         if (!isFinishing && !isFinishingCallUi && !isEndCallRequested && hasLiveCall()) {
-            setCallTaskExcludedFromRecents(true)
+            keepCallTaskInRecents()
             CallBubbleOverlay.showFromCallActivityExit(this)
             MyInCallService.getInstance()?.onActivityLeftDuringCall("CallActivity.onStop")
         }
