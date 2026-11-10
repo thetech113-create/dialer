@@ -29,7 +29,6 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import okhttp3.OkHttpClient
 import okhttp3.Request
-import org.json.JSONArray
 import org.json.JSONObject
 import java.io.File
 import java.io.FileOutputStream
@@ -42,8 +41,9 @@ import java.util.concurrent.atomic.AtomicBoolean
  * GitHub Releases in-app updater.
  * Each release must attach an `update.json` asset alongside its APK:
  * {"versionCode":2,"versionName":"1.0.1","apkAsset":"Caller-1.0.1.apk","sha256":"..."}
- * The updater moves ONE release at a time: it offers the nearest release above the installed version (8.10.45 gets
- * 8.10.46, not the newest one), so every release's changes run in order.
+ * The updater offers the newest release, and installs it only if every check passes: the release's own update.json
+ * (version agrees with the tag, valid SHA-256, newer than the installed version) and then the downloaded file
+ * (checksum, package, version code and name, signing key). A release that fails a check is never installed.
  */
 object AppUpdateManager {
     private const val TAG = "AppUpdateManager"
@@ -56,16 +56,14 @@ object AppUpdateManager {
     private const val KEY_AWAITING_INSTALL_PERMISSION = "awaiting_install_permission"
     private const val KEY_PROMPTED_VERSION_CODE = "prompted_version_code"
     private const val KEY_VERSION_NAME = "version_name"
-    // Installed version code at the time the file was chosen: a file is only installed on the version it was the next step for.
+    // Installed version code when the file was downloaded: a file is only installed on the version it was downloaded for.
     private const val KEY_STEP_FROM = "step_from_version_code"
 
     private const val CHECK_INTERVAL_MS = 12 * 60 * 60 * 1000L
-    private const val RELEASES_PER_PAGE = 30
     // Taps on the update buttons closer together than this count as one tap, and the system installer is not opened
     // again this soon after it was opened.
     private const val TAP_DEBOUNCE_MS = 1500L
     private const val INSTALLER_REOPEN_GUARD_MS = 3000L
-    private const val MAX_RELEASE_PAGES = 10
     private const val MANIFEST_ASSET = "update.json"
 
     sealed class DownloadState {
@@ -190,7 +188,7 @@ object AppUpdateManager {
 
         scope.launch {
             try {
-                val result = runCatching { nextRelease(repository, installedPackageInfo(appContext).versionName.orEmpty()) }
+                val result = runCatching { latestRelease(repository, installedPackageInfo(appContext).versionName.orEmpty()) }
                 result.onSuccess { release ->
                     if (release == null) {
                         if (isManual) {
@@ -205,7 +203,7 @@ object AppUpdateManager {
                         release.tag, release.versionName, release.versionCode, release.sha256, installedVersionCode(appContext)
                     )
                     if (problem != null) {
-                        // The next release is the only one that may be installed: a bad one is not skipped for a later one.
+                        // The newest release is the only one offered: when it fails a check nothing is installed.
                         Log.w(TAG, "Release ${release.tag} rejected: $problem")
                         if (isManual) {
                             _downloadState.value = DownloadState.Error("Update ${release.tag} was not installed: $problem")
@@ -249,40 +247,14 @@ object AppUpdateManager {
         }
     }
 
-    /** The nearest published release above the installed version, or null when there is none. */
-    private fun nextRelease(repository: String, installedVersionName: String): Release? {
+    /** The newest published release, or null when it is not newer than the installed version. One small request. */
+    private fun latestRelease(repository: String, installedVersionName: String): Release? {
         require(repository.matches(Regex("[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+"))) { "Invalid GitHub repository: $repository" }
+        val release = getJson("https://api.github.com/repos/$repository/releases/latest")
+        val newest = parseVersionParts(release.optString("tag_name"))
         val installed = parseVersionParts(installedVersionName)
-            ?: error("The installed version \"$installedVersionName\" is not a version number")
-
-        // One small request settles the usual case: the newest release is not newer than what is installed.
-        val newest = parseVersionParts(getJson("https://api.github.com/repos/$repository/releases/latest").optString("tag_name"))
-        if (newest != null && compareVersionParts(newest, installed) <= 0) return null
-
-        // Releases come one patch step apart, so the next one is nearly always named exactly one patch above the
-        // installed version: ask for that one release (a few KB) before reading any list.
-        val oneStepUp = (installed.dropLast(1) + (installed.last() + 1)).joinToString(".")
-        val direct = runCatching { getJson("https://api.github.com/repos/$repository/releases/tags/v$oneStepUp") }.getOrNull()
-        if (direct != null && !direct.optBoolean("draft") && !direct.optBoolean("prerelease") &&
-            parseVersionParts(direct.optString("tag_name"))?.let { compareVersionParts(it, installed) > 0 } == true
-        ) {
-            return releaseFromJson(direct)
-        }
-
-        // That name does not exist (a version was skipped). Read the list newest first, a page at a time, until a release at or below the
-        // installed version has been seen: the nearest release above it is then among those read.
-        val published = mutableListOf<JSONObject>()
-        for (page in 1..MAX_RELEASE_PAGES) {
-            val releases = getJsonArray("https://api.github.com/repos/$repository/releases?per_page=$RELEASES_PER_PAGE&page=$page")
-            val items = (0 until releases.length()).mapNotNull { releases.optJSONObject(it) }
-            published += items.filter { !it.optBoolean("draft") && !it.optBoolean("prerelease") }
-            val reachedInstalled = items.any { item ->
-                parseVersionParts(item.optString("tag_name"))?.let { compareVersionParts(it, installed) <= 0 } == true
-            }
-            if (reachedInstalled || items.size < RELEASES_PER_PAGE) break
-        }
-        val nextTag = pickNextTag(installed, published.map { it.optString("tag_name") }) ?: return null
-        return releaseFromJson(published.first { it.optString("tag_name") == nextTag })
+        if (newest != null && installed != null && compareVersionParts(newest, installed) <= 0) return null
+        return releaseFromJson(release)
     }
 
     /** Everything about a release comes from its own update.json; nothing is guessed from the tag. */
@@ -310,8 +282,6 @@ object AppUpdateManager {
     }
 
     private fun getJson(url: String): JSONObject = JSONObject(getBody(url))
-
-    private fun getJsonArray(url: String): JSONArray = JSONArray(getBody(url))
 
     private fun getBody(url: String): String {
         val request = Request.Builder().url(url)
@@ -374,10 +344,10 @@ object AppUpdateManager {
             val expectedVer = prefs.getLong(KEY_VERSION_CODE, -1L)
             val installedVer = installedVersionCode(context)
             if (expectedVer > installedVer) {
-                // A file from before this rule, or chosen for another installed version, may skip a release: never use it.
+                // A file from before this check, or downloaded for another installed version, is not trusted: never use it.
                 val fileKey = "${file.absolutePath}|${file.length()}|${file.lastModified()}|$installedVer|$expectedVer"
                 val problem = when {
-                    prefs.getLong(KEY_STEP_FROM, -1L) != installedVer -> "it was not chosen as the next step for this version"
+                    prefs.getLong(KEY_STEP_FROM, -1L) != installedVer -> "it was downloaded for a different installed version"
                     fileKey == lastVerifiedFileKey -> null
                     else -> verifyApkIntegrity(
                         context, file, expectedVer, prefs.getString(KEY_VERSION_NAME, "").orEmpty(), prefs.getString(KEY_SHA256, null)
@@ -631,7 +601,7 @@ object AppUpdateManager {
         if (version > 0 && installedVersionCode(context) >= version) {
             prefs.getString(KEY_FILE_PATH, null)?.let { File(it).takeIf(File::isFile)?.delete() }
             clearDownload(context)
-            // One release at a time: the next step is looked for now, not after the 12 h wait.
+            // A newer release that came out meanwhile is looked for at the next start, not after the 12 h wait.
             prefs.edit().remove(KEY_LAST_CHECK).apply()
         }
     }
@@ -710,13 +680,6 @@ internal fun releaseProblem(tag: String, versionName: String, versionCode: Long,
         else -> null
     }
 }
-
-/** The tag of the nearest version above [installed]: one step up, never a jump to the newest release. */
-internal fun pickNextTag(installed: List<Long>, tags: List<String>): String? =
-    tags.mapNotNull { tag -> parseVersionParts(tag)?.let { tag to it } }
-        .filter { (_, version) -> compareVersionParts(version, installed) > 0 }
-        .minWithOrNull { x, y -> compareVersionParts(x.second, y.second) }
-        ?.first
 
 class UpdateDownloadReceiver : BroadcastReceiver() {
     override fun onReceive(context: Context, intent: Intent) {

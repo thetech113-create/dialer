@@ -4,43 +4,23 @@ import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNull
 import org.junit.Test
 
-class UpdaterNextVersionTest {
-    private val tags = listOf("v8.10.47", "v8.10.46", "v8.10.45", "v8.10.44", "v8.9.9", "v8.10.9")
-
-    private fun next(installed: String) = pickNextTag(parseVersionParts(installed)!!, tags)
-
-    @Test
-    fun aPhoneGetsTheNextReleaseNotTheNewest() {
-        assertEquals("v8.10.45", next("8.10.44"))
-        assertEquals("v8.10.46", next("8.10.45"))
-        assertEquals("v8.10.47", next("8.10.46"))
-    }
-
-    @Test
-    fun theNewestReleaseHasNothingAboveIt() {
-        assertNull(next("8.10.47"))
-        assertNull(next("8.11.0"))
-    }
+class UpdaterRulesTest {
+    private val sha = "a".repeat(64)
 
     @Test
     fun versionsAreComparedAsNumbersNotText() {
         // 8.10.9 is older than 8.10.44, and 8.9.9 older than 8.10.9.
-        assertEquals("v8.10.9", next("8.9.9"))
-        assertEquals("v8.10.44", next("8.10.9"))
+        assertEquals(true, compareVersionParts(listOf(8, 10, 44), listOf(8, 10, 9)) > 0)
+        assertEquals(true, compareVersionParts(listOf(8, 10, 9), listOf(8, 9, 9)) > 0)
+        assertEquals(true, compareVersionParts(listOf(8, 10, 46), listOf(8, 10, 47)) < 0)
+        assertEquals(0, compareVersionParts(listOf(8, 10, 47), listOf(8, 10, 47)))
     }
 
     @Test
-    fun aPhoneFarBehindStillMovesOneStep() {
-        assertEquals("v8.9.9", next("8.9.0"))
+    fun missingPartsCountAsZero() {
+        assertEquals(0, compareVersionParts(listOf(5, 0), listOf(5, 0, 0)))
+        assertEquals(true, compareVersionParts(listOf(5, 1), listOf(5, 0, 9)) > 0)
     }
-
-    @Test
-    fun tagsThatAreNotVersionsAreIgnored() {
-        assertEquals("v8.10.45", pickNextTag(listOf(8, 10, 44), listOf("latest", "v8.10.45", "nightly", "v8.10.46")))
-        assertNull(pickNextTag(listOf(8, 10, 44), listOf("latest", "nightly")))
-    }
-
-    private val sha = "a".repeat(64)
 
     @Test
     fun aConsistentNewerReleaseMayBeInstalled() {
