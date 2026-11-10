@@ -52,6 +52,16 @@ fun cleanIndianMobileInput(raw: String): String {
     return digits.dropWhile { it !in '6'..'9' }.take(10)
 }
 
+/**
+ * One entry per phone number. The same number is kept in several forms (9876543210, 919876543210, +91 98765 43210),
+ * which are different strings but the same number, so the first form seen stands for all of them.
+ */
+fun distinctMobileNumbers(numbers: List<String>): List<String> {
+    val seen = HashSet<String>()
+    return numbers.map { it.trim() }.filter { it.isNotEmpty() }
+        .filter { seen.add(buildP2PNumberSnapshot(it).last10.ifEmpty { it }) }
+}
+
 /** "9876543210" -> "98765 43210". */
 fun groupMobileDigits(digits: String): String =
     if (digits.length > 5) digits.substring(0, 5) + " " + digits.substring(5) else digits

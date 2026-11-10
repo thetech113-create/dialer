@@ -48,6 +48,24 @@ class PhoneNumberInputTest {
     }
 
     @Test
+    fun theSameNumberInDifferentFormsIsListedOnce() {
+        assertEquals(
+            listOf("8431573944"),
+            distinctMobileNumbers(listOf("8431573944", "918431573944", "+91 84315 73944"))
+        )
+        assertEquals(
+            listOf("9019051474", "8431573944"),
+            distinctMobileNumbers(listOf("9019051474", "+919019051474", "8431573944", "918431573944"))
+        )
+    }
+
+    @Test
+    fun differentNumbersAndShortCodesAreKept() {
+        assertEquals(listOf("8431573944", "9019051474", "198"), distinctMobileNumbers(listOf("8431573944", "9019051474", "198", " 198 ")))
+        assertEquals(emptyList<String>(), distinctMobileNumbers(listOf("", "  ")))
+    }
+
+    @Test
     fun theNumberIsShownInGroupsOfFive() {
         assertEquals("98765 43210", groupMobileDigits("9876543210"))
         assertEquals("98765", groupMobileDigits("98765"))

@@ -606,7 +606,7 @@ object AccountDeviceHistoryManager {
                 numbers.add(simNum)
             }
         }
-        return numbers.distinct()
+        return distinctMobileNumbers(numbers)
     }
 
     fun registerVerifiedNumber(context: Context, number: String) {
@@ -701,7 +701,7 @@ object AccountDeviceHistoryManager {
                             accountId = obj.optString("accountId"),
                             deviceId = obj.optString("deviceId"),
                             deviceName = obj.optString("deviceName"),
-                            verifiedNumbers = nums,
+                            verifiedNumbers = distinctMobileNumbers(nums),
                             lastSyncTimestamp = obj.optLong("lastSyncTimestamp", 0L),
                             tailscaleIp = obj.optString("tailscaleIp").trim().takeIf { isTailscaleIpv4(it) }.orEmpty()
                         )
