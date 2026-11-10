@@ -59,10 +59,16 @@ object AppUpdateManager {
     private const val KEY_STEP_FROM = "step_from_version_code"
 
     private const val CHECK_INTERVAL_MS = 12 * 60 * 60 * 1000L
+    private const val RELEASES_PER_PAGE = 30
+    private const val MAX_RELEASE_PAGES = 10
     private const val MANIFEST_ASSET = "update.json"
 
     sealed class DownloadState {
         object Idle : DownloadState()
+        /** A manual check is running: the screen shows it the moment the button is tapped. */
+        object Checking : DownloadState()
+        /** A manual check found nothing newer than the installed version. */
+        object UpToDate : DownloadState()
         data class Downloading(val progressPercent: Int, val downloadedBytes: Long, val totalBytes: Long) : DownloadState()
         object Completed : DownloadState()
         data class Error(val message: String) : DownloadState()
@@ -73,6 +79,9 @@ object AppUpdateManager {
 
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
     private val isDownloading = AtomicBoolean(false)
+    private val isChecking = AtomicBoolean(false)
+    // The last file that passed every check as it is on disk (path, size, time, versions): it is not hashed again.
+    @Volatile private var lastVerifiedFileKey: String? = null
     private val lifecycleRegistered = AtomicBoolean(false)
 
     @Volatile
@@ -149,43 +158,69 @@ object AppUpdateManager {
             "thetech113-create/dialer"
         }
 
-        if (isManual) {
-            toast(appContext, "Checking for updates...")
-        }
-
         val prefs = appContext.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
         if (!isManual && System.currentTimeMillis() - prefs.getLong(KEY_LAST_CHECK, 0L) < CHECK_INTERVAL_MS) return
+        if (!isChecking.compareAndSet(false, true)) {
+            if (isManual) toast(appContext, "Already checking for updates...")
+            return
+        }
+
+        // The screen answers the tap right now; the network steps below take a moment.
+        if (isManual) {
+            _downloadState.value = DownloadState.Checking
+            toast(appContext, "Checking for updates...")
+        }
 
         prefs.edit().putLong(KEY_LAST_CHECK, System.currentTimeMillis()).apply()
 
         scope.launch {
-            val result = runCatching { nextRelease(repository, installedPackageInfo(appContext).versionName.orEmpty()) }
-            result.onSuccess { release ->
-                if (release == null) {
-                    if (isManual) toast(appContext, "You are using the latest version")
-                    return@onSuccess
-                }
-                val problem = releaseProblem(
-                    release.tag, release.versionName, release.versionCode, release.sha256, installedVersionCode(appContext)
-                )
-                if (problem != null) {
-                    // The next release is the only one that may be installed: a bad one is not skipped for a later one.
-                    Log.w(TAG, "Release ${release.tag} rejected: $problem")
-                    if (isManual) toast(appContext, "Update ${release.tag} was not installed: $problem")
-                    return@onSuccess
-                }
-                toast(appContext, "Update available! Downloading in app...")
-                enqueueDownload(appContext, release)
-            }.onFailure { error ->
-                Log.w(TAG, "Update metadata check failed", error)
-                if (isManual) {
+            try {
+                val result = runCatching { nextRelease(repository, installedPackageInfo(appContext).versionName.orEmpty()) }
+                result.onSuccess { release ->
+                    if (release == null) {
+                        if (isManual) {
+                            _downloadState.value = DownloadState.UpToDate
+                            toast(appContext, "You are using the latest version")
+                        } else {
+                            _downloadState.value = DownloadState.Idle
+                        }
+                        return@onSuccess
+                    }
+                    val problem = releaseProblem(
+                        release.tag, release.versionName, release.versionCode, release.sha256, installedVersionCode(appContext)
+                    )
+                    if (problem != null) {
+                        // The next release is the only one that may be installed: a bad one is not skipped for a later one.
+                        Log.w(TAG, "Release ${release.tag} rejected: $problem")
+                        if (isManual) {
+                            _downloadState.value = DownloadState.Error("Update ${release.tag} was not installed: $problem")
+                            toast(appContext, "Update ${release.tag} was not installed: $problem")
+                        } else {
+                            _downloadState.value = DownloadState.Idle
+                        }
+                        return@onSuccess
+                    }
+                    toast(appContext, "Update ${release.tag} found. Downloading...")
+                    enqueueDownload(appContext, release)
+                }.onFailure { error ->
+                    Log.w(TAG, "Update metadata check failed", error)
                     val msg = error.localizedMessage ?: "Network error"
-                    if (msg.contains("404") || msg.contains("No releases", ignoreCase = true) || msg.contains("Not Found", ignoreCase = true)) {
-                        toast(appContext, "You are using the latest version")
+                    val nothingPublished = msg.contains("404") || msg.contains("No releases", ignoreCase = true) ||
+                        msg.contains("Not Found", ignoreCase = true)
+                    if (isManual) {
+                        if (nothingPublished) {
+                            _downloadState.value = DownloadState.UpToDate
+                            toast(appContext, "You are using the latest version")
+                        } else {
+                            _downloadState.value = DownloadState.Error("Unable to check for updates: $msg")
+                            toast(appContext, "Unable to check for updates: $msg")
+                        }
                     } else {
-                        toast(appContext, "Unable to check for updates: $msg")
+                        _downloadState.value = DownloadState.Idle
                     }
                 }
+            } finally {
+                isChecking.set(false)
             }
         }
     }
@@ -204,9 +239,33 @@ object AppUpdateManager {
         require(repository.matches(Regex("[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+"))) { "Invalid GitHub repository: $repository" }
         val installed = parseVersionParts(installedVersionName)
             ?: error("The installed version \"$installedVersionName\" is not a version number")
-        val releases = getJsonArray("https://api.github.com/repos/$repository/releases?per_page=100")
-        val published = (0 until releases.length()).mapNotNull { releases.optJSONObject(it) }
-            .filter { !it.optBoolean("draft") && !it.optBoolean("prerelease") }
+
+        // One small request settles the usual case: the newest release is not newer than what is installed.
+        val newest = parseVersionParts(getJson("https://api.github.com/repos/$repository/releases/latest").optString("tag_name"))
+        if (newest != null && compareVersionParts(newest, installed) <= 0) return null
+
+        // Releases come one patch step apart, so the next one is nearly always named exactly one patch above the
+        // installed version: ask for that one release (a few KB) before reading any list.
+        val oneStepUp = (installed.dropLast(1) + (installed.last() + 1)).joinToString(".")
+        val direct = runCatching { getJson("https://api.github.com/repos/$repository/releases/tags/v$oneStepUp") }.getOrNull()
+        if (direct != null && !direct.optBoolean("draft") && !direct.optBoolean("prerelease") &&
+            parseVersionParts(direct.optString("tag_name"))?.let { compareVersionParts(it, installed) > 0 } == true
+        ) {
+            return releaseFromJson(direct)
+        }
+
+        // That name does not exist (a version was skipped). Read the list newest first, a page at a time, until a release at or below the
+        // installed version has been seen: the nearest release above it is then among those read.
+        val published = mutableListOf<JSONObject>()
+        for (page in 1..MAX_RELEASE_PAGES) {
+            val releases = getJsonArray("https://api.github.com/repos/$repository/releases?per_page=$RELEASES_PER_PAGE&page=$page")
+            val items = (0 until releases.length()).mapNotNull { releases.optJSONObject(it) }
+            published += items.filter { !it.optBoolean("draft") && !it.optBoolean("prerelease") }
+            val reachedInstalled = items.any { item ->
+                parseVersionParts(item.optString("tag_name"))?.let { compareVersionParts(it, installed) <= 0 } == true
+            }
+            if (reachedInstalled || items.size < RELEASES_PER_PAGE) break
+        }
         val nextTag = pickNextTag(installed, published.map { it.optString("tag_name") }) ?: return null
         return releaseFromJson(published.first { it.optString("tag_name") == nextTag })
     }
@@ -301,12 +360,13 @@ object AppUpdateManager {
             val installedVer = installedVersionCode(context)
             if (expectedVer > installedVer) {
                 // A file from before this rule, or chosen for another installed version, may skip a release: never use it.
-                val problem = if (prefs.getLong(KEY_STEP_FROM, -1L) != installedVer) {
-                    "it was not chosen as the next step for this version"
-                } else {
-                    verifyApkIntegrity(
+                val fileKey = "${file.absolutePath}|${file.length()}|${file.lastModified()}|$installedVer|$expectedVer"
+                val problem = when {
+                    prefs.getLong(KEY_STEP_FROM, -1L) != installedVer -> "it was not chosen as the next step for this version"
+                    fileKey == lastVerifiedFileKey -> null
+                    else -> verifyApkIntegrity(
                         context, file, expectedVer, prefs.getString(KEY_VERSION_NAME, "").orEmpty(), prefs.getString(KEY_SHA256, null)
-                    )
+                    ).also { if (it == null) lastVerifiedFileKey = fileKey }
                 }
                 if (problem == null) return file
                 Log.w(TAG, "Discarding the downloaded update: $problem")

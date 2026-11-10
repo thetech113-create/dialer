@@ -8855,6 +8855,33 @@ fun SettingsScreen(
                     }
                 }
 
+                when (val shown = currentDownloadState) {
+                    AppUpdateManager.DownloadState.Checking -> Row(
+                        modifier = Modifier.fillMaxWidth().padding(vertical = 4.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(10.dp)
+                    ) {
+                        CircularProgressIndicator(modifier = Modifier.size(18.dp), strokeWidth = 2.dp)
+                        Text(
+                            text = "Checking for updates...",
+                            fontWeight = FontWeight.SemiBold,
+                            style = MaterialTheme.typography.bodyMedium
+                        )
+                    }
+                    AppUpdateManager.DownloadState.UpToDate -> Text(
+                        text = "You are using the latest version.",
+                        color = MaterialTheme.colorScheme.primary,
+                        style = MaterialTheme.typography.bodyMedium,
+                        fontWeight = FontWeight.SemiBold
+                    )
+                    is AppUpdateManager.DownloadState.Error -> Text(
+                        text = shown.message,
+                        color = MaterialTheme.colorScheme.error,
+                        style = MaterialTheme.typography.bodySmall
+                    )
+                    else -> Unit
+                }
+
                 val pendingUpdate = remember { AppUpdateManager.getDownloadedUpdateFile(context) }
                 if (pendingUpdate != null) {
                     Button(
@@ -8869,14 +8896,17 @@ fun SettingsScreen(
                     }
                 }
 
+                val updateBusy = currentDownloadState is AppUpdateManager.DownloadState.Checking ||
+                    currentDownloadState is AppUpdateManager.DownloadState.Downloading
                 Button(
                     onClick = { AppUpdateManager.checkForUpdate(activity, isManual = true) },
+                    enabled = !updateBusy,
                     modifier = Modifier.fillMaxWidth(),
                     shape = RoundedCornerShape(12.dp)
                 ) {
                     Icon(Icons.Default.Refresh, contentDescription = null, modifier = Modifier.size(18.dp))
                     Spacer(modifier = Modifier.width(8.dp))
-                    Text("Check for Updates")
+                    Text(if (currentDownloadState is AppUpdateManager.DownloadState.Checking) "Checking..." else "Check for Updates")
                 }
             }
         }
