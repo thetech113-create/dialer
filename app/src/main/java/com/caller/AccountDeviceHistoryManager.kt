@@ -2387,9 +2387,9 @@ fun MultiDeviceSettingsCard(
                         onClick = { showAddNumberDialog = true },
                         shape = RoundedCornerShape(14.dp)
                     ) {
-                        Icon(Icons.Default.Add, contentDescription = "Add Number", modifier = Modifier.size(18.dp))
+                        Icon(Icons.Default.CheckCircle, contentDescription = "Verify number", modifier = Modifier.size(18.dp))
                         Spacer(modifier = Modifier.width(4.dp))
-                        Text(if (state.simChanged) "Verify SIM" else "SIM #", fontSize = 13.sp)
+                        Text(if (state.simChanged) "Verify new SIM" else "Verify number", fontSize = 13.sp)
                     }
                 }
             }
