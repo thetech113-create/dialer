@@ -622,7 +622,8 @@ object AccountDeviceHistoryManager {
     }
 
     fun removeVerifiedNumber(context: Context, number: String) {
-        val current = getVerifiedNumbers(context).filterNot { it == number.trim() }
+        val key = buildP2PNumberSnapshot(number).last10.ifEmpty { number.trim() }
+        val current = getVerifiedNumbers(context).filterNot { buildP2PNumberSnapshot(it).last10.ifEmpty { it } == key }
         val array = JSONArray(current)
         getPrefs(context).edit().putString(KEY_VERIFIED_NUMBERS_JSON, array.toString()).apply()
         notifyStateChanged()
@@ -2164,7 +2165,15 @@ fun MultiDeviceSettingsCard(
     var accountInput by remember { mutableStateOf(accountId) }
 
     var showAddNumberDialog by remember { mutableStateOf(false) }
-    var newNumberInput by remember { mutableStateOf("") }
+    val ownState = remember(refreshTick) { ownNumberState(context) }
+    // A new SIM number (or a first one) is asked about once: the dialog opens with it filled in.
+    LaunchedEffect(ownState) {
+        val state = ownState
+        if (state is OwnNumberState.NeedsVerification && shouldPromptForNumber(context, state.suggested)) {
+            markNumberPrompted(context, state.suggested)
+            showAddNumberDialog = true
+        }
+    }
 
     var showGenerateCodeDialog by remember { mutableStateOf(false) }
     var generatedCode by remember { mutableStateOf("") }
@@ -2366,13 +2375,22 @@ fun MultiDeviceSettingsCard(
                         fontWeight = FontWeight.Medium
                     )
                 }
-                Button(
-                    onClick = { showAddNumberDialog = true },
-                    shape = RoundedCornerShape(14.dp)
-                ) {
-                    Icon(Icons.Default.Add, contentDescription = "Add Number", modifier = Modifier.size(18.dp))
-                    Spacer(modifier = Modifier.width(4.dp))
-                    Text("SIM #", fontSize = 13.sp)
+                when (val state = ownState) {
+                    // Verified and the SIM has not changed: nothing to add and nothing to edit.
+                    is OwnNumberState.Verified -> Text(
+                        text = "Verified",
+                        style = MaterialTheme.typography.labelLarge,
+                        color = MaterialTheme.colorScheme.primary,
+                        fontWeight = FontWeight.SemiBold
+                    )
+                    is OwnNumberState.NeedsVerification -> Button(
+                        onClick = { showAddNumberDialog = true },
+                        shape = RoundedCornerShape(14.dp)
+                    ) {
+                        Icon(Icons.Default.Add, contentDescription = "Add Number", modifier = Modifier.size(18.dp))
+                        Spacer(modifier = Modifier.width(4.dp))
+                        Text(if (state.simChanged) "Verify SIM" else "SIM #", fontSize = 13.sp)
+                    }
                 }
             }
 
@@ -2629,43 +2647,11 @@ fun MultiDeviceSettingsCard(
         )
     }
 
-    // Dialog 4: Add Verified Number for This Device
+    // Dialog 4: this phone's own number (shared with the Recents menu): verify it, or see it locked once verified
     if (showAddNumberDialog) {
-        AlertDialog(
-            onDismissRequest = { showAddNumberDialog = false },
-            title = { Text("Add SIM Number for This Device", fontWeight = FontWeight.Bold) },
-            text = {
-                Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
-                    Text(
-                        text = "Enter the phone number of the SIM inside THIS phone so your other account devices recognize it.",
-                        style = MaterialTheme.typography.bodySmall,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant
-                    )
-                    OwnMobileNumberField(
-                        value = newNumberInput,
-                        onValueChange = { newNumberInput = it },
-                        label = "This Phone's SIM Number",
-                        modifier = Modifier.fillMaxWidth()
-                    )
-                }
-            },
-            confirmButton = {
-                Button(
-                    enabled = newNumberInput.length == 10,
-                    onClick = {
-                        AccountDeviceHistoryManager.registerVerifiedNumber(context, newNumberInput)
-                        newNumberInput = ""
-                        showAddNumberDialog = false
-                    }
-                ) {
-                    Text("Save")
-                }
-            },
-            dismissButton = {
-                TextButton(onClick = { showAddNumberDialog = false }) {
-                    Text("Cancel")
-                }
-            }
+        OwnNumberVerificationDialog(
+            onDismiss = { showAddNumberDialog = false },
+            onVerified = { refreshTick++ }
         )
     }
 

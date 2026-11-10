@@ -4837,9 +4837,10 @@ class MainActivity : ComponentActivity() {
             mutableStateOf(AccountDeviceHistoryManager.getAccountId(this@MainActivity))
         }
         var verifiedNumber by remember { mutableStateOf(p2pServerVerifiedNumber(this@MainActivity)) }
-        var verificationNumber by remember { mutableStateOf(cleanIndianMobileInput(verifiedNumber.orEmpty())) }
-        var verificationStatus by remember { mutableStateOf("") }
-        var verificationWaiting by remember { mutableStateOf(false) }
+        // Verified and the SIM unchanged. Looked at again whenever the verification dialog closes.
+        val numberVerified = remember(verifiedNumber, showVerificationDialog) {
+            ownNumberState(this@MainActivity) is OwnNumberState.Verified
+        }
 
         LaunchedEffect(peerDevices) {
             if (selectedDeviceFilter != "ALL" && selectedDeviceFilter != "THIS_PHONE" &&
@@ -4847,21 +4848,6 @@ class MainActivity : ComponentActivity() {
             ) {
                 selectedDeviceFilter = "ALL"
             }
-        }
-
-        LaunchedEffect(verificationWaiting) {
-            if (!verificationWaiting) return@LaunchedEffect
-            repeat(60) {
-                delay(1000L)
-                p2pServerVerifiedNumber(this@MainActivity)?.let { number ->
-                    verifiedNumber = number
-                    verificationStatus = "Verified successfully"
-                    verificationWaiting = false
-                    return@LaunchedEffect
-                }
-            }
-            verificationStatus = "No verification SMS arrived. Check the number and try again."
-            verificationWaiting = false
         }
 
         val displayRecentCalls = remember(filteredRecentCalls, selectedRecentFilter, selectedDeviceFilter) {
@@ -4941,11 +4927,9 @@ class MainActivity : ComponentActivity() {
                             )
                         }
                         DropdownMenuItem(
-                            text = { Text(if (verifiedNumber == null) "Verify this phone" else "Phone verified") },
+                            text = { Text(if (numberVerified) "Phone verified" else "Verify this phone") },
                             leadingIcon = { Icon(Icons.Default.CheckCircle, contentDescription = null) },
                             onClick = {
-                                verificationNumber = cleanIndianMobileInput(verifiedNumber.orEmpty())
-                                verificationStatus = if (verifiedNumber == null) "" else "This phone is verified"
                                 showRecentMenu = false
                                 showVerificationDialog = true
                             }
@@ -5224,49 +5208,9 @@ class MainActivity : ComponentActivity() {
         }
 
         if (showVerificationDialog) {
-            AlertDialog(
-                onDismissRequest = { if (!verificationWaiting) showVerificationDialog = false },
-                title = { Text("Verify this phone") },
-                text = {
-                    Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
-                        Text("Enter this phone's own SIM number. The app sends a one-time SMS to that same number to securely enable cloud syncing across different networks.")
-                        OwnMobileNumberField(
-                            value = verificationNumber,
-                            onValueChange = { verificationNumber = it },
-                            label = "This phone's mobile number",
-                            enabled = !verificationWaiting && verifiedNumber == null,
-                            modifier = Modifier.fillMaxWidth()
-                        )
-                        if (verificationStatus.isNotBlank()) {
-                            Text(
-                                verificationStatus,
-                                style = MaterialTheme.typography.bodySmall,
-                                color = MaterialTheme.colorScheme.onSurfaceVariant
-                            )
-                        }
-                    }
-                },
-                confirmButton = {
-                    if (verifiedNumber == null) {
-                        TextButton(
-                            enabled = verificationNumber.length == 10 && !verificationWaiting,
-                            onClick = {
-                                verificationStatus = "Sending verification SMS…"
-                                startP2PServerVerification(this@MainActivity, verificationNumber) { message ->
-                                    verificationStatus = message
-                                    verificationWaiting = message.startsWith("Verifying")
-                                }
-                            }
-                        ) { Text(if (verificationWaiting) "Waiting for SMS…" else "Verify") }
-                    } else {
-                        TextButton(onClick = { showVerificationDialog = false }) { Text("Done") }
-                    }
-                },
-                dismissButton = {
-                    if (!verificationWaiting) {
-                        TextButton(onClick = { showVerificationDialog = false }) { Text("Cancel") }
-                    }
-                }
+            OwnNumberVerificationDialog(
+                onDismiss = { showVerificationDialog = false },
+                onVerified = { verifiedNumber = it }
             )
         }
 

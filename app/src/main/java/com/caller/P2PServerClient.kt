@@ -190,6 +190,8 @@ fun handleP2PVerifySms(context: Context, body: String): Boolean {
                 .remove(KEY_PENDING_CODE)
                 .remove(KEY_PENDING_NUMBER)
                 .commit()
+            // Which SIM numbers this phone had when the number was verified (see decideOwnNumberState).
+            rememberVerifiedSimNumbers(appContext)
             Log.w(P2P_FORENSIC_TAG, "p2p_server_verify action=confirm result=ok")
             resolveLocalP2PProfile(appContext)?.name?.let { uploadP2PServerProfileName(appContext, it) }
         }.onFailure { e ->
