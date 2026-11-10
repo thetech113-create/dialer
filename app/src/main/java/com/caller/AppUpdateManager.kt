@@ -60,6 +60,8 @@ object AppUpdateManager {
     private const val KEY_STEP_FROM = "step_from_version_code"
 
     private const val CHECK_INTERVAL_MS = 12 * 60 * 60 * 1000L
+    // A downloaded file that has waited longer than this may no longer be the newest release: it is dropped.
+    private const val PENDING_MAX_AGE_MS = 12 * 60 * 60 * 1000L
     // Taps on the update buttons closer together than this count as one tap, and the system installer is not opened
     // again this soon after it was opened.
     private const val TAP_DEBOUNCE_MS = 1500L
@@ -143,25 +145,33 @@ object AppUpdateManager {
         return false
     }
 
+    /** Opens the installer for a file that is already downloaded (once per version, unless the user asked). */
+    private fun promptPendingInstall(activity: Activity, file: File, isManual: Boolean) {
+        val prefs = activity.applicationContext.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
+        val targetVer = prefs.getLong(KEY_VERSION_CODE, -1L)
+        val alreadyPromptedVer = prefs.getLong(KEY_PROMPTED_VERSION_CODE, -1L)
+        if (isManual || targetVer != alreadyPromptedVer) {
+            prefs.edit().putLong(KEY_PROMPTED_VERSION_CODE, targetVer).apply()
+            openInstaller(currentActivityRef?.get() ?: activity, file)
+        }
+    }
+
+    /**
+     * Order of everything that happens, nothing is skipped and nothing is installed before the last step passes:
+     *  1. a repeated tap is ignored
+     *  2. the newest release is asked for (one small request) and compared with the installed version
+     *  3. a file that is already downloaded is only installed if it IS that newest release, otherwise it is deleted
+     *  4. the release's own update.json is checked (version = tag, valid SHA-256, newer than installed)
+     *  5. enough free storage is checked, then the APK is downloaded
+     *  6. the downloaded file is checked (checksum, package, version code and name, signing key)
+     *  7. only then the system installer is opened
+     */
     fun checkForUpdate(activity: Activity, isManual: Boolean = false) {
         // Before anything else: a second tap must not start a second check or open the installer a second time.
         if (isManual && isRepeatedTap()) return
         ensureLifecycleTracking(activity)
         val appContext = activity.applicationContext
         deleteInstalledUpdateIfSafe(appContext)
-
-        // 1. If a verified update APK is already downloaded on disk, prompt to install it first
-        val existingFile = getDownloadedUpdateFile(appContext)
-        if (existingFile != null) {
-            val prefs = appContext.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
-            val targetVer = prefs.getLong(KEY_VERSION_CODE, -1L)
-            val alreadyPromptedVer = prefs.getLong(KEY_PROMPTED_VERSION_CODE, -1L)
-            if (isManual || targetVer != alreadyPromptedVer) {
-                prefs.edit().putLong(KEY_PROMPTED_VERSION_CODE, targetVer).apply()
-                openInstaller(currentActivityRef?.get() ?: activity, existingFile)
-            }
-            return
-        }
 
         if (isDownloading.get()) {
             if (isManual) toast(appContext, "Update download is already in progress...")
@@ -175,7 +185,14 @@ object AppUpdateManager {
         }
 
         val prefs = appContext.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
-        if (!isManual && System.currentTimeMillis() - prefs.getLong(KEY_LAST_CHECK, 0L) < CHECK_INTERVAL_MS) return
+        val pending = getDownloadedUpdateFile(appContext)
+        val pendingCode = prefs.getLong(KEY_VERSION_CODE, -1L)
+        val checkDue = isManual || System.currentTimeMillis() - prefs.getLong(KEY_LAST_CHECK, 0L) >= CHECK_INTERVAL_MS
+        if (!checkDue) {
+            // No check is due yet, so a file that is already downloaded is still offered.
+            if (pending != null) promptPendingInstall(activity, pending, isManual = false)
+            return
+        }
         if (!isChecking.compareAndSet(false, true)) return
 
         // The screen answers the tap right now; the network steps below take a moment.
@@ -189,6 +206,20 @@ object AppUpdateManager {
         scope.launch {
             try {
                 val result = runCatching { latestRelease(repository, installedPackageInfo(appContext).versionName.orEmpty()) }
+
+                // A file already on disk is installed only if it is the newest release (or the check could not run).
+                if (pending != null) {
+                    val action = pendingFileAction(pendingCode, result.getOrNull()?.versionCode, result.isFailure)
+                    if (action == PendingFileAction.INSTALL) {
+                        _downloadState.value = DownloadState.Idle
+                        withContext(Dispatchers.Main) { promptPendingInstall(activity, pending, isManual) }
+                        return@launch
+                    }
+                    Log.w(TAG, "Discarding the downloaded update $pendingCode: it is not the newest release")
+                    pending.delete()
+                    clearDownload(appContext)
+                }
+
                 result.onSuccess { release ->
                     if (release == null) {
                         if (isManual) {
@@ -341,6 +372,12 @@ object AppUpdateManager {
         val filePath = prefs.getString(KEY_FILE_PATH, null) ?: return null
         val file = File(filePath)
         if (file.isFile && file.length() > 0) {
+            if (System.currentTimeMillis() - file.lastModified() > PENDING_MAX_AGE_MS) {
+                Log.w(TAG, "Discarding the downloaded update: it has waited longer than 12 hours")
+                file.delete()
+                clearDownload(context)
+                return null
+            }
             val expectedVer = prefs.getLong(KEY_VERSION_CODE, -1L)
             val installedVer = installedVersionCode(context)
             if (expectedVer > installedVer) {
@@ -392,6 +429,11 @@ object AppUpdateManager {
                     if (!response.isSuccessful) error("HTTP ${response.code}")
                     val body = response.body ?: error("Empty response body")
                     val totalBytes = body.contentLength()
+                    // Before any byte is written: room for the file, and about as much again for the installer.
+                    val freeBytes = target.parentFile?.usableSpace ?: Long.MAX_VALUE
+                    if (totalBytes > 0 && freeBytes < totalBytes * 2) {
+                        error("Not enough free storage for the update (needs about ${totalBytes * 2 / (1024 * 1024)} MB)")
+                    }
                     var downloadedBytes = 0L
 
                     body.byteStream().use { input ->
@@ -647,6 +689,17 @@ object AppUpdateManager {
             Toast.makeText(context.applicationContext, message, Toast.LENGTH_LONG).show()
         }
 }
+
+internal enum class PendingFileAction { INSTALL, DISCARD }
+
+/**
+ * What to do with a file that is already downloaded once the newest release is known. It is installed only when it IS
+ * the newest release (or the check could not run, so nothing says otherwise). If a newer release exists, or none is
+ * newer than the installed version any more, it is deleted.
+ */
+internal fun pendingFileAction(pendingVersionCode: Long, newestVersionCode: Long?, checkFailed: Boolean): PendingFileAction =
+    if (checkFailed || (newestVersionCode != null && newestVersionCode <= pendingVersionCode)) PendingFileAction.INSTALL
+    else PendingFileAction.DISCARD
 
 /** True when [nowMs] is within [windowMs] after [lastMs]: the same tap or action repeated. */
 internal fun isDuplicateTap(nowMs: Long, lastMs: Long, windowMs: Long): Boolean = nowMs - lastMs in 0 until windowMs

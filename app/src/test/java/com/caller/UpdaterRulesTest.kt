@@ -55,6 +55,27 @@ class UpdaterRulesTest {
     }
 
     @Test
+    fun aDownloadedFileIsInstalledOnlyWhenItIsTheNewestRelease() {
+        assertEquals(PendingFileAction.INSTALL, pendingFileAction(pendingVersionCode = 192, newestVersionCode = 192, checkFailed = false))
+        assertEquals(PendingFileAction.INSTALL, pendingFileAction(pendingVersionCode = 193, newestVersionCode = 192, checkFailed = false))
+    }
+
+    @Test
+    fun anOlderDownloadedFileIsDeletedWhenANewerReleaseExists() {
+        assertEquals(PendingFileAction.DISCARD, pendingFileAction(pendingVersionCode = 190, newestVersionCode = 192, checkFailed = false))
+    }
+
+    @Test
+    fun aDownloadedFileIsDeletedWhenNothingIsNewerThanTheInstalledVersionAnyMore() {
+        assertEquals(PendingFileAction.DISCARD, pendingFileAction(pendingVersionCode = 190, newestVersionCode = null, checkFailed = false))
+    }
+
+    @Test
+    fun aDownloadedFileIsKeptWhenTheCheckCouldNotRun() {
+        assertEquals(PendingFileAction.INSTALL, pendingFileAction(pendingVersionCode = 190, newestVersionCode = null, checkFailed = true))
+    }
+
+    @Test
     fun aSecondTapRightAfterTheFirstIsADuplicate() {
         assertEquals(true, isDuplicateTap(nowMs = 10_000, lastMs = 10_000, windowMs = 1500))
         assertEquals(true, isDuplicateTap(nowMs = 11_499, lastMs = 10_000, windowMs = 1500))
