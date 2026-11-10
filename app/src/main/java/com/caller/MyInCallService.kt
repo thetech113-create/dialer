@@ -3594,7 +3594,9 @@ class MyInCallService : InCallService() {
                     myPackage = packageName,
                     defaultDialerPackage = defaultDialerPackage,
                     launcherPackage = launcherPackage,
-                    assumeDialerOwnership = true,
+                    // Full screen only in the dialer / on the home screen / locked / screen off. "true" skips the
+                    // foreground check, so a call would open the full screen over WhatsApp and every other app.
+                    assumeDialerOwnership = false,
                     isDeviceLocked = isDeviceLocked,
                     isScreenInteractive = isScreenInteractive
                 )

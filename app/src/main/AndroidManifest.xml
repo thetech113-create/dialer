@@ -80,6 +80,7 @@
 
         <activity
             android:name=".MainActivity"
+            android:screenOrientation="portrait"
             android:directBootAware="true"
             android:exported="true"
             android:icon="@drawable/ic_contacts_launcher"
@@ -154,6 +155,7 @@
 
         <activity
             android:name=".MessagingActivity"
+            android:screenOrientation="portrait"
             android:directBootAware="true"
             android:exported="true"
             android:icon="@drawable/ic_messages_launcher"
@@ -184,6 +186,7 @@
 
         <activity
             android:name=".ComposeSmsActivity"
+            android:screenOrientation="portrait"
             android:exported="true"
             android:label="@string/launcher_messages_label"
             android:theme="@style/Theme.Caller">
@@ -478,6 +481,7 @@
 
     <activity
             android:name=".SpeedDialWidgetConfigActivity"
+            android:screenOrientation="portrait"
             android:excludeFromRecents="true"
             android:exported="true"
             android:theme="@style/Theme.Caller">
