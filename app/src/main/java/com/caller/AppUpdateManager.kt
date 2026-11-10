@@ -14,6 +14,7 @@ import android.os.Bundle
 import android.os.Environment
 import android.os.Handler
 import android.os.Looper
+import android.os.SystemClock
 import android.provider.Settings
 import android.util.Log
 import android.widget.Toast
@@ -60,6 +61,10 @@ object AppUpdateManager {
 
     private const val CHECK_INTERVAL_MS = 12 * 60 * 60 * 1000L
     private const val RELEASES_PER_PAGE = 30
+    // Taps on the update buttons closer together than this count as one tap, and the system installer is not opened
+    // again this soon after it was opened.
+    private const val TAP_DEBOUNCE_MS = 1500L
+    private const val INSTALLER_REOPEN_GUARD_MS = 3000L
     private const val MAX_RELEASE_PAGES = 10
     private const val MANIFEST_ASSET = "update.json"
 
@@ -80,6 +85,8 @@ object AppUpdateManager {
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
     private val isDownloading = AtomicBoolean(false)
     private val isChecking = AtomicBoolean(false)
+    @Volatile private var lastTapAtMs = 0L
+    @Volatile private var lastInstallerOpenAtMs = 0L
     // The last file that passed every check as it is on disk (path, size, time, versions): it is not hashed again.
     @Volatile private var lastVerifiedFileKey: String? = null
     private val lifecycleRegistered = AtomicBoolean(false)
@@ -129,7 +136,18 @@ object AppUpdateManager {
         }
     }
 
+    /** True when this tap repeats the one just before it (a double tap): it must do nothing. */
+    @Synchronized
+    private fun isRepeatedTap(): Boolean {
+        val now = SystemClock.elapsedRealtime()
+        if (isDuplicateTap(now, lastTapAtMs, TAP_DEBOUNCE_MS)) return true
+        lastTapAtMs = now
+        return false
+    }
+
     fun checkForUpdate(activity: Activity, isManual: Boolean = false) {
+        // Before anything else: a second tap must not start a second check or open the installer a second time.
+        if (isManual && isRepeatedTap()) return
         ensureLifecycleTracking(activity)
         val appContext = activity.applicationContext
         deleteInstalledUpdateIfSafe(appContext)
@@ -160,10 +178,7 @@ object AppUpdateManager {
 
         val prefs = appContext.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
         if (!isManual && System.currentTimeMillis() - prefs.getLong(KEY_LAST_CHECK, 0L) < CHECK_INTERVAL_MS) return
-        if (!isChecking.compareAndSet(false, true)) {
-            if (isManual) toast(appContext, "Already checking for updates...")
-            return
-        }
+        if (!isChecking.compareAndSet(false, true)) return
 
         // The screen answers the tap right now; the network steps below take a moment.
         if (isManual) {
@@ -378,6 +393,7 @@ object AppUpdateManager {
     }
 
     fun installDownloadedUpdate(context: Context) {
+        if (isRepeatedTap()) return
         val file = getDownloadedUpdateFile(context)
         if (file != null) {
             openInstaller(currentActivityRef?.get() ?: context, file)
@@ -539,7 +555,16 @@ object AppUpdateManager {
         }.toSet()
     }
 
+    @Synchronized
+    private fun installerRecentlyOpened(): Boolean {
+        val now = SystemClock.elapsedRealtime()
+        if (isDuplicateTap(now, lastInstallerOpenAtMs, INSTALLER_REOPEN_GUARD_MS)) return true
+        lastInstallerOpenAtMs = now
+        return false
+    }
+
     private fun openInstaller(context: Context, file: File) {
+        if (installerRecentlyOpened()) return
         try {
             val activeContext = currentActivityRef?.get()?.takeIf { !it.isFinishing && !it.isDestroyed } ?: context
             val prefs = activeContext.applicationContext.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
@@ -652,6 +677,9 @@ object AppUpdateManager {
             Toast.makeText(context.applicationContext, message, Toast.LENGTH_LONG).show()
         }
 }
+
+/** True when [nowMs] is within [windowMs] after [lastMs]: the same tap or action repeated. */
+internal fun isDuplicateTap(nowMs: Long, lastMs: Long, windowMs: Long): Boolean = nowMs - lastMs in 0 until windowMs
 
 /** "v8.10.46" -> [8, 10, 46]; null when the text is not a dotted number. */
 internal fun parseVersionParts(text: String): List<Long>? {

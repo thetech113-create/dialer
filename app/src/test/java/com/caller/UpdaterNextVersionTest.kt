@@ -75,6 +75,24 @@ class UpdaterNextVersionTest {
     }
 
     @Test
+    fun aSecondTapRightAfterTheFirstIsADuplicate() {
+        assertEquals(true, isDuplicateTap(nowMs = 10_000, lastMs = 10_000, windowMs = 1500))
+        assertEquals(true, isDuplicateTap(nowMs = 11_499, lastMs = 10_000, windowMs = 1500))
+    }
+
+    @Test
+    fun aTapAfterTheWindowIsANewTap() {
+        assertEquals(false, isDuplicateTap(nowMs = 11_500, lastMs = 10_000, windowMs = 1500))
+        assertEquals(false, isDuplicateTap(nowMs = 60_000, lastMs = 10_000, windowMs = 1500))
+    }
+
+    @Test
+    fun theVeryFirstTapIsNeverADuplicate() {
+        // lastMs starts at 0 and the clock is far past the window.
+        assertEquals(false, isDuplicateTap(nowMs = 5_000_000, lastMs = 0, windowMs = 1500))
+    }
+
+    @Test
     fun versionTextIsParsed() {
         assertEquals(listOf(8L, 10L, 46L), parseVersionParts("v8.10.46"))
         assertEquals(listOf(8L, 10L, 46L), parseVersionParts(" 8.10.46 "))
