@@ -145,6 +145,7 @@ object AccountDeviceHistoryManager {
     // Private sync channels: one per 6-digit pairing, so a phone linked to two others never joins them together.
     private const val KEY_LINK_ACCOUNT_IDS = "link_account_ids_json"
     private const val LINK_ACCOUNT_PREFIX = "link_"
+    private const val KEY_REMOVED_PEERS_JSON = "removed_peers_json"
     // kvdb.io rejects values larger than ~16 KB by default, so every cloud document stays well under it.
     private const val CLOUD_MAX_BODY_BYTES = 14_000
     private const val CLOUD_MAX_OWN_CALLS = 80
@@ -218,6 +219,9 @@ object AccountDeviceHistoryManager {
     private val syncInProgress = AtomicBoolean(false)
     // deviceId -> time of the last direct (LAN or Tailscale) TCP sync that actually completed, in either direction.
     private val lastDirectSyncMs = java.util.concurrent.ConcurrentHashMap<String, Long>()
+    // account key + peer id -> last time all alternative topic names of a silent peer were probed.
+    private val altTopicProbeAtMs = java.util.concurrent.ConcurrentHashMap<String, Long>()
+    private const val ALT_TOPIC_PROBE_INTERVAL_MS = 10 * 60 * 1000L
     private val stateListeners = CopyOnWriteArrayList<() -> Unit>()
 
     // Reuses the app's own client (P2PServerClient.kt) so cloud sync gets the same DNS fallback
@@ -396,9 +400,12 @@ object AccountDeviceHistoryManager {
     }
 
     /** Removing a phone also forgets the calls it had shared, so unlinking really removes them. */
-    private fun purgeSyncedCallsFrom(context: Context, deviceId: String) {
+    private fun purgeSyncedCallsFrom(context: Context, deviceId: String, deviceName: String = "") {
         val all = getSyncedCallHistory(context)
-        val kept = all.filterNot { it.sourceDeviceId == deviceId }
+        val kept = all.filterNot {
+            it.sourceDeviceId == deviceId ||
+                (deviceName.isNotBlank() && it.sourceDeviceName.equals(deviceName, ignoreCase = true))
+        }
         if (kept.size == all.size) return
         val arr = JSONArray()
         kept.forEach { c ->
@@ -417,6 +424,59 @@ object AccountDeviceHistoryManager {
 
     private fun publishSigKey(base: String, accountKey: String, isPrimary: Boolean): String =
         if (isPrimary) base else "${base}_$accountKey"
+
+    // Phones the user removed. Without this a removed phone comes straight back: the trust store lists it again, and
+    // every shared roster or direct-sync snapshot that still names it adds it to the peer list.
+    private fun removedPeerKeys(context: Context): Set<String> {
+        val raw = getPrefs(context).getString(KEY_REMOVED_PEERS_JSON, null).orEmpty()
+        if (raw.isBlank()) return emptySet()
+        return runCatching {
+            val arr = JSONArray(raw)
+            buildSet {
+                for (i in 0 until arr.length()) {
+                    val k = arr.optString(i)
+                    if (k.isNotBlank()) add(k)
+                }
+            }
+        }.getOrDefault(emptySet())
+    }
+
+    private fun saveRemovedPeerKeys(context: Context, keys: Set<String>) {
+        getPrefs(context).edit().putString(KEY_REMOVED_PEERS_JSON, JSONArray(keys.toList()).toString()).apply()
+    }
+
+    /** A phone is matched by id and by name, because the same phone shows up under several ids. */
+    private fun peerRemovalKeys(deviceId: String, deviceName: String): List<String> = buildList {
+        if (deviceId.isNotBlank()) add("id:" + deviceId.trim())
+        if (deviceName.isNotBlank()) add("name:" + deviceName.trim().lowercase(Locale.ROOT))
+    }
+
+    private fun isPeerRemoved(context: Context, deviceId: String, deviceName: String): Boolean {
+        val removed = removedPeerKeys(context)
+        return removed.isNotEmpty() && peerRemovalKeys(deviceId, deviceName).any { it in removed }
+    }
+
+    private fun markPeerRemoved(context: Context, deviceId: String, deviceName: String) {
+        saveRemovedPeerKeys(context, removedPeerKeys(context) + peerRemovalKeys(deviceId, deviceName))
+    }
+
+    /** Pairing the phone again is the only thing that undoes a removal. */
+    private fun clearPeerRemoved(context: Context, deviceId: String, deviceName: String) {
+        val removed = removedPeerKeys(context)
+        val drop = peerRemovalKeys(deviceId, deviceName).toSet()
+        if (removed.any { it in drop }) saveRemovedPeerKeys(context, removed - drop)
+    }
+
+    /** The name a direct-sync snapshot gives to one of its devices (snapshots carry no top-level name). */
+    private fun snapshotDeviceName(root: JSONObject, deviceId: String): String {
+        if (deviceId.isBlank()) return ""
+        val arr = root.optJSONArray("devices") ?: return ""
+        for (i in 0 until arr.length()) {
+            val d = arr.optJSONObject(i) ?: continue
+            if (d.optString("deviceId") == deviceId) return d.optString("deviceName").trim()
+        }
+        return ""
+    }
 
     fun setAccountId(context: Context, accountId: String) {
         val clean = accountId.trim()
@@ -551,6 +611,7 @@ object AccountDeviceHistoryManager {
 
     fun registerPeerDevice(context: Context, peer: AccountDeviceRegistration) {
         if (peer.deviceId == getCurrentDeviceId(context)) return
+        clearPeerRemoved(context, peer.deviceId, peer.deviceName)
         val prefs = getPrefs(context)
         val peers = getPeerDevices(context).toMutableList()
         val previous = peers.firstOrNull { it.deviceId == peer.deviceId }
@@ -578,9 +639,22 @@ object AccountDeviceHistoryManager {
 
     fun removePeerDevice(context: Context, deviceId: String) {
         val prefs = getPrefs(context)
-        val peers = getPeerDevices(context).filterNot { it.deviceId == deviceId }
-        savePeersList(prefs, peers)
-        purgeSyncedCallsFrom(context, deviceId)
+        val all = getPeerDevices(context)
+        val targetName = all.firstOrNull { it.deviceId == deviceId }?.deviceName.orEmpty()
+        markPeerRemoved(context, deviceId, targetName)
+        // Drop the cryptographic trust too: otherwise the trust store lists the phone again, and a Tailscale sender
+        // would still count as linked. Pairing again approves it afresh.
+        runCatching {
+            val store = getTrustStore(context)
+            store.getAllApprovedPeers()
+                .filter { tp ->
+                    tp.deviceId == deviceId || tp.modelDeviceId == deviceId || "dev_" + tp.fingerprint == deviceId ||
+                        (targetName.isNotBlank() && tp.deviceName.equals(targetName, ignoreCase = true))
+                }
+                .forEach { store.revokePeer(it.deviceId) }
+        }.onFailure { Log.w(TAG, "Could not revoke trust for removed phone: ${it.message}") }
+        savePeersList(prefs, all.filterNot { it.deviceId == deviceId })
+        purgeSyncedCallsFrom(context, deviceId, targetName)
         pruneUnusedLinkAccounts(context)
         notifyStateChanged()
     }
@@ -620,7 +694,14 @@ object AccountDeviceHistoryManager {
         val myDeviceId = getCurrentDeviceId(context)
         val approvedTrustPeers = runCatching { getTrustStore(context).getAllApprovedPeers() }.getOrDefault(emptyList())
 
-        if (approvedTrustPeers.isEmpty()) return stored
+        // A stored entry with my own name and another id is an old registration of this very phone (the id changes
+        // when the app data is cleared). It never uploads and the shared roster would add it back, so ignore it everywhere.
+        val myName = getCurrentDeviceName(context)
+        fun isHidden(p: AccountDeviceRegistration) =
+            (p.deviceId != myDeviceId && p.deviceName.equals(myName, ignoreCase = true)) ||
+                isPeerRemoved(context, p.deviceId, p.deviceName)
+
+        if (approvedTrustPeers.isEmpty()) return stored.filterNot { isHidden(it) }
 
         val result = stored.toMutableList()
         for (tp in approvedTrustPeers) {
@@ -645,7 +726,7 @@ object AccountDeviceHistoryManager {
                 )
             }
         }
-        return result
+        return result.filterNot { isHidden(it) }
     }
 
     fun getLastAccountSyncTime(context: Context): Long =
@@ -705,7 +786,21 @@ object AccountDeviceHistoryManager {
                             val pairReq = PairRequest.fromWire(getRes.body!!)
                             if (pairReq != null) {
                                 val handleRes = host.handleRequest(pairReq)
-                                if (handleRes is PairingHost.RequestResult.Accepted) {
+                                val joinerKnowsLinks = runCatching {
+                                    JSONObject(getRes.body!!).optBoolean("linkCapable", false)
+                                }.getOrDefault(false)
+                                if (handleRes is PairingHost.RequestResult.Accepted && !joinerKnowsLinks) {
+                                    // A joiner on an older build would join this phone's shared account (and with it every
+                                    // phone ever linked here) instead of a private link. Refuse so nothing syncs wrongly.
+                                    host.deny(handleRes.pairingId)
+                                    cloudPost(cloudTopicUrl("status_$code"), host.status(handleRes.pairingId).toWire())
+                                    activePairingCode = null
+                                    activePairingLinkId = null
+                                    Log.w(TAG, "Pairing refused: the joining phone is on an older app version")
+                                    mainHandler.post {
+                                        toast(appCtx, "Pairing refused: the other phone has an older app version. Update it, then pair again.")
+                                    }
+                                } else if (handleRes is PairingHost.RequestResult.Accepted) {
                                     val pendingList = host.pendingRequests()
                                     if (pendingList.isNotEmpty()) {
                                         mainHandler.post {
@@ -754,8 +849,16 @@ object AccountDeviceHistoryManager {
                     return@launch
                 }
 
-                val remoteAccountId = pairObj.optString("accountId")
                 val remoteLinkId = pairObj.optString("linkAccountId").trim()
+                if (!remoteLinkId.startsWith(LINK_ACCOUNT_PREFIX)) {
+                    // An older host would put this phone into its shared account, which also holds every phone it was
+                    // ever linked to. Refuse instead of silently syncing with the wrong phones.
+                    Log.w(TAG, "Pairing refused: host sent no link account (older app version)")
+                    mainHandler.post {
+                        onComplete(false, "The other phone has an older app version. Update it to the latest version, then pair again.")
+                    }
+                    return@launch
+                }
                 val remoteDeviceId = pairObj.optString("deviceId")
                 val remoteDeviceName = pairObj.optString("deviceName").ifBlank { "Linked Phone" }
                 val ownerId = pairObj.optString("ownerId")
@@ -776,7 +879,8 @@ object AccountDeviceHistoryManager {
 
                 // Post PairRequest to Cloud KV
                 val reqEndpoint = cloudTopicUrl("req_$cleanCode")
-                val postRes = cloudPost(reqEndpoint, pairReq.toWire())
+                // The extra field is outside the signed request; an older host simply ignores it.
+                val postRes = cloudPost(reqEndpoint, JSONObject(pairReq.toWire()).put("linkCapable", true).toString())
                 if (!postRes.ok) {
                     mainHandler.post { onComplete(false, "Failed to send pairing request. Try again.") }
                     return@launch
@@ -796,14 +900,8 @@ object AccountDeviceHistoryManager {
                             if (pairStatus.state == "APPROVED") {
                                 // Join the pairing's private link instead of replacing my own account, so phones
                                 // I was already linked to keep syncing with me and never merge with the new one.
-                                // A host running an older build sends no link id: keep the old shared-account join.
-                                val sharedAccountId = if (remoteLinkId.startsWith(LINK_ACCOUNT_PREFIX)) {
-                                    addLinkAccountId(appCtx, remoteLinkId)
-                                    remoteLinkId
-                                } else {
-                                    setAccountId(appCtx, remoteAccountId)
-                                    remoteAccountId
-                                }
+                                addLinkAccountId(appCtx, remoteLinkId)
+                                val sharedAccountId = remoteLinkId
                                 val peerReg = AccountDeviceRegistration(
                                     accountId = sharedAccountId,
                                     deviceId = remoteDeviceId,
@@ -1261,8 +1359,16 @@ object AccountDeviceHistoryManager {
             }
 
             var peerFound = false
+            // The peer's own id is its normal topic. The alternative names (older builds, trust-store ids) are only
+            // worth probing now and then: trying all of them for every silent peer every cycle is what pushes a few
+            // phones on one network into HTTP 429.
+            val probeKey = "$accountKey|${peer.deviceId}"
+            val probeAlternates = System.currentTimeMillis() - (altTopicProbeAtMs[probeKey] ?: 0L) >= ALT_TOPIC_PROBE_INTERVAL_MS
+            var attempts = 0
             for (devKey in topicKeysToTry) {
                 if (peerFound) break
+                if (attempts > 0 && !probeAlternates) break
+                attempts++
                 val r = cloudGet(cloudTopicUrl(cloudDeviceKey(accountKey, devKey)))
                 if (r.ok && r.body.orEmpty().startsWith("{")) {
                     runCatching {
@@ -1288,6 +1394,7 @@ object AccountDeviceHistoryManager {
                 }
             }
             if (!peerFound) {
+                if (probeAlternates) altTopicProbeAtMs[probeKey] = System.currentTimeMillis()
                 notes += "${peer.deviceName} has not uploaded yet"
             }
         }
@@ -1501,6 +1608,7 @@ object AccountDeviceHistoryManager {
                 val devId = d.optString("deviceId").trim()
                 if (devId.isBlank() || devId == myDeviceId) continue
                 val devName = d.optString("deviceName").ifBlank { "Account Phone" }
+                if (isPeerRemoved(context, devId, devName)) continue
                 val numsArr = d.optJSONArray("verifiedNumbers")
                 val nums = buildList {
                     if (numsArr != null) {
@@ -1547,6 +1655,7 @@ object AccountDeviceHistoryManager {
                     srcDevId = getPeerDevices(context).firstOrNull { it.deviceId != myDeviceId }?.deviceId.orEmpty()
                 }
                 if (directSender.isNotBlank() && srcDevId != directSender) continue
+                if (isPeerRemoved(context, srcDevId, srcDevName)) continue
                 val ts = c.optLong("timestamp", c.optLong("date", 0L))
                 if (ts <= 0L) continue
 
@@ -1726,6 +1835,10 @@ object AccountDeviceHistoryManager {
                 }
                 val replyDeviceId = replyObj.optString("senderDeviceId").trim()
                 val replyDeviceName = replyObj.optString("deviceName").trim()
+                if (isPeerRemoved(context, replyDeviceId, snapshotDeviceName(replyObj, replyDeviceId).ifBlank { replyDeviceName })) {
+                    logFail("Direct sync ($via) with $host:$port: reply rejected (that phone was removed)")
+                    return false
+                }
                 val isPeerMatch = expectedDeviceId.isNullOrBlank() ||
                         replyDeviceId == expectedDeviceId ||
                         getPeerDevices(context).any { it.deviceId == replyDeviceId || (it.deviceName.isNotBlank() && it.deviceName.equals(replyDeviceName, ignoreCase = true)) } ||
@@ -1777,6 +1890,11 @@ object AccountDeviceHistoryManager {
                 val accountId = getAllAccountIds(context).firstOrNull { canonicalKeyFor(it) == incomingKey }
                 if (accountId == null) {
                     Log.w(TAG, "Rejected incoming sync from $remoteIp: account mismatch")
+                    return@use
+                }
+                val incomingSenderId = incomingObj.optString("senderDeviceId").trim()
+                if (isPeerRemoved(context, incomingSenderId, snapshotDeviceName(incomingObj, incomingSenderId))) {
+                    Log.w(TAG, "Rejected incoming sync from $remoteIp: that phone was removed")
                     return@use
                 }
 
