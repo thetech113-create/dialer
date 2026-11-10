@@ -96,8 +96,9 @@ fun startP2PServerVerification(context: Context, ownNumber: String, onResult: (S
     val main = Handler(Looper.getMainLooper())
     serverExecutor.execute {
         val message = runCatching {
-            val number = buildP2PNumberSnapshot(ownNumber).digits
-            require(number.length >= 10) { "Enter your full mobile number" }
+            // Same rule as the number field: the 10 digits after +91, starting with 6-9. Nothing else gets an SMS.
+            val number = cleanIndianMobileInput(ownNumber)
+            require(number.length == 10) { "Enter your 10-digit mobile number" }
             check(
                 androidx.core.content.ContextCompat.checkSelfPermission(appContext, android.Manifest.permission.SEND_SMS) ==
                     android.content.pm.PackageManager.PERMISSION_GRANTED

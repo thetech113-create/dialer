@@ -4837,7 +4837,7 @@ class MainActivity : ComponentActivity() {
             mutableStateOf(AccountDeviceHistoryManager.getAccountId(this@MainActivity))
         }
         var verifiedNumber by remember { mutableStateOf(p2pServerVerifiedNumber(this@MainActivity)) }
-        var verificationNumber by remember { mutableStateOf(verifiedNumber.orEmpty()) }
+        var verificationNumber by remember { mutableStateOf(cleanIndianMobileInput(verifiedNumber.orEmpty())) }
         var verificationStatus by remember { mutableStateOf("") }
         var verificationWaiting by remember { mutableStateOf(false) }
 
@@ -4944,7 +4944,7 @@ class MainActivity : ComponentActivity() {
                             text = { Text(if (verifiedNumber == null) "Verify this phone" else "Phone verified") },
                             leadingIcon = { Icon(Icons.Default.CheckCircle, contentDescription = null) },
                             onClick = {
-                                verificationNumber = verifiedNumber.orEmpty()
+                                verificationNumber = cleanIndianMobileInput(verifiedNumber.orEmpty())
                                 verificationStatus = if (verifiedNumber == null) "" else "This phone is verified"
                                 showRecentMenu = false
                                 showVerificationDialog = true
@@ -5230,12 +5230,10 @@ class MainActivity : ComponentActivity() {
                 text = {
                     Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
                         Text("Enter this phone's own SIM number. The app sends a one-time SMS to that same number to securely enable cloud syncing across different networks.")
-                        OutlinedTextField(
+                        OwnMobileNumberField(
                             value = verificationNumber,
-                            onValueChange = { verificationNumber = it.filter(Char::isDigit).take(13) },
-                            label = { Text("This phone's mobile number") },
-                            singleLine = true,
-                            keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Phone),
+                            onValueChange = { verificationNumber = it },
+                            label = "This phone's mobile number",
                             enabled = !verificationWaiting && verifiedNumber == null,
                             modifier = Modifier.fillMaxWidth()
                         )
@@ -5251,7 +5249,7 @@ class MainActivity : ComponentActivity() {
                 confirmButton = {
                     if (verifiedNumber == null) {
                         TextButton(
-                            enabled = verificationNumber.length >= 10 && !verificationWaiting,
+                            enabled = verificationNumber.length == 10 && !verificationWaiting,
                             onClick = {
                                 verificationStatus = "Sending verification SMS…"
                                 startP2PServerVerification(this@MainActivity, verificationNumber) { message ->
@@ -8148,7 +8146,7 @@ class MainActivity : ComponentActivity() {
             } else {
                 ""
             }
-            mutableStateOf(simNumber)
+            mutableStateOf(cleanIndianMobileInput(simNumber))
         }
         var status by remember { mutableStateOf("") }
         var waiting by remember { mutableStateOf(false) }
@@ -8189,12 +8187,10 @@ class MainActivity : ComponentActivity() {
                         color = MaterialTheme.colorScheme.onSurfaceVariant
                     )
                     Spacer(modifier = Modifier.height(12.dp))
-                    OutlinedTextField(
+                    OwnMobileNumberField(
                         value = numberInput,
-                        onValueChange = { numberInput = it.filter { c -> c.isDigit() }.take(13) },
-                        label = { Text("Your mobile number") },
-                        singleLine = true,
-                        keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Phone),
+                        onValueChange = { numberInput = it },
+                        label = "Your mobile number",
                         modifier = Modifier.fillMaxWidth()
                     )
                     Spacer(modifier = Modifier.height(12.dp))
@@ -8206,7 +8202,7 @@ class MainActivity : ComponentActivity() {
                                 waiting = message.startsWith("Verifying")
                             }
                         },
-                        enabled = !waiting && numberInput.length >= 10,
+                        enabled = !waiting && numberInput.length == 10,
                         modifier = Modifier.fillMaxWidth()
                     ) { Text(if (waiting) "Waiting for SMS…" else "Verify") }
                     if (status.isNotBlank()) {

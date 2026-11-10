@@ -2641,18 +2641,17 @@ fun MultiDeviceSettingsCard(
                         style = MaterialTheme.typography.bodySmall,
                         color = MaterialTheme.colorScheme.onSurfaceVariant
                     )
-                    OutlinedTextField(
+                    OwnMobileNumberField(
                         value = newNumberInput,
                         onValueChange = { newNumberInput = it },
-                        label = { Text("This Phone's SIM Number") },
-                        singleLine = true,
+                        label = "This Phone's SIM Number",
                         modifier = Modifier.fillMaxWidth()
                     )
                 }
             },
             confirmButton = {
                 Button(
-                    enabled = newNumberInput.isNotBlank(),
+                    enabled = newNumberInput.length == 10,
                     onClick = {
                         AccountDeviceHistoryManager.registerVerifiedNumber(context, newNumberInput)
                         newNumberInput = ""
