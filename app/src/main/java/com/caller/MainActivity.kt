@@ -817,36 +817,43 @@ internal fun buildRecentCallsSnapshot(context: Context, contacts: List<Contact>)
         return if (otherSimInUse) label else ""
     }
 
-    callRows.forEach { row ->
-        if (AccountDeviceHistoryManager.shouldFilterCallHistoryItem(context, row.phoneNumber, row.callType)) {
-            return@forEach
-        }
-        val numberSnapshot = buildP2PNumberSnapshot(row.phoneNumber)
-        val rowIdentity = buildRecentCallerGroupKey(row.phoneNumber)
-
-        val storedName = numberSnapshot.lookupKeys.firstNotNullOfOrNull { key ->
+    // The name this phone already has for a number: a saved contact, or a name mapped in the bulk-contacts store.
+    // Calls synced from another phone use it too, so a number named here is never shown as a bare number.
+    fun storedNameFor(phoneNumber: String): String? {
+        val identity = buildRecentCallerGroupKey(phoneNumber)
+        return buildP2PNumberSnapshot(phoneNumber).lookupKeys.firstNotNullOfOrNull { key ->
             val contactMapName = contactMap[key]
-                ?.takeIf { buildRecentCallerGroupKey(it.phoneNumber) == rowIdentity }
+                ?.takeIf { buildRecentCallerGroupKey(it.phoneNumber) == identity }
                 ?.name
             val prefsName = dpsPrefs.getString(key, null)
 
             contactMapName?.takeIf { it.isNotBlank() && it != "Unknown" }
                 ?: prefsName?.takeIf { it.isNotBlank() && it != "Unknown" }
         }
-        val p2pMemoKey = rowIdentity
-        val appName = storedName ?: if (p2pNameMemo.containsKey(p2pMemoKey)) {
-            p2pNameMemo[p2pMemoKey]
-        } else {
-            lookupRecentP2PName(context, row.phoneNumber, P2P_PROFILE_CACHE_TTL_MS)
-                .also { p2pNameMemo[p2pMemoKey] = it }
-        }
+    }
 
-        val displayName = appName ?: if (allowSystemFallback) {
-            val sysName = getSystemContactName(row.phoneNumber, context)
-            sysName ?: formatPhoneNumberForDisplay(row.phoneNumber)
+    fun sharedP2PNameFor(phoneNumber: String): String? {
+        val memoKey = buildRecentCallerGroupKey(phoneNumber)
+        return if (p2pNameMemo.containsKey(memoKey)) {
+            p2pNameMemo[memoKey]
         } else {
-            formatPhoneNumberForDisplay(row.phoneNumber)
+            lookupRecentP2PName(context, phoneNumber, P2P_PROFILE_CACHE_TTL_MS)
+                .also { p2pNameMemo[memoKey] = it }
         }
+    }
+
+    // What a number with no name of its own shows: the built-in mapped name of a service number (e.g. 198), else the number.
+    fun unnamedDisplayFor(phoneNumber: String): String =
+        (if (allowSystemFallback) getSystemContactName(phoneNumber, context) else null)
+            ?: formatPhoneNumberForDisplay(phoneNumber)
+
+    callRows.forEach { row ->
+        if (AccountDeviceHistoryManager.shouldFilterCallHistoryItem(context, row.phoneNumber, row.callType)) {
+            return@forEach
+        }
+        val appName = storedNameFor(row.phoneNumber) ?: sharedP2PNameFor(row.phoneNumber)
+
+        val displayName = appName ?: unnamedDisplayFor(row.phoneNumber)
 
         val simLabel = simLabelForRow(row)
         calls.add(
@@ -880,15 +887,11 @@ internal fun buildRecentCallsSnapshot(context: Context, contacts: List<Contact>)
                 return@forEach
             }
 
-            val numberSnapshot = buildP2PNumberSnapshot(record.remoteNumber)
-            val contactName = numberSnapshot.lookupKeys.firstNotNullOfOrNull { key ->
-                contactMap[key]
-                    ?.takeIf { buildRecentCallerGroupKey(it.phoneNumber) == buildRecentCallerGroupKey(record.remoteNumber) }
-                    ?.name
-            }
-            val displayName = contactName?.takeIf { it.isNotBlank() && it != "Unknown" }
+            // This phone's own name for the number comes first, then the name the other phone had for it.
+            val displayName = storedNameFor(record.remoteNumber)
                 ?: record.contactName.takeIf { it.isNotBlank() }
-                ?: formatPhoneNumberForDisplay(record.remoteNumber)
+                ?: sharedP2PNameFor(record.remoteNumber)
+                ?: unnamedDisplayFor(record.remoteNumber)
 
             calls.add(
                 RecentCall(

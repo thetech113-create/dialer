@@ -387,6 +387,23 @@ object AccountDeviceHistoryManager {
         }
     }
 
+    /**
+     * Whether this phone may sync through [accountId]. Everyone holding a private link id was paired by code. For the
+     * shared Account ID the phone must already be a registered or trusted peer: the same ID alone is not a pairing.
+     */
+    private fun isPairedForAccount(context: Context, accountId: String, deviceId: String, deviceName: String): Boolean {
+        if (accountId.startsWith(LINK_ACCOUNT_PREFIX)) return true
+        if (deviceId.isBlank()) return false
+        if (peersInAccount(context, accountId).any {
+                it.deviceId == deviceId || (deviceName.isNotBlank() && it.deviceName.equals(deviceName, ignoreCase = true))
+            }) return true
+        return runCatching {
+            getTrustStore(context).getAllApprovedPeers().any {
+                it.deviceId == deviceId || it.modelDeviceId == deviceId || "dev_" + it.fingerprint == deviceId
+            }
+        }.getOrDefault(false)
+    }
+
     /** Which of my accounts a peer is linked through; the shared account for legacy peers. */
     private fun accountIdForPeer(context: Context, peer: AccountDeviceRegistration): String {
         val all = getAllAccountIds(context)
@@ -665,7 +682,7 @@ object AccountDeviceHistoryManager {
     fun getPeerDevices(context: Context): List<AccountDeviceRegistration> {
         val prefs = getPrefs(context)
         val rawJson = prefs.getString(KEY_PEER_DEVICES_JSON, null).orEmpty()
-        val stored = if (rawJson.isBlank()) emptyList() else runCatching {
+        val storedAll = if (rawJson.isBlank()) emptyList() else runCatching {
             val array = JSONArray(rawJson)
             buildList {
                 for (i in 0 until array.length()) {
@@ -696,6 +713,16 @@ object AccountDeviceHistoryManager {
         val myAccountId = getAccountId(context)
         val myDeviceId = getCurrentDeviceId(context)
         val approvedTrustPeers = runCatching { getTrustStore(context).getAllApprovedPeers() }.getOrDefault(emptyList())
+
+        // Only a phone that was paired with a code is a linked device: it either sits on a private link, or it was
+        // approved in the trust store. An entry that only came from a roster of the shared Account ID is dropped,
+        // so having the same Account ID never lists (or syncs with) a phone.
+        fun isPaired(p: AccountDeviceRegistration) =
+            p.accountId.startsWith(LINK_ACCOUNT_PREFIX) || approvedTrustPeers.any { tp ->
+                tp.deviceId == p.deviceId || tp.modelDeviceId == p.deviceId || "dev_" + tp.fingerprint == p.deviceId ||
+                    (p.deviceName.isNotBlank() && tp.deviceName.equals(p.deviceName, ignoreCase = true))
+            }
+        val stored = storedAll.filter { isPaired(it) }
 
         // A stored entry with my own name and another id is an old registration of this very phone (the id changes
         // when the app data is cleared). It never uploads and the shared roster would add it back, so ignore it everywhere.
@@ -950,9 +977,12 @@ object AccountDeviceHistoryManager {
                 } else {
                     getAccountId(appCtx)
                 }
+                // The joining phone uploads, announces itself and syncs under its model id (dev_<MODEL>_<n>), which its pairing
+                // request carries. pendingRec.deviceId is only the key-derived trust-store id. Registering that one left the
+                // phone's real id unknown here: its direct syncs were refused as "removed" after an earlier removal.
                 val peerReg = AccountDeviceRegistration(
                     accountId = peerAccountId,
-                    deviceId = pendingRec.deviceId,
+                    deviceId = pendingRec.modelDeviceId.ifBlank { pendingRec.deviceId },
                     deviceName = pendingRec.deviceName,
                     verifiedNumbers = emptyList(),
                     lastSyncTimestamp = System.currentTimeMillis()
@@ -1140,7 +1170,7 @@ object AccountDeviceHistoryManager {
                         peerCount > 0 ->
                             toast(appCtx, "Sync unavailable \u2014 other device unreachable.")
                         else ->
-                            toast(appCtx, "Account state updated. Sign in with the same Account ID on your other phone.")
+                            toast(appCtx, "Account state updated. Link your other phone with a 6-digit code.")
                     }
                 }
             } catch (e: Exception) {
@@ -1601,7 +1631,9 @@ object AccountDeviceHistoryManager {
         val myAccountId = accountId
         val prefs = getPrefs(context)
 
-        val devicesArr = root.optJSONArray("devices")
+        // Only a private link may add a phone from the device list it carries: both of its phones were paired by code.
+        // The shared Account ID's list names every phone that ever used that ID, which were never paired with this one.
+        val devicesArr = root.optJSONArray("devices")?.takeIf { accountId.startsWith(LINK_ACCOUNT_PREFIX) }
         if (devicesArr != null) {
             val currentPeers = getPeerDevices(context).toMutableList()
             for (i in 0 until devicesArr.length()) {
@@ -1769,6 +1801,7 @@ object AccountDeviceHistoryManager {
 
         if (remoteDeviceId == getCurrentDeviceId(context)) return
         val matchedAccountId = getAllAccountIds(context).firstOrNull { canonicalKeyFor(it) == remoteAccountKey } ?: return
+        if (!isPairedForAccount(context, matchedAccountId, remoteDeviceId, "")) return
 
         parts.getOrNull(4)?.let { updatePeerTailscaleIp(context, remoteDeviceId, it) }
 
@@ -1847,6 +1880,10 @@ object AccountDeviceHistoryManager {
                     logFail("Direct sync ($via) with $host:$port: reply rejected (that phone was removed)")
                     return false
                 }
+                if (!isPairedForAccount(context, accountId, replyDeviceId, snapshotDeviceName(replyObj, replyDeviceId).ifBlank { replyDeviceName })) {
+                    logFail("Direct sync ($via) with $host:$port: reply rejected (that phone is not linked)")
+                    return false
+                }
                 val isPeerMatch = expectedDeviceId.isNullOrBlank() ||
                         replyDeviceId == expectedDeviceId ||
                         getPeerDevices(context).any { it.deviceId == replyDeviceId || (it.deviceName.isNotBlank() && it.deviceName.equals(replyDeviceName, ignoreCase = true)) } ||
@@ -1903,6 +1940,10 @@ object AccountDeviceHistoryManager {
                 val incomingSenderId = incomingObj.optString("senderDeviceId").trim()
                 if (isPeerRemoved(context, incomingSenderId, snapshotDeviceName(incomingObj, incomingSenderId))) {
                     Log.w(TAG, "Rejected incoming sync from $remoteIp: that phone was removed")
+                    return@use
+                }
+                if (!isPairedForAccount(context, accountId, incomingSenderId, snapshotDeviceName(incomingObj, incomingSenderId))) {
+                    Log.w(TAG, "Rejected incoming sync from $remoteIp: that phone is not linked (same Account ID is not a pairing)")
                     return@use
                 }
 
@@ -2556,14 +2597,14 @@ fun MultiDeviceSettingsCard(
             text = {
                 Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
                     Text(
-                        text = "Enter the same Account ID or main phone number on both of your devices (e.g. 9876543210). Both phones will automatically connect, list each other under Account Linked Devices, and sync call history securely.",
+                        text = "This is the ID of this phone's account (e.g. its main phone number, 9876543210). A matching Account ID does not connect phones: link another phone with a 6-digit code, and only linked phones are listed under Account Linked Devices and sync call history.",
                         style = MaterialTheme.typography.bodySmall,
                         color = MaterialTheme.colorScheme.onSurfaceVariant
                     )
                     OutlinedTextField(
                         value = accountInput,
                         onValueChange = { accountInput = it },
-                        label = { Text("Shared Account ID / Number") },
+                        label = { Text("Account ID / Number") },
                         singleLine = true,
                         modifier = Modifier.fillMaxWidth()
                     )
@@ -2655,7 +2696,7 @@ fun MultiDeviceSettingsCard(
                         contentAlignment = Alignment.Center
                     ) {
                         Text(
-                            text = "No synced calls yet. Tap 'Sync Account Now' after signing into the same Account ID on your other phone.",
+                            text = "No synced calls yet. Tap 'Sync Account Now' after linking your other phone with a 6-digit code.",
                             style = MaterialTheme.typography.bodyMedium,
                             color = MaterialTheme.colorScheme.onSurfaceVariant
                         )
@@ -2706,7 +2747,8 @@ fun MultiDeviceSettingsCard(
                                     Column(modifier = Modifier.weight(1f)) {
                                         Text(
                                             text = record.contactName.ifBlank {
-                                                formatPhoneNumberForDisplay(record.remoteNumber)
+                                                getSystemContactName(record.remoteNumber, context)
+                                                    ?: formatPhoneNumberForDisplay(record.remoteNumber)
                                             },
                                             style = MaterialTheme.typography.bodyMedium,
                                             fontWeight = FontWeight.Bold,
