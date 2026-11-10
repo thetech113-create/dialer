@@ -29,6 +29,7 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import okhttp3.OkHttpClient
 import okhttp3.Request
+import org.json.JSONArray
 import org.json.JSONObject
 import java.io.File
 import java.io.FileOutputStream
@@ -41,9 +42,11 @@ import java.util.concurrent.atomic.AtomicBoolean
  * GitHub Releases in-app updater.
  * Each release must attach an `update.json` asset alongside its APK:
  * {"versionCode":2,"versionName":"1.0.1","apkAsset":"Caller-1.0.1.apk","sha256":"..."}
- * The updater offers the newest release, and installs it only if every check passes: the release's own update.json
- * (version agrees with the tag, valid SHA-256, newer than the installed version) and then the downloaded file
- * (checksum, package, version code and name, signing key). A release that fails a check is never installed.
+ * The updater offers the newest release, and installs it only if every check passes: every release between the
+ * installed version and the newest one is there in order (they are only looked at, never downloaded), the release's
+ * own update.json (version agrees with the tag, valid SHA-256, newer than the installed version) and then the
+ * downloaded file (checksum, package, version code and name, signing key). A release that fails a check is never
+ * installed.
  */
 object AppUpdateManager {
     private const val TAG = "AppUpdateManager"
@@ -66,6 +69,7 @@ object AppUpdateManager {
     // again this soon after it was opened.
     private const val TAP_DEBOUNCE_MS = 1500L
     private const val INSTALLER_REOPEN_GUARD_MS = 3000L
+    private const val MAX_RELEASE_PAGES = 20
     private const val MANIFEST_ASSET = "update.json"
 
     sealed class DownloadState {
@@ -102,6 +106,9 @@ object AppUpdateManager {
         .build()
 
     private data class Release(val tag: String, val versionName: String, val versionCode: Long, val apkUrl: String, val sha256: String?)
+
+    /** The releases between the installed version and the newest one are not all there in order: nothing is installed. */
+    private class ReleaseOrderException(val tag: String, val problem: String) : Exception("Release $tag: $problem")
 
     /**
      * Tracks whichever Activity is in the foreground (MainActivity or MessagingActivity)
@@ -160,11 +167,13 @@ object AppUpdateManager {
      * Order of everything that happens, nothing is skipped and nothing is installed before the last step passes:
      *  1. a repeated tap is ignored
      *  2. the newest release is asked for (one small request) and compared with the installed version
-     *  3. a file that is already downloaded is only installed if it IS that newest release, otherwise it is deleted
-     *  4. the release's own update.json is checked (version = tag, valid SHA-256, newer than installed)
-     *  5. enough free storage is checked, then the APK is downloaded
-     *  6. the downloaded file is checked (checksum, package, version code and name, signing key)
-     *  7. only then the system installer is opened
+     *  3. every release between the installed version and the newest one must be there, in order (on 8.10.54 with
+     *     8.10.59 as the newest: 55, 56, 57, 58, then 59); they are only looked at, never downloaded
+     *  4. a file that is already downloaded is only installed if it IS that newest release, otherwise it is deleted
+     *  5. the release's own update.json is checked (version = tag, valid SHA-256, newer than installed)
+     *  6. enough free storage is checked, then the APK is downloaded
+     *  7. the downloaded file is checked (checksum, package, version code and name, signing key)
+     *  8. only then the system installer is opened
      */
     fun checkForUpdate(activity: Activity, isManual: Boolean = false) {
         // Before anything else: a second tap must not start a second check or open the installer a second time.
@@ -206,16 +215,29 @@ object AppUpdateManager {
         scope.launch {
             try {
                 val result = runCatching { latestRelease(repository, installedPackageInfo(appContext).versionName.orEmpty()) }
+                val outOfOrder = result.exceptionOrNull() as? ReleaseOrderException
+
+                // The newest release is the only one offered: when a check on it fails nothing is installed.
+                fun reject(tag: String, problem: String) {
+                    Log.w(TAG, "Release $tag rejected: $problem")
+                    if (isManual) {
+                        _downloadState.value = DownloadState.Error("Update $tag was not installed: $problem")
+                        toast(appContext, "Update $tag was not installed: $problem")
+                    } else {
+                        _downloadState.value = DownloadState.Idle
+                    }
+                }
 
                 // A file already on disk is installed only if it is the newest release (or the check could not run).
                 if (pending != null) {
-                    val action = pendingFileAction(pendingCode, result.getOrNull()?.versionCode, result.isFailure)
+                    val checkFailed = result.isFailure && outOfOrder == null
+                    val action = pendingFileAction(pendingCode, result.getOrNull()?.versionCode, checkFailed)
                     if (action == PendingFileAction.INSTALL) {
                         _downloadState.value = DownloadState.Idle
                         withContext(Dispatchers.Main) { promptPendingInstall(activity, pending, isManual) }
                         return@launch
                     }
-                    Log.w(TAG, "Discarding the downloaded update $pendingCode: it is not the newest release")
+                    Log.w(TAG, "Discarding the downloaded update $pendingCode: it is not the newest release, or the releases are not in order")
                     pending.delete()
                     clearDownload(appContext)
                 }
@@ -234,19 +256,16 @@ object AppUpdateManager {
                         release.tag, release.versionName, release.versionCode, release.sha256, installedVersionCode(appContext)
                     )
                     if (problem != null) {
-                        // The newest release is the only one offered: when it fails a check nothing is installed.
-                        Log.w(TAG, "Release ${release.tag} rejected: $problem")
-                        if (isManual) {
-                            _downloadState.value = DownloadState.Error("Update ${release.tag} was not installed: $problem")
-                            toast(appContext, "Update ${release.tag} was not installed: $problem")
-                        } else {
-                            _downloadState.value = DownloadState.Idle
-                        }
+                        reject(release.tag, problem)
                         return@onSuccess
                     }
                     toast(appContext, "Update ${release.tag} found. Downloading...")
                     enqueueDownload(appContext, release)
                 }.onFailure { error ->
+                    if (outOfOrder != null) {
+                        reject(outOfOrder.tag, outOfOrder.problem)
+                        return@onFailure
+                    }
                     Log.w(TAG, "Update metadata check failed", error)
                     val msg = error.localizedMessage ?: "Network error"
                     val nothingPublished = msg.contains("404") || msg.contains("No releases", ignoreCase = true) ||
@@ -278,14 +297,43 @@ object AppUpdateManager {
         }
     }
 
-    /** The newest published release, or null when it is not newer than the installed version. One small request. */
+    /**
+     * The newest published release, or null when it is not newer than the installed version (one small request).
+     * Before anything of that release is read, every release between the installed version and it must be there, in
+     * order: [ReleaseOrderException] when one is missing.
+     */
     private fun latestRelease(repository: String, installedVersionName: String): Release? {
         require(repository.matches(Regex("[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+"))) { "Invalid GitHub repository: $repository" }
         val release = getJson("https://api.github.com/repos/$repository/releases/latest")
-        val newest = parseVersionParts(release.optString("tag_name"))
+        val tag = release.optString("tag_name").removePrefix("v").trim()
+        val newest = parseVersionParts(tag)
         val installed = parseVersionParts(installedVersionName)
-        if (newest != null && installed != null && compareVersionParts(newest, installed) <= 0) return null
+        if (newest != null && installed != null) {
+            if (compareVersionParts(newest, installed) <= 0) return null
+            // The usual case, one step up, needs no list: there is nothing in between to look for.
+            val published = if (isNextVersion(installed, newest)) listOf(newest) else publishedVersionsAbove(repository, installed, newest)
+            releaseOrderProblem(installed, newest, published)?.let { throw ReleaseOrderException(tag, it) }
+        }
         return releaseFromJson(release)
+    }
+
+    /**
+     * The versions of the published releases above [installed]. The list comes newest first; it is read a page at a
+     * time until a release at or below the installed version has been seen. Only names are read, no file is fetched.
+     */
+    private fun publishedVersionsAbove(repository: String, installed: List<Long>, newest: List<Long>): List<List<Long>> {
+        val perPage = releasePageSize(installed, newest)
+        val versions = mutableListOf<List<Long>>()
+        for (page in 1..MAX_RELEASE_PAGES) {
+            val releases = getJsonArray("https://api.github.com/repos/$repository/releases?per_page=$perPage&page=$page")
+            val items = (0 until releases.length()).mapNotNull { releases.optJSONObject(it) }
+            val pageVersions = items.filter { !it.optBoolean("draft") && !it.optBoolean("prerelease") }
+                .mapNotNull { parseVersionParts(it.optString("tag_name")) }
+            versions += pageVersions.filter { compareVersionParts(it, installed) > 0 }
+            val reachedInstalled = pageVersions.any { compareVersionParts(it, installed) <= 0 }
+            if (reachedInstalled || items.size < perPage) break
+        }
+        return versions
     }
 
     /** Everything about a release comes from its own update.json; nothing is guessed from the tag. */
@@ -313,6 +361,8 @@ object AppUpdateManager {
     }
 
     private fun getJson(url: String): JSONObject = JSONObject(getBody(url))
+
+    private fun getJsonArray(url: String): JSONArray = JSONArray(getBody(url))
 
     private fun getBody(url: String): String {
         val request = Request.Builder().url(url)
@@ -716,6 +766,51 @@ internal fun compareVersionParts(a: List<Long>, b: List<Long>): Int {
         if (c != 0) return c
     }
     return 0
+}
+
+/** "8.10.55" for [8, 10, 55]. */
+internal fun versionText(parts: List<Long>): String = parts.joinToString(".")
+
+/**
+ * True when [next] is the release that comes right after [previous]: one number goes up by exactly one and every
+ * number after it starts again at 0 (8.10.55 -> 8.10.56, 8.10.55 -> 8.11.0, 8.10.55 -> 9.0.0).
+ */
+internal fun isNextVersion(previous: List<Long>, next: List<Long>): Boolean {
+    val size = maxOf(previous.size, next.size)
+    val a = List(size) { previous.getOrElse(it) { 0L } }
+    val b = List(size) { next.getOrElse(it) { 0L } }
+    val first = (0 until size).firstOrNull { a[it] != b[it] } ?: return false
+    return b[first] == a[first] + 1 && (first + 1 until size).all { b[it] == 0L }
+}
+
+/**
+ * Why the newest release must not be installed although it is newer, or null when the releases are in order. Starting
+ * at the installed version, every published release up to [newest] must follow the one before it (55, 56, 57, 58, 59),
+ * and nothing published may be above [newest]. [published] may come in any order and may hold older releases too.
+ */
+internal fun releaseOrderProblem(installed: List<Long>, newest: List<Long>, published: List<List<Long>>): String? {
+    val above = published.filter { compareVersionParts(it, installed) > 0 }
+        .sortedWith { a, b -> compareVersionParts(a, b) }
+    above.lastOrNull { compareVersionParts(it, newest) > 0 }?.let {
+        return "release ${versionText(it)} is above the one marked as the latest"
+    }
+    if (above.none { compareVersionParts(it, newest) == 0 }) return "it is not in the list of releases"
+    var previous = installed
+    for (version in above) {
+        if (compareVersionParts(version, previous) == 0) continue
+        if (!isNextVersion(previous, version)) {
+            return "a release is missing between ${versionText(previous)} and ${versionText(version)}"
+        }
+        previous = version
+    }
+    return null
+}
+
+/** How many releases to ask for at once, so that one request normally reaches from the newest down to the installed one. */
+internal fun releasePageSize(installed: List<Long>, newest: List<Long>): Int {
+    val sameSeries = installed.size == newest.size && installed.dropLast(1) == newest.dropLast(1)
+    val steps = if (sameSeries) newest.last() - installed.last() else 30L
+    return (steps + 1).coerceIn(10L, 100L).toInt()
 }
 
 /**
