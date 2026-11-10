@@ -28,6 +28,7 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import okhttp3.OkHttpClient
 import okhttp3.Request
+import org.json.JSONArray
 import org.json.JSONObject
 import java.io.File
 import java.io.FileOutputStream
@@ -40,6 +41,8 @@ import java.util.concurrent.atomic.AtomicBoolean
  * GitHub Releases in-app updater.
  * Each release must attach an `update.json` asset alongside its APK:
  * {"versionCode":2,"versionName":"1.0.1","apkAsset":"Caller-1.0.1.apk","sha256":"..."}
+ * The updater moves ONE release at a time: it offers the nearest release above the installed version (8.10.45 gets
+ * 8.10.46, not the newest one), so every release's changes run in order.
  */
 object AppUpdateManager {
     private const val TAG = "AppUpdateManager"
@@ -153,10 +156,10 @@ object AppUpdateManager {
         prefs.edit().putLong(KEY_LAST_CHECK, System.currentTimeMillis()).apply()
 
         scope.launch {
-            val result = runCatching { latestRelease(repository) }
+            val result = runCatching { nextRelease(repository, installedPackageInfo(appContext).versionName.orEmpty()) }
             result.onSuccess { release ->
                 val currentVer = installedVersionCode(appContext)
-                if (release.versionCode > currentVer) {
+                if (release != null && release.versionCode > currentVer) {
                     toast(appContext, "Update available! Downloading in app...")
                     enqueueDownload(appContext, release)
                 } else if (isManual) {
@@ -189,8 +192,24 @@ object AppUpdateManager {
         val repository = (repositoryOverride ?: BuildConfig.GITHUB_RELEASE_REPOSITORY).trim()
             .ifBlank { "thetech113-create/dialer" }
         require(repository.matches(Regex("[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+"))) { "Invalid GitHub repository: $repository" }
-        val apiUrl = "https://api.github.com/repos/$repository/releases/latest"
-        val release = getJson(apiUrl)
+        return releaseFromJson(getJson("https://api.github.com/repos/$repository/releases/latest"))
+    }
+
+    /**
+     * The release one step above the installed version, or null when none is newer. An installed version that is not a
+     * dotted number falls back to the newest release.
+     */
+    private fun nextRelease(repository: String, installedVersionName: String): Release? {
+        require(repository.matches(Regex("[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+"))) { "Invalid GitHub repository: $repository" }
+        val installed = parseVersionParts(installedVersionName) ?: return latestRelease(repository)
+        val releases = getJsonArray("https://api.github.com/repos/$repository/releases?per_page=100")
+        val published = (0 until releases.length()).mapNotNull { releases.optJSONObject(it) }
+            .filter { !it.optBoolean("draft") && !it.optBoolean("prerelease") }
+        val nextTag = pickNextTag(installed, published.map { it.optString("tag_name") }) ?: return null
+        return releaseFromJson(published.first { it.optString("tag_name") == nextTag })
+    }
+
+    private fun releaseFromJson(release: JSONObject): Release {
         val assets = release.optJSONArray("assets") ?: error("Release has no assets")
         var manifestUrl: String? = null
         val assetsByName = mutableMapOf<String, String>()
@@ -235,7 +254,11 @@ object AppUpdateManager {
         return if (parts[0] == 8L) 118L + (parts[1] * 10) + parts[2] - 8L else parts[0] * 100 + parts[1] * 10 + parts[2]
     }
 
-    private fun getJson(url: String): JSONObject {
+    private fun getJson(url: String): JSONObject = JSONObject(getBody(url))
+
+    private fun getJsonArray(url: String): JSONArray = JSONArray(getBody(url))
+
+    private fun getBody(url: String): String {
         val request = Request.Builder().url(url)
             .header("Accept", "application/vnd.github+json")
             .header("User-Agent", "Caller-Android-Updater")
@@ -245,8 +268,7 @@ object AppUpdateManager {
                 error("No GitHub releases published yet")
             }
             require(response.isSuccessful) { "GitHub returned HTTP ${response.code}" }
-            val raw = response.body?.string()?.trim()?.removePrefix("\uFEFF") ?: error("Empty GitHub response")
-            return JSONObject(raw)
+            return response.body?.string()?.trim()?.removePrefix("\uFEFF") ?: error("Empty GitHub response")
         }
     }
 
@@ -487,6 +509,8 @@ object AppUpdateManager {
         if (version > 0 && installedVersionCode(context) >= version) {
             prefs.getString(KEY_FILE_PATH, null)?.let { File(it).takeIf(File::isFile)?.delete() }
             clearDownload(context)
+            // One release at a time: the next step is looked for now, not after the 12 h wait.
+            prefs.edit().remove(KEY_LAST_CHECK).apply()
         }
     }
 
@@ -499,15 +523,15 @@ object AppUpdateManager {
         .putBoolean(KEY_AWAITING_INSTALL_PERMISSION, false)
         .apply()
 
-    private fun installedVersionCode(context: Context): Long {
-        val pInfo = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+    private fun installedPackageInfo(context: Context): PackageInfo =
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
             context.packageManager.getPackageInfo(context.packageName, PackageManager.PackageInfoFlags.of(0))
         } else {
             @Suppress("DEPRECATION")
             context.packageManager.getPackageInfo(context.packageName, 0)
         }
-        return archiveVersionCode(pInfo)
-    }
+
+    private fun installedVersionCode(context: Context): Long = archiveVersionCode(installedPackageInfo(context))
 
     private fun archiveVersionCode(info: PackageInfo): Long =
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) info.longVersionCode
@@ -529,6 +553,27 @@ object AppUpdateManager {
             Toast.makeText(context.applicationContext, message, Toast.LENGTH_LONG).show()
         }
 }
+
+/** "v8.10.46" -> [8, 10, 46]; null when the text is not a dotted number. */
+internal fun parseVersionParts(text: String): List<Long>? {
+    val parts = text.trim().removePrefix("v").split(".").map { it.toLongOrNull() ?: return null }
+    return parts.takeIf { it.isNotEmpty() }
+}
+
+internal fun compareVersionParts(a: List<Long>, b: List<Long>): Int {
+    for (i in 0 until maxOf(a.size, b.size)) {
+        val c = a.getOrElse(i) { 0L }.compareTo(b.getOrElse(i) { 0L })
+        if (c != 0) return c
+    }
+    return 0
+}
+
+/** The tag of the nearest version above [installed]: one step up, never a jump to the newest release. */
+internal fun pickNextTag(installed: List<Long>, tags: List<String>): String? =
+    tags.mapNotNull { tag -> parseVersionParts(tag)?.let { tag to it } }
+        .filter { (_, version) -> compareVersionParts(version, installed) > 0 }
+        .minWithOrNull { x, y -> compareVersionParts(x.second, y.second) }
+        ?.first
 
 class UpdateDownloadReceiver : BroadcastReceiver() {
     override fun onReceive(context: Context, intent: Intent) {
