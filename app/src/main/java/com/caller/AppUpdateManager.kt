@@ -22,6 +22,9 @@ import androidx.core.content.FileProvider
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.async
+import kotlinx.coroutines.awaitAll
+import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
@@ -30,6 +33,7 @@ import kotlinx.coroutines.withContext
 import okhttp3.OkHttpClient
 import okhttp3.Request
 import org.json.JSONArray
+import org.json.JSONException
 import org.json.JSONObject
 import java.io.File
 import java.io.FileOutputStream
@@ -43,10 +47,10 @@ import java.util.concurrent.atomic.AtomicBoolean
  * Each release must attach an `update.json` asset alongside its APK:
  * {"versionCode":2,"versionName":"1.0.1","apkAsset":"Caller-1.0.1.apk","sha256":"..."}
  * The updater offers the newest release, and installs it only if every check passes: every release between the
- * installed version and the newest one is there in order (they are only looked at, never downloaded), the release's
- * own update.json (version agrees with the tag, valid SHA-256, newer than the installed version) and then the
- * downloaded file (checksum, package, version code and name, signing key). A release that fails a check is never
- * installed.
+ * installed version and the newest one is there in order and is a version of its own (only their small update.json
+ * is read, their APKs are never downloaded), the release's own update.json (version agrees with the tag, valid
+ * SHA-256, newer than the installed version) and then the downloaded file (checksum, package, version code and name,
+ * signing key). A release that fails a check is never installed.
  */
 object AppUpdateManager {
     private const val TAG = "AppUpdateManager"
@@ -105,9 +109,17 @@ object AppUpdateManager {
         .followSslRedirects(true)
         .build()
 
-    private data class Release(val tag: String, val versionName: String, val versionCode: Long, val apkUrl: String, val sha256: String?)
+    /** [attachedSha256] is GitHub's own SHA-256 of the APK attached to the release, when it reports one. */
+    internal data class Release(
+        val tag: String,
+        val versionName: String,
+        val versionCode: Long,
+        val apkUrl: String,
+        val sha256: String?,
+        val attachedSha256: String? = null
+    )
 
-    /** The releases between the installed version and the newest one are not all there in order: nothing is installed. */
+    /** The releases from the installed version up to the newest one are not a row of real versions in order: nothing is installed. */
     private class ReleaseOrderException(val tag: String, val problem: String) : Exception("Release $tag: $problem")
 
     /**
@@ -168,7 +180,9 @@ object AppUpdateManager {
      *  1. a repeated tap is ignored
      *  2. the newest release is asked for (one small request) and compared with the installed version
      *  3. every release between the installed version and the newest one must be there, in order (on 8.10.54 with
-     *     8.10.59 as the newest: 55, 56, 57, 58, then 59); they are only looked at, never downloaded
+     *     8.10.59 as the newest: 55, 56, 57, 58, then 59), and each must be a version of its own, not another release
+     *     with only the number changed: its update.json agrees with its number, its version code is above the one
+     *     before it, and its file is its own. Only their small update.json is read, their APKs are never downloaded
      *  4. a file that is already downloaded is only installed if it IS that newest release, otherwise it is deleted
      *  5. the release's own update.json is checked (version = tag, valid SHA-256, newer than installed)
      *  6. enough free storage is checked, then the APK is downloaded
@@ -214,7 +228,9 @@ object AppUpdateManager {
 
         scope.launch {
             try {
-                val result = runCatching { latestRelease(repository, installedPackageInfo(appContext).versionName.orEmpty()) }
+                val result = runCatching {
+                    latestRelease(repository, installedPackageInfo(appContext).versionName.orEmpty(), installedVersionCode(appContext))
+                }
                 val outOfOrder = result.exceptionOrNull() as? ReleaseOrderException
 
                 // The newest release is the only one offered: when a check on it fails nothing is installed.
@@ -299,41 +315,63 @@ object AppUpdateManager {
 
     /**
      * The newest published release, or null when it is not newer than the installed version (one small request).
-     * Before anything of that release is read, every release between the installed version and it must be there, in
-     * order: [ReleaseOrderException] when one is missing.
+     * Before it is offered, every release between the installed version and it must be there, in order, and each must
+     * be a version of its own: [ReleaseOrderException] when not.
      */
-    private fun latestRelease(repository: String, installedVersionName: String): Release? {
+    private suspend fun latestRelease(repository: String, installedVersionName: String, installedVersionCode: Long): Release? {
         require(repository.matches(Regex("[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+"))) { "Invalid GitHub repository: $repository" }
         val release = getJson("https://api.github.com/repos/$repository/releases/latest")
         val tag = release.optString("tag_name").removePrefix("v").trim()
         val newest = parseVersionParts(tag)
         val installed = parseVersionParts(installedVersionName)
-        if (newest != null && installed != null) {
-            if (compareVersionParts(newest, installed) <= 0) return null
-            // The usual case, one step up, needs no list: there is nothing in between to look for.
-            val published = if (isNextVersion(installed, newest)) listOf(newest) else publishedVersionsAbove(repository, installed, newest)
-            releaseOrderProblem(installed, newest, published)?.let { throw ReleaseOrderException(tag, it) }
+        if (newest == null || installed == null) return releaseFromJson(release)
+        if (compareVersionParts(newest, installed) <= 0) return null
+
+        // The usual case, one step up, needs no list: there is nothing in between to look for.
+        val between = if (isNextVersion(installed, newest)) emptyList() else {
+            val published = publishedReleasesAbove(repository, installed, newest)
+            releaseOrderProblem(installed, newest, published.map { it.first })?.let { throw ReleaseOrderException(tag, it) }
+            published.filter { compareVersionParts(it.first, newest) < 0 }
+                .distinctBy { versionText(it.first) }
+                .sortedWith { a, b -> compareVersionParts(a.first, b.first) }
+                .map { it.second }
         }
-        return releaseFromJson(release)
+        // Each release in between is read as well (its small update.json, never its APK), a few at a time.
+        val chain = between.chunked(8).flatMap { chunk ->
+            coroutineScope { chunk.map { json -> async { releaseInOrder(tag, json) } }.awaitAll() }
+        } + releaseInOrder(tag, release)
+        releaseChainProblem(installedVersionCode, chain)?.let { throw ReleaseOrderException(tag, it) }
+        return chain.last()
+    }
+
+    /** One release of the row. When it is not complete or not readable the newest release is refused. */
+    private fun releaseInOrder(newestTag: String, json: JSONObject): Release = try {
+        releaseFromJson(json)
+    } catch (unreadable: Exception) {
+        // No update.json, no APK, or text that is not JSON breaks the order; a network error is only a failed check.
+        if (unreadable is IllegalStateException || unreadable is JSONException) {
+            throw ReleaseOrderException(newestTag, unreadable.message ?: "a release could not be read")
+        }
+        throw unreadable
     }
 
     /**
-     * The versions of the published releases above [installed]. The list comes newest first; it is read a page at a
-     * time until a release at or below the installed version has been seen. Only names are read, no file is fetched.
+     * The published releases above [installed], each with its version. The list comes newest first; it is read a page
+     * at a time until a release at or below the installed version has been seen.
      */
-    private fun publishedVersionsAbove(repository: String, installed: List<Long>, newest: List<Long>): List<List<Long>> {
+    private fun publishedReleasesAbove(repository: String, installed: List<Long>, newest: List<Long>): List<Pair<List<Long>, JSONObject>> {
         val perPage = releasePageSize(installed, newest)
-        val versions = mutableListOf<List<Long>>()
+        val found = mutableListOf<Pair<List<Long>, JSONObject>>()
         for (page in 1..MAX_RELEASE_PAGES) {
             val releases = getJsonArray("https://api.github.com/repos/$repository/releases?per_page=$perPage&page=$page")
             val items = (0 until releases.length()).mapNotNull { releases.optJSONObject(it) }
-            val pageVersions = items.filter { !it.optBoolean("draft") && !it.optBoolean("prerelease") }
-                .mapNotNull { parseVersionParts(it.optString("tag_name")) }
-            versions += pageVersions.filter { compareVersionParts(it, installed) > 0 }
-            val reachedInstalled = pageVersions.any { compareVersionParts(it, installed) <= 0 }
+            val published = items.filter { !it.optBoolean("draft") && !it.optBoolean("prerelease") }
+                .mapNotNull { item -> parseVersionParts(item.optString("tag_name"))?.let { it to item } }
+            found += published.filter { compareVersionParts(it.first, installed) > 0 }
+            val reachedInstalled = published.any { compareVersionParts(it.first, installed) <= 0 }
             if (reachedInstalled || items.size < perPage) break
         }
-        return versions
+        return found
     }
 
     /** Everything about a release comes from its own update.json; nothing is guessed from the tag. */
@@ -341,22 +379,26 @@ object AppUpdateManager {
         val tag = release.optString("tag_name").removePrefix("v").trim()
         val assets = release.optJSONArray("assets") ?: error("Release $tag has no assets")
         val assetsByName = mutableMapOf<String, String>()
+        val digestsByName = mutableMapOf<String, String>()
         for (index in 0 until assets.length()) {
             val asset = assets.optJSONObject(index) ?: continue
             val name = asset.optString("name")
             val url = asset.optString("browser_download_url")
             if (name.isNotBlank() && url.startsWith("https://")) assetsByName[name] = url
+            // GitHub's own checksum of the uploaded file, "sha256:<64 hex>"; uploads from before it kept one have none.
+            Regex("sha256:([0-9a-fA-F]{64})").matchEntire(asset.optString("digest"))?.let { digestsByName[name] = it.groupValues[1] }
         }
         val manifestUrl = assetsByName[MANIFEST_ASSET] ?: error("Release $tag has no update.json")
         val manifest = getJson(manifestUrl)
-        val apkUrl = assetsByName[manifest.optString("apkAsset")]
-            ?: error("Release $tag: the APK named in update.json is not attached")
+        val apkAsset = manifest.optString("apkAsset")
+        val apkUrl = assetsByName[apkAsset] ?: error("Release $tag: the APK named in update.json is not attached")
         return Release(
             tag = tag,
             versionName = manifest.optString("versionName").trim(),
             versionCode = manifest.optLong("versionCode", -1L),
             apkUrl = apkUrl,
-            sha256 = manifest.optString("sha256").trim().takeIf { it.isNotEmpty() }
+            sha256 = manifest.optString("sha256").trim().takeIf { it.isNotEmpty() },
+            attachedSha256 = digestsByName[apkAsset]
         )
     }
 
@@ -802,6 +844,33 @@ internal fun releaseOrderProblem(installed: List<Long>, newest: List<Long>, publ
             return "a release is missing between ${versionText(previous)} and ${versionText(version)}"
         }
         previous = version
+    }
+    return null
+}
+
+/**
+ * Why the releases from the installed version up to the newest are not a row of real, different versions, or null when
+ * they are. [chain] is in order, oldest first, and ends with the newest. A release that is another release with only
+ * the number changed is caught here: each one needs an update.json that agrees with its number, a version code above
+ * the one before it, and a file of its own (the file its checksum names, and not the file of another release).
+ */
+internal fun releaseChainProblem(installedVersionCode: Long, chain: List<AppUpdateManager.Release>): String? {
+    var previousCode = installedVersionCode
+    val fileOwners = mutableMapOf<String, String>()
+    for (release in chain) {
+        releaseProblem(release.tag, release.versionName, release.versionCode, release.sha256, Long.MIN_VALUE)?.let {
+            return "release ${release.tag}: $it"
+        }
+        val sha = release.sha256.orEmpty().lowercase()
+        if (release.attachedSha256 != null && !release.attachedSha256.equals(sha, ignoreCase = true)) {
+            return "release ${release.tag}: the attached file is not the one its checksum names"
+        }
+        if (release.versionCode <= previousCode) {
+            return "release ${release.tag} has version code ${release.versionCode}, which is not above $previousCode of the version before it"
+        }
+        fileOwners[sha]?.let { return "release ${release.tag} has the same file as release $it" }
+        fileOwners[sha] = release.tag
+        previousCode = release.versionCode
     }
     return null
 }

@@ -143,6 +143,90 @@ class UpdaterRulesTest {
         assertEquals(31, releasePageSize(v(55), listOf(8, 11, 3)))
     }
 
+    /** A different file checksum for every number. */
+    private fun file(number: Int) = number.toString(16).padStart(64, '0')
+
+    private fun release(
+        patch: Int,
+        code: Long,
+        name: String = "8.10.$patch",
+        sha256: String? = file(patch),
+        attached: String? = sha256
+    ) = AppUpdateManager.Release("8.10.$patch", name, code, "https://example.invalid/Caller-8.10.$patch.apk", sha256, attached)
+
+    @Test
+    fun theNewestReleaseIsAllowedWhenEveryReleaseBeforeItIsAVersionOfItsOwn() {
+        // A phone on 8.10.54 (version code 192) with 8.10.59 as the newest.
+        assertNull(
+            releaseChainProblem(192, listOf(release(55, 193), release(56, 194), release(57, 195), release(58, 196), release(59, 197)))
+        )
+        // One step up: only the newest release itself.
+        assertNull(releaseChainProblem(192, listOf(release(55, 193))))
+        // A version code may jump, it only has to go up.
+        assertNull(releaseChainProblem(192, listOf(release(55, 193), release(56, 200))))
+        // An upload GitHub kept no checksum of is judged by its update.json alone.
+        assertNull(releaseChainProblem(192, listOf(release(55, 193, attached = null), release(56, 194))))
+        // GitHub writes its checksum in small letters; update.json may use capitals.
+        assertNull(releaseChainProblem(192, listOf(release(55, 193, sha256 = "AB".repeat(32), attached = "ab".repeat(32)))))
+    }
+
+    @Test
+    fun aReleaseThatIsAnotherReleaseWithOnlyTheNumberChangedIsRefused() {
+        // The file of 8.10.59 attached again as 8.10.55.
+        assertEquals(
+            "release 8.10.59 has the same file as release 8.10.55",
+            releaseChainProblem(
+                192,
+                listOf(release(55, 193, sha256 = file(59)), release(56, 194), release(57, 195), release(58, 196), release(59, 197))
+            )
+        )
+        // The update.json of 8.10.59 attached to 8.10.55.
+        assertEquals(
+            "release 8.10.55: update.json says version \"8.10.59\" but the release is 8.10.55",
+            releaseChainProblem(192, listOf(release(55, 197, name = "8.10.59", sha256 = file(59)), release(56, 194)))
+        )
+        // An update.json written for 8.10.55, but the attached file is the one of 8.10.59.
+        assertEquals(
+            "release 8.10.55: the attached file is not the one its checksum names",
+            releaseChainProblem(192, listOf(release(55, 193, attached = file(59)), release(56, 194)))
+        )
+    }
+
+    @Test
+    fun theVersionCodeHasToGoUpWithEveryRelease() {
+        // 8.10.55 built from 8.10.59 keeps the version code of 8.10.59.
+        assertEquals(
+            "release 8.10.56 has version code 194, which is not above 197 of the version before it",
+            releaseChainProblem(192, listOf(release(55, 197), release(56, 194), release(57, 195)))
+        )
+        assertEquals(
+            "release 8.10.56 has version code 193, which is not above 193 of the version before it",
+            releaseChainProblem(192, listOf(release(55, 193), release(56, 193)))
+        )
+        // The first release of the row is compared with the installed app.
+        assertEquals(
+            "release 8.10.55 has version code 192, which is not above 192 of the version before it",
+            releaseChainProblem(192, listOf(release(55, 192), release(56, 194)))
+        )
+        // An update.json without a version code.
+        assertEquals(
+            "release 8.10.55 has version code -1, which is not above 192 of the version before it",
+            releaseChainProblem(192, listOf(release(55, -1), release(56, 194)))
+        )
+    }
+
+    @Test
+    fun aReleaseInBetweenWithoutARealChecksumIsRefused() {
+        assertEquals(
+            "release 8.10.56: the release has no valid checksum",
+            releaseChainProblem(192, listOf(release(55, 193), release(56, 194, sha256 = null), release(57, 195)))
+        )
+        assertEquals(
+            "release 8.10.56: the release has no valid checksum",
+            releaseChainProblem(192, listOf(release(55, 193), release(56, 194, sha256 = "abc"), release(57, 195)))
+        )
+    }
+
     @Test
     fun aSecondTapRightAfterTheFirstIsADuplicate() {
         assertEquals(true, isDuplicateTap(nowMs = 10_000, lastMs = 10_000, windowMs = 1500))
