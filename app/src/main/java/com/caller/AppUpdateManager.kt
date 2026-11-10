@@ -54,6 +54,9 @@ object AppUpdateManager {
     private const val KEY_SHA256 = "sha256"
     private const val KEY_AWAITING_INSTALL_PERMISSION = "awaiting_install_permission"
     private const val KEY_PROMPTED_VERSION_CODE = "prompted_version_code"
+    private const val KEY_VERSION_NAME = "version_name"
+    // Installed version code at the time the file was chosen: a file is only installed on the version it was the next step for.
+    private const val KEY_STEP_FROM = "step_from_version_code"
 
     private const val CHECK_INTERVAL_MS = 12 * 60 * 60 * 1000L
     private const val MANIFEST_ASSET = "update.json"
@@ -82,7 +85,7 @@ object AppUpdateManager {
         .followSslRedirects(true)
         .build()
 
-    private data class Release(val versionCode: Long, val apkUrl: String, val sha256: String?)
+    private data class Release(val tag: String, val versionName: String, val versionCode: Long, val apkUrl: String, val sha256: String?)
 
     /**
      * Tracks whichever Activity is in the foreground (MainActivity or MessagingActivity)
@@ -158,13 +161,21 @@ object AppUpdateManager {
         scope.launch {
             val result = runCatching { nextRelease(repository, installedPackageInfo(appContext).versionName.orEmpty()) }
             result.onSuccess { release ->
-                val currentVer = installedVersionCode(appContext)
-                if (release != null && release.versionCode > currentVer) {
-                    toast(appContext, "Update available! Downloading in app...")
-                    enqueueDownload(appContext, release)
-                } else if (isManual) {
-                    toast(appContext, "You are using the latest version")
+                if (release == null) {
+                    if (isManual) toast(appContext, "You are using the latest version")
+                    return@onSuccess
                 }
+                val problem = releaseProblem(
+                    release.tag, release.versionName, release.versionCode, release.sha256, installedVersionCode(appContext)
+                )
+                if (problem != null) {
+                    // The next release is the only one that may be installed: a bad one is not skipped for a later one.
+                    Log.w(TAG, "Release ${release.tag} rejected: $problem")
+                    if (isManual) toast(appContext, "Update ${release.tag} was not installed: $problem")
+                    return@onSuccess
+                }
+                toast(appContext, "Update available! Downloading in app...")
+                enqueueDownload(appContext, release)
             }.onFailure { error ->
                 Log.w(TAG, "Update metadata check failed", error)
                 if (isManual) {
@@ -188,20 +199,11 @@ object AppUpdateManager {
         }
     }
 
-    private fun latestRelease(repositoryOverride: String? = null): Release {
-        val repository = (repositoryOverride ?: BuildConfig.GITHUB_RELEASE_REPOSITORY).trim()
-            .ifBlank { "thetech113-create/dialer" }
-        require(repository.matches(Regex("[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+"))) { "Invalid GitHub repository: $repository" }
-        return releaseFromJson(getJson("https://api.github.com/repos/$repository/releases/latest"))
-    }
-
-    /**
-     * The release one step above the installed version, or null when none is newer. An installed version that is not a
-     * dotted number falls back to the newest release.
-     */
+    /** The nearest published release above the installed version, or null when there is none. */
     private fun nextRelease(repository: String, installedVersionName: String): Release? {
         require(repository.matches(Regex("[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+"))) { "Invalid GitHub repository: $repository" }
-        val installed = parseVersionParts(installedVersionName) ?: return latestRelease(repository)
+        val installed = parseVersionParts(installedVersionName)
+            ?: error("The installed version \"$installedVersionName\" is not a version number")
         val releases = getJsonArray("https://api.github.com/repos/$repository/releases?per_page=100")
         val published = (0 until releases.length()).mapNotNull { releases.optJSONObject(it) }
             .filter { !it.optBoolean("draft") && !it.optBoolean("prerelease") }
@@ -209,49 +211,28 @@ object AppUpdateManager {
         return releaseFromJson(published.first { it.optString("tag_name") == nextTag })
     }
 
+    /** Everything about a release comes from its own update.json; nothing is guessed from the tag. */
     private fun releaseFromJson(release: JSONObject): Release {
-        val assets = release.optJSONArray("assets") ?: error("Release has no assets")
-        var manifestUrl: String? = null
+        val tag = release.optString("tag_name").removePrefix("v").trim()
+        val assets = release.optJSONArray("assets") ?: error("Release $tag has no assets")
         val assetsByName = mutableMapOf<String, String>()
         for (index in 0 until assets.length()) {
             val asset = assets.optJSONObject(index) ?: continue
             val name = asset.optString("name")
             val url = asset.optString("browser_download_url")
             if (name.isNotBlank() && url.startsWith("https://")) assetsByName[name] = url
-            if (name == MANIFEST_ASSET) manifestUrl = url
         }
-
-        // 1. Try update.json if attached
-        if (manifestUrl != null) {
-            runCatching {
-                val manifest = getJson(manifestUrl)
-                val versionCode = manifest.optLong("versionCode", -1L)
-                val apkName = manifest.optString("apkAsset")
-                val apkUrl = assetsByName[apkName]
-                if (versionCode > 0 && !apkUrl.isNullOrBlank()) {
-                    return Release(versionCode, apkUrl, manifest.optString("sha256").takeIf { it.matches(Regex("[0-9a-fA-F]{64}")) })
-                }
-            }
-        }
-
-        // 2. Fallback: Parse release tag (e.g. "v8.8.8" -> 126) and look for any .apk asset in the release
-        val tagName = release.optString("tag_name").removePrefix("v").trim()
-        val apkAssetUrl = assetsByName.values.firstOrNull { it.endsWith(".apk", ignoreCase = true) }
-            ?: error("Release has no APK asset attached")
-
-        val versionCodeFromTag = parseVersionCodeFromTag(tagName)
-        require(versionCodeFromTag > 0) { "Could not determine version from release tag: $tagName" }
-
-        return Release(versionCodeFromTag, apkAssetUrl, null)
-    }
-
-    private fun parseVersionCodeFromTag(tag: String): Long {
-        val parts = tag.split(".").mapNotNull { it.filter { c -> c.isDigit() }.toLongOrNull() }
-        if (parts.isEmpty()) return -1L
-        if (parts.size == 1) return parts[0]
-        if (parts.size == 2) return parts[0] * 100 + parts[1]
-        // Example: 8.8.8 -> 126 or 80808
-        return if (parts[0] == 8L) 118L + (parts[1] * 10) + parts[2] - 8L else parts[0] * 100 + parts[1] * 10 + parts[2]
+        val manifestUrl = assetsByName[MANIFEST_ASSET] ?: error("Release $tag has no update.json")
+        val manifest = getJson(manifestUrl)
+        val apkUrl = assetsByName[manifest.optString("apkAsset")]
+            ?: error("Release $tag: the APK named in update.json is not attached")
+        return Release(
+            tag = tag,
+            versionName = manifest.optString("versionName").trim(),
+            versionCode = manifest.optLong("versionCode", -1L),
+            apkUrl = apkUrl,
+            sha256 = manifest.optString("sha256").trim().takeIf { it.isNotEmpty() }
+        )
     }
 
     private fun getJson(url: String): JSONObject = JSONObject(getBody(url))
@@ -317,8 +298,20 @@ object AppUpdateManager {
         val file = File(filePath)
         if (file.isFile && file.length() > 0) {
             val expectedVer = prefs.getLong(KEY_VERSION_CODE, -1L)
-            if (expectedVer > installedVersionCode(context)) {
-                return file
+            val installedVer = installedVersionCode(context)
+            if (expectedVer > installedVer) {
+                // A file from before this rule, or chosen for another installed version, may skip a release: never use it.
+                val problem = if (prefs.getLong(KEY_STEP_FROM, -1L) != installedVer) {
+                    "it was not chosen as the next step for this version"
+                } else {
+                    verifyApkIntegrity(
+                        context, file, expectedVer, prefs.getString(KEY_VERSION_NAME, "").orEmpty(), prefs.getString(KEY_SHA256, null)
+                    )
+                }
+                if (problem == null) return file
+                Log.w(TAG, "Discarding the downloaded update: $problem")
+                file.delete()
+                clearDownload(context)
             }
         }
         return null
@@ -380,7 +373,7 @@ object AppUpdateManager {
                     tempFile.delete()
                 }
 
-                val verificationError = verifyApkIntegrity(context, target, release.sha256)
+                val verificationError = verifyApkIntegrity(context, target, release.versionCode, release.versionName, release.sha256)
                 if (verificationError != null) {
                     Log.e(TAG, "APK verification failed: $verificationError")
                     if (target.exists()) target.delete()
@@ -394,6 +387,8 @@ object AppUpdateManager {
                 context.getSharedPreferences(PREFS, Context.MODE_PRIVATE).edit()
                     .putString(KEY_FILE_PATH, target.absolutePath)
                     .putLong(KEY_VERSION_CODE, release.versionCode)
+                    .putString(KEY_VERSION_NAME, release.versionName)
+                    .putLong(KEY_STEP_FROM, installedVersionCode(context))
                     .putString(KEY_SHA256, release.sha256)
                     .remove(KEY_PROMPTED_VERSION_CODE)
                     .apply()
@@ -419,27 +414,69 @@ object AppUpdateManager {
         }
     }
 
-    private fun verifyApkIntegrity(context: Context, file: File, expectedSha256: String?): String? {
-        if (!file.isFile || file.length() == 0L) {
-            return "Downloaded APK file is empty"
+    /**
+     * Null when the file is exactly the update that was chosen and may be installed; otherwise the reason it must not be.
+     * Every check has to pass: right checksum, this app, the expected version (and newer than the installed one), and
+     * the same signing key as the installed app.
+     */
+    private fun verifyApkIntegrity(
+        context: Context,
+        file: File,
+        expectedVersionCode: Long,
+        expectedVersionName: String,
+        expectedSha256: String?
+    ): String? {
+        if (!file.isFile || file.length() == 0L) return "Downloaded APK file is empty"
+        if (expectedSha256.isNullOrBlank()) return "The release has no checksum, so it was not installed"
+        if (!sha256(file).equals(expectedSha256.trim(), ignoreCase = true)) {
+            return "The update file is damaged (checksum mismatch), so it was not installed"
         }
-        if (!expectedSha256.isNullOrBlank()) {
-            val actualHash = sha256(file)
-            if (!actualHash.equals(expectedSha256.trim(), ignoreCase = true)) {
-                Log.w(TAG, "SHA-256 mismatch (expected=$expectedSha256, actual=$actualHash) — continuing if APK package is valid")
-            }
+        val archive = packageInfoWithSigners(context, file.absolutePath)
+            ?: return "Downloaded file is not a valid APK archive"
+        if (archive.packageName != context.packageName) {
+            return "APK package mismatch (${archive.packageName} != ${context.packageName})"
         }
-        val packageInfo = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
-            context.packageManager.getPackageArchiveInfo(file.absolutePath, PackageManager.PackageInfoFlags.of(0))
+        val archiveCode = archiveVersionCode(archive)
+        if (archiveCode != expectedVersionCode) {
+            return "The update file is version code $archiveCode, expected $expectedVersionCode, so it was not installed"
+        }
+        if (archiveCode <= installedVersionCode(context)) return "The update file is not newer than the installed version"
+        if (expectedVersionName.isNotBlank() && archive.versionName != expectedVersionName) {
+            return "The update file is version ${archive.versionName}, expected $expectedVersionName, so it was not installed"
+        }
+        // Android refuses a differently signed update at install time anyway; this says so before the installer opens.
+        val installedSigners = packageInfoWithSigners(context, null)?.let(::signerDigests).orEmpty()
+        val archiveSigners = signerDigests(archive)
+        if (installedSigners.isNotEmpty() && archiveSigners.isNotEmpty() && installedSigners != archiveSigners) {
+            return "The update is signed with a different key than the installed app, so it was not installed"
+        }
+        return null
+    }
+
+    private fun packageInfoWithSigners(context: Context, archivePath: String?): PackageInfo? = runCatching {
+        val flags = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) PackageManager.GET_SIGNING_CERTIFICATES
+        else @Suppress("DEPRECATION") PackageManager.GET_SIGNATURES
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+            val packageFlags = PackageManager.PackageInfoFlags.of(flags.toLong())
+            if (archivePath != null) context.packageManager.getPackageArchiveInfo(archivePath, packageFlags)
+            else context.packageManager.getPackageInfo(context.packageName, packageFlags)
         } else {
             @Suppress("DEPRECATION")
-            context.packageManager.getPackageArchiveInfo(file.absolutePath, 0)
-        } ?: return "Downloaded file is not a valid APK archive"
-
-        if (packageInfo.packageName != context.packageName) {
-            return "APK package mismatch (${packageInfo.packageName} != ${context.packageName})"
+            if (archivePath != null) context.packageManager.getPackageArchiveInfo(archivePath, flags)
+            else context.packageManager.getPackageInfo(context.packageName, flags)
         }
-        return null // null means valid!
+    }.getOrNull()
+
+    private fun signerDigests(info: PackageInfo): Set<String> {
+        val signatures = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
+            info.signingInfo?.apkContentsSigners
+        } else {
+            @Suppress("DEPRECATION")
+            info.signatures
+        }
+        return signatures.orEmpty().map { signature ->
+            MessageDigest.getInstance("SHA-256").digest(signature.toByteArray()).joinToString("") { "%02x".format(it) }
+        }.toSet()
     }
 
     private fun openInstaller(context: Context, file: File) {
@@ -519,6 +556,8 @@ object AppUpdateManager {
         .remove(KEY_VERSION_CODE)
         .remove(KEY_FILE_PATH)
         .remove(KEY_SHA256)
+        .remove(KEY_VERSION_NAME)
+        .remove(KEY_STEP_FROM)
         .remove(KEY_PROMPTED_VERSION_CODE)
         .putBoolean(KEY_AWAITING_INSTALL_PERMISSION, false)
         .apply()
@@ -566,6 +605,22 @@ internal fun compareVersionParts(a: List<Long>, b: List<Long>): Int {
         if (c != 0) return c
     }
     return 0
+}
+
+/**
+ * Why a release must not be installed, or null when it may be. The release's own update.json has to agree with its tag,
+ * carry a real checksum, and be newer than what is installed.
+ */
+internal fun releaseProblem(tag: String, versionName: String, versionCode: Long, sha256: String?, installedVersionCode: Long): String? {
+    val tagParts = parseVersionParts(tag)
+    val nameParts = parseVersionParts(versionName)
+    return when {
+        tagParts == null || nameParts == null || compareVersionParts(tagParts, nameParts) != 0 ->
+            "update.json says version \"$versionName\" but the release is $tag"
+        sha256 == null || !sha256.matches(Regex("[0-9a-fA-F]{64}")) -> "the release has no valid checksum"
+        versionCode <= installedVersionCode -> "it is not newer than the installed version"
+        else -> null
+    }
 }
 
 /** The tag of the nearest version above [installed]: one step up, never a jump to the newest release. */

@@ -40,6 +40,40 @@ class UpdaterNextVersionTest {
         assertNull(pickNextTag(listOf(8, 10, 44), listOf("latest", "nightly")))
     }
 
+    private val sha = "a".repeat(64)
+
+    @Test
+    fun aConsistentNewerReleaseMayBeInstalled() {
+        assertNull(releaseProblem("8.10.46", "8.10.46", 184, sha, 183))
+        // Old releases wrote "5.0" for the tag v5.0.0: the same version.
+        assertNull(releaseProblem("5.0.0", "5.0", 100, sha, 99))
+    }
+
+    @Test
+    fun aReleaseWhoseManifestNamesAnotherVersionIsRejected() {
+        assertEquals(
+            "update.json says version \"8.10.47\" but the release is 8.10.46",
+            releaseProblem("8.10.46", "8.10.47", 184, sha, 183)
+        )
+        assertEquals(
+            "update.json says version \"\" but the release is 8.10.46",
+            releaseProblem("8.10.46", "", 184, sha, 183)
+        )
+    }
+
+    @Test
+    fun aReleaseWithoutARealChecksumIsRejected() {
+        assertEquals("the release has no valid checksum", releaseProblem("8.10.46", "8.10.46", 184, null, 183))
+        assertEquals("the release has no valid checksum", releaseProblem("8.10.46", "8.10.46", 184, "abc", 183))
+        assertEquals("the release has no valid checksum", releaseProblem("8.10.46", "8.10.46", 184, "g".repeat(64), 183))
+    }
+
+    @Test
+    fun aReleaseThatIsNotNewerIsRejected() {
+        assertEquals("it is not newer than the installed version", releaseProblem("8.10.46", "8.10.46", 183, sha, 183))
+        assertEquals("it is not newer than the installed version", releaseProblem("8.10.46", "8.10.46", 100, sha, 183))
+    }
+
     @Test
     fun versionTextIsParsed() {
         assertEquals(listOf(8L, 10L, 46L), parseVersionParts("v8.10.46"))
