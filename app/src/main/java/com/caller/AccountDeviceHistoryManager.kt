@@ -146,8 +146,9 @@ object AccountDeviceHistoryManager {
     private const val KEY_LINK_ACCOUNT_IDS = "link_account_ids_json"
     private const val LINK_ACCOUNT_PREFIX = "link_"
     private const val KEY_REMOVED_PEERS_JSON = "removed_peers_json"
-    // kvdb.io rejects values larger than ~16 KB by default, so every cloud document stays well under it.
-    private const val CLOUD_MAX_BODY_BYTES = 14_000
+    // ntfy.sh keeps a message of up to 4096 bytes as text for 12 h. A larger body is stored as a file attachment that
+    // expires after 3 h and whose message text is only "You received a file", which cloudGet cannot read. Stay under it.
+    private const val CLOUD_MAX_BODY_BYTES = 4_000
     private const val CLOUD_MAX_OWN_CALLS = 80
 
     private const val ACCOUNT_CLOUD_BUCKET_URL = "https://ntfy.sh/caller_kv_"
@@ -174,7 +175,9 @@ object AccountDeviceHistoryManager {
 
     private fun computeOwnCallsSignature(ownCalls: List<SyncedCallRecord>): String {
         val tokens = ownCalls.map { "${it.timestamp}_${it.remoteNumber}_${it.durationSec}_${it.callTypeInt}" }
-        return Crypto.sha256Hex(tokens.joinToString(";").toByteArray(Charsets.UTF_8)).take(16)
+        // The format tag makes every phone upload its document once more after this change: the documents it uploaded
+        // before are oversized attachments that nobody can read.
+        return Crypto.sha256Hex(("small_docs|" + tokens.joinToString(";")).toByteArray(Charsets.UTF_8)).take(16)
     }
 
     private fun isPublishNeeded(context: Context, prefKey: String, currentSignature: String): Boolean {
@@ -206,9 +209,9 @@ object AccountDeviceHistoryManager {
     // Direct sync over Tailscale crosses the internet (possibly via a DERP relay), so allow more time than LAN.
     private const val TAILSCALE_CONNECT_TIMEOUT_MS = 6000
     private const val TAILSCALE_READ_TIMEOUT_MS = 8000
-    // A peer counts as reachable through the cloud only if its own uploaded document is this fresh
-    // (its engine uploads every 45 s while the app is alive); an old document is just stale data.
-    private const val CLOUD_FRESH_WINDOW_MS = 180_000L
+    // A peer counts as reachable through the cloud if its own uploaded document is this fresh. A phone uploads only when
+    // its calls change and at least every 12 h (isPublishNeeded), so anything older than that is stale data.
+    private const val CLOUD_FRESH_WINDOW_MS = 12 * 3600 * 1000L + 15 * 60 * 1000L
     // Key used when a peer completed a direct sync but did not identify itself (older app build).
     private const val UNKNOWN_PEER_KEY = "?"
     private const val MAX_STORED_SYNCED_CALLS = 300
@@ -1422,8 +1425,6 @@ object AccountDeviceHistoryManager {
                     put("callTypeInt", c.callTypeInt)
                     put("timestamp", c.timestamp)
                     put("durationSec", c.durationSec)
-                    put("sourceDeviceId", myDeviceId)
-                    put("sourceDeviceName", myDeviceName)
                 })
             }
             return JSONObject().apply {
@@ -1437,8 +1438,8 @@ object AccountDeviceHistoryManager {
         }
         var count = own.size
         var body = build(count)
-        while (body.toByteArray(Charsets.UTF_8).size > CLOUD_MAX_BODY_BYTES && count > 10) {
-            count -= 10
+        while (body.toByteArray(Charsets.UTF_8).size > CLOUD_MAX_BODY_BYTES && count > 5) {
+            count -= 5
             body = build(count)
         }
         return body
@@ -1609,6 +1610,13 @@ object AccountDeviceHistoryManager {
                 if (devId.isBlank() || devId == myDeviceId) continue
                 val devName = d.optString("deviceName").ifBlank { "Account Phone" }
                 if (isPeerRemoved(context, devId, devName)) continue
+                // A phone I paired with directly stays on its private link. A roster of another account that still names
+                // it (the shared account, or an old roster the server keeps for hours) must not move it out of the link:
+                // the link would be left without a phone and nothing would be pulled through it.
+                val registered = currentPeers.firstOrNull {
+                    it.deviceId == devId || it.deviceName.equals(devName, ignoreCase = true)
+                }
+                if (registered != null && registered.accountId.startsWith(LINK_ACCOUNT_PREFIX) && registered.accountId != myAccountId) continue
                 val numsArr = d.optJSONArray("verifiedNumbers")
                 val nums = buildList {
                     if (numsArr != null) {
