@@ -142,6 +142,9 @@ object AccountDeviceHistoryManager {
     private const val KEY_LAST_PUBLISHED_ROSTER_SIG = "last_published_roster_sig"
     private const val KEY_LAST_PUBLISHED_CALLS_SIG = "last_published_calls_sig"
     private const val KEY_NATIVE_LOG_CLEANED = "native_log_peer_cleanup_v2"
+    // Private sync channels: one per 6-digit pairing, so a phone linked to two others never joins them together.
+    private const val KEY_LINK_ACCOUNT_IDS = "link_account_ids_json"
+    private const val LINK_ACCOUNT_PREFIX = "link_"
     // kvdb.io rejects values larger than ~16 KB by default, so every cloud document stays well under it.
     private const val CLOUD_MAX_BODY_BYTES = 14_000
     private const val CLOUD_MAX_OWN_CALLS = 80
@@ -310,18 +313,110 @@ object AccountDeviceHistoryManager {
         return accId
     }
 
-    private fun getCanonicalAccountKey(context: Context): String {
-        val raw = getAccountId(context).trim()
-        val snap = buildP2PNumberSnapshot(raw)
-        val canonical = when {
-            snap.last10.length == 10 -> snap.last10
-            snap.normalized.isNotBlank() -> snap.normalized
-            else -> raw.lowercase(Locale.ROOT)
+    /**
+     * Cloud bucket / LAN match key of an account id. Link ids ("link_<random hex>") are hashed as they are:
+     * the phone-number normalisation would keep only their digits and make them guessable.
+     */
+    private fun canonicalKeyFor(accountId: String): String {
+        val raw = accountId.trim()
+        val canonical = if (raw.startsWith(LINK_ACCOUNT_PREFIX)) {
+            raw.lowercase(Locale.ROOT)
+        } else {
+            val snap = buildP2PNumberSnapshot(raw)
+            when {
+                snap.last10.length == 10 -> snap.last10
+                snap.normalized.isNotBlank() -> snap.normalized
+                else -> raw.lowercase(Locale.ROOT)
+            }
         }
         val digest = MessageDigest.getInstance("SHA-256")
             .digest("caller_acct_v2|$canonical".toByteArray(Charsets.UTF_8))
         return digest.joinToString("") { "%02x".format(it) }.take(32)
     }
+
+    private fun getCanonicalAccountKey(context: Context): String = canonicalKeyFor(getAccountId(context))
+
+    private fun newLinkAccountId(): String {
+        val bytes = ByteArray(16)
+        java.security.SecureRandom().nextBytes(bytes)
+        return LINK_ACCOUNT_PREFIX + bytes.joinToString("") { "%02x".format(it) }
+    }
+
+    fun getLinkAccountIds(context: Context): List<String> {
+        val raw = getPrefs(context).getString(KEY_LINK_ACCOUNT_IDS, null).orEmpty()
+        if (raw.isBlank()) return emptyList()
+        return runCatching {
+            val arr = JSONArray(raw)
+            buildList {
+                for (i in 0 until arr.length()) {
+                    val id = arr.optString(i).trim()
+                    if (id.startsWith(LINK_ACCOUNT_PREFIX)) add(id)
+                }
+            }
+        }.getOrDefault(emptyList())
+    }
+
+    private fun saveLinkAccountIds(context: Context, ids: List<String>) {
+        getPrefs(context).edit().putString(KEY_LINK_ACCOUNT_IDS, JSONArray(ids.distinct()).toString()).apply()
+    }
+
+    private fun addLinkAccountId(context: Context, linkId: String) {
+        val clean = linkId.trim()
+        if (!clean.startsWith(LINK_ACCOUNT_PREFIX)) return
+        saveLinkAccountIds(context, getLinkAccountIds(context) + clean)
+    }
+
+    /** The shared (legacy / manually signed-in) account first, then one private account per direct link. */
+    private fun getAllAccountIds(context: Context): List<String> =
+        (listOf(getAccountId(context)) + getLinkAccountIds(context)).distinct()
+
+    /** The linked phones that belong to exactly this account, never the whole peer list. */
+    private fun peersInAccount(context: Context, accountId: String): List<AccountDeviceRegistration> {
+        val myDeviceId = getCurrentDeviceId(context)
+        val primary = getAccountId(context)
+        return getPeerDevices(context).filter {
+            it.deviceId.isNotBlank() && it.deviceId != myDeviceId &&
+                (it.accountId == accountId || (accountId == primary && it.accountId.isBlank()))
+        }
+    }
+
+    /** Which of my accounts a peer is linked through; the shared account for legacy peers. */
+    private fun accountIdForPeer(context: Context, peer: AccountDeviceRegistration): String {
+        val all = getAllAccountIds(context)
+        return peer.accountId.takeIf { it in all } ?: all.first()
+    }
+
+    /** Link accounts whose phone was removed would only cost cloud requests, so drop them. */
+    private fun pruneUnusedLinkAccounts(context: Context) {
+        val links = getLinkAccountIds(context)
+        if (links.isEmpty()) return
+        val used = getPeerDevices(context).map { it.accountId }.toSet()
+        val keep = links.filter { it in used }
+        if (keep.size != links.size) saveLinkAccountIds(context, keep)
+    }
+
+    /** Removing a phone also forgets the calls it had shared, so unlinking really removes them. */
+    private fun purgeSyncedCallsFrom(context: Context, deviceId: String) {
+        val all = getSyncedCallHistory(context)
+        val kept = all.filterNot { it.sourceDeviceId == deviceId }
+        if (kept.size == all.size) return
+        val arr = JSONArray()
+        kept.forEach { c ->
+            arr.put(JSONObject().apply {
+                put("remoteNumber", c.remoteNumber)
+                put("contactName", c.contactName)
+                put("callTypeInt", c.callTypeInt)
+                put("timestamp", c.timestamp)
+                put("durationSec", c.durationSec)
+                put("sourceDeviceId", c.sourceDeviceId)
+                put("sourceDeviceName", c.sourceDeviceName)
+            })
+        }
+        getPrefs(context).edit().putString(KEY_SYNCED_CALLS_JSON, arr.toString()).apply()
+    }
+
+    private fun publishSigKey(base: String, accountKey: String, isPrimary: Boolean): String =
+        if (isPrimary) base else "${base}_$accountKey"
 
     fun setAccountId(context: Context, accountId: String) {
         val clean = accountId.trim()
@@ -462,6 +557,7 @@ object AccountDeviceHistoryManager {
         peers.removeAll { it.deviceId == peer.deviceId || it.deviceName.equals(peer.deviceName, ignoreCase = true) }
         peers.add(0, if (peer.tailscaleIp.isBlank() && previous != null) peer.copy(tailscaleIp = previous.tailscaleIp) else peer)
         savePeersList(prefs, peers)
+        pruneUnusedLinkAccounts(context)
         notifyStateChanged()
     }
 
@@ -484,6 +580,8 @@ object AccountDeviceHistoryManager {
         val prefs = getPrefs(context)
         val peers = getPeerDevices(context).filterNot { it.deviceId == deviceId }
         savePeersList(prefs, peers)
+        purgeSyncedCallsFrom(context, deviceId)
+        pruneUnusedLinkAccounts(context)
         notifyStateChanged()
     }
 
@@ -555,6 +653,8 @@ object AccountDeviceHistoryManager {
 
     @Volatile var activePairingHost: PairingHost? = null
     @Volatile var activePairingCode: String? = null
+    // Private account id created for the pairing that is currently offered; both phones join it, nobody else.
+    @Volatile var activePairingLinkId: String? = null
     @Volatile var pendingPairingRequest: PairingHost.PendingView? = null
 
     // =========================================================================
@@ -567,6 +667,8 @@ object AccountDeviceHistoryManager {
         activePairingHost = host
         val code = (100000..999999).random().toString()
         activePairingCode = code
+        val linkId = newLinkAccountId()
+        activePairingLinkId = linkId
         val offer = host.createOfferWithCode(code)
 
         val accountKey = "pair_$code"
@@ -578,6 +680,7 @@ object AccountDeviceHistoryManager {
                     put("code", code)
                     put("ownerId", offer.ownerId)
                     put("accountId", getAccountId(appCtx))
+                    put("linkAccountId", linkId)
                     put("deviceId", getCurrentDeviceId(appCtx))
                     put("deviceName", getCurrentDeviceName(appCtx))
                     put("verifiedNumbers", JSONArray(getVerifiedNumbers(appCtx)))
@@ -652,6 +755,7 @@ object AccountDeviceHistoryManager {
                 }
 
                 val remoteAccountId = pairObj.optString("accountId")
+                val remoteLinkId = pairObj.optString("linkAccountId").trim()
                 val remoteDeviceId = pairObj.optString("deviceId")
                 val remoteDeviceName = pairObj.optString("deviceName").ifBlank { "Linked Phone" }
                 val ownerId = pairObj.optString("ownerId")
@@ -690,9 +794,18 @@ object AccountDeviceHistoryManager {
                         if (statusRes.ok && statusRes.body.orEmpty().startsWith("{")) {
                             val pairStatus = PairStatus.fromWire(statusRes.body!!)
                             if (pairStatus.state == "APPROVED") {
-                                setAccountId(appCtx, remoteAccountId)
+                                // Join the pairing's private link instead of replacing my own account, so phones
+                                // I was already linked to keep syncing with me and never merge with the new one.
+                                // A host running an older build sends no link id: keep the old shared-account join.
+                                val sharedAccountId = if (remoteLinkId.startsWith(LINK_ACCOUNT_PREFIX)) {
+                                    addLinkAccountId(appCtx, remoteLinkId)
+                                    remoteLinkId
+                                } else {
+                                    setAccountId(appCtx, remoteAccountId)
+                                    remoteAccountId
+                                }
                                 val peerReg = AccountDeviceRegistration(
-                                    accountId = remoteAccountId,
+                                    accountId = sharedAccountId,
                                     deviceId = remoteDeviceId,
                                     deviceName = remoteDeviceName,
                                     verifiedNumbers = remoteNums,
@@ -724,12 +837,20 @@ object AccountDeviceHistoryManager {
         val appCtx = context.applicationContext
         val host = activePairingHost ?: getPairingHost(appCtx)
         val code = activePairingCode
+        val linkId = activePairingLinkId
         val pendingRec = host.getPendingRecord(pairingId)
         if (host.approve(pairingId)) {
             activePairingCode = null
+            activePairingLinkId = null
             if (pendingRec != null) {
+                val peerAccountId = if (linkId != null) {
+                    addLinkAccountId(appCtx, linkId)
+                    linkId
+                } else {
+                    getAccountId(appCtx)
+                }
                 val peerReg = AccountDeviceRegistration(
-                    accountId = getAccountId(appCtx),
+                    accountId = peerAccountId,
                     deviceId = pendingRec.deviceId,
                     deviceName = pendingRec.deviceName,
                     verifiedNumbers = emptyList(),
@@ -759,6 +880,7 @@ object AccountDeviceHistoryManager {
         val code = activePairingCode
         host.deny(pairingId)
         activePairingCode = null
+        activePairingLinkId = null
         if (code != null) {
             val status = host.status(pairingId)
             val statusEndpoint = cloudTopicUrl("status_$code")
@@ -1014,7 +1136,27 @@ object AccountDeviceHistoryManager {
      * Every document stays far below kvdb's 16 KB value limit, and every HTTP failure is recorded.
      */
     private fun performCloudAccountSync(context: Context, freshPeerIds: MutableSet<String>): Boolean {
-        val accountKey = getCanonicalAccountKey(context)
+        var allOk = true
+        val texts = mutableListOf<String>()
+        val primaryId = getAccountId(context)
+        for (accountId in getAllAccountIds(context)) {
+            val isPrimary = accountId == primaryId
+            val (ok, text) = performCloudSyncForAccount(context, accountId, isPrimary, freshPeerIds)
+            if (!ok) allOk = false
+            texts += if (isPrimary) text else "link ${accountId.takeLast(4)}: $text"
+        }
+        recordCloudStatus(context, allOk, texts.joinToString(" || "))
+        return allOk
+    }
+
+    /** One account's cloud sync: roster, my own calls, and only the calls of the phones linked through this account. */
+    private fun performCloudSyncForAccount(
+        context: Context,
+        accountId: String,
+        isPrimary: Boolean,
+        freshPeerIds: MutableSet<String>
+    ): Pair<Boolean, String> {
+        val accountKey = canonicalKeyFor(accountId)
         val myDeviceId = getCurrentDeviceId(context)
         val problems = mutableListOf<String>()
         val notes = mutableListOf<String>()
@@ -1029,11 +1171,12 @@ object AccountDeviceHistoryManager {
             problems += describeCloud("GET roster", rosterGet)
             if (rosterGet.code == 429) markRateLimited()
         }
-        remoteRoster?.let { ingestAccountSnapshotJson(context, it) }
+        remoteRoster?.let { ingestAccountSnapshotJson(context, it, accountId) }
 
-        val rosterJson = buildRosterJson(context, remoteRoster)
+        val rosterJson = buildRosterJson(context, remoteRoster, accountId)
         val rosterSig = computeRosterSignature(rosterJson)
-        val shouldPostRoster = isPublishNeeded(context, KEY_LAST_PUBLISHED_ROSTER_SIG, rosterSig)
+        val rosterSigKey = publishSigKey(KEY_LAST_PUBLISHED_ROSTER_SIG, accountKey, isPrimary)
+        val shouldPostRoster = isPublishNeeded(context, rosterSigKey, rosterSig)
 
         if (shouldPostRoster) {
             if (isRateLimitActive()) {
@@ -1041,7 +1184,7 @@ object AccountDeviceHistoryManager {
             } else {
                 val rosterPost = cloudPost(rosterUrl, rosterJson.toString())
                 if (rosterPost.ok) {
-                    recordPublishedSignature(context, KEY_LAST_PUBLISHED_ROSTER_SIG, rosterSig)
+                    recordPublishedSignature(context, rosterSigKey, rosterSig)
                     notes += "roster updated"
                 } else {
                     problems += describeCloud("POST roster", rosterPost)
@@ -1055,9 +1198,10 @@ object AccountDeviceHistoryManager {
         // 2) My own calls
         val ownCalls = queryLocalDeviceCallLog(context, maxCount = CLOUD_MAX_OWN_CALLS)
         val ownCallsSig = computeOwnCallsSignature(ownCalls)
-        val shouldPostCalls = isPublishNeeded(context, KEY_LAST_PUBLISHED_CALLS_SIG, ownCallsSig)
+        val callsSigKey = publishSigKey(KEY_LAST_PUBLISHED_CALLS_SIG, accountKey, isPrimary)
+        val shouldPostCalls = isPublishNeeded(context, callsSigKey, ownCallsSig)
 
-        val ownBody = buildOwnCallsJson(context, ownCalls)
+        val ownBody = buildOwnCallsJson(context, ownCalls, accountId)
         if (shouldPostCalls) {
             if (isRateLimitActive()) {
                 notes += "calls upload deferred (HTTP 429 backoff)"
@@ -1078,7 +1222,7 @@ object AccountDeviceHistoryManager {
                 }
 
                 if (ownPost.ok) {
-                    recordPublishedSignature(context, KEY_LAST_PUBLISHED_CALLS_SIG, ownCallsSig)
+                    recordPublishedSignature(context, callsSigKey, ownCallsSig)
                     notes += "calls uploaded (${ownBody.length} B)"
                 } else {
                     problems += describeCloud("POST own calls (${ownBody.length} bytes)", ownPost)
@@ -1090,7 +1234,7 @@ object AccountDeviceHistoryManager {
         }
 
         // 3) Pull every known peer's calls
-        val peers = getPeerDevices(context).filter { it.deviceId.isNotBlank() && it.deviceId != myDeviceId }
+        val peers = peersInAccount(context, accountId)
         if (peers.isEmpty()) notes += "no linked devices known yet"
         peers.forEach { peer ->
             if (isRateLimitActive()) {
@@ -1133,7 +1277,7 @@ object AccountDeviceHistoryManager {
                                     put("sourceDeviceName", peerName)
                                 }
                             }
-                            ingestAccountSnapshotJson(context, JSONObject().put("calls", arr))
+                            ingestAccountSnapshotJson(context, JSONObject().put("calls", arr), accountId)
                         }
                         val updatedAt = doc.optLong("updatedAt", 0L)
                         if (updatedAt > 0L && kotlin.math.abs(System.currentTimeMillis() - updatedAt) <= CLOUD_FRESH_WINDOW_MS) {
@@ -1151,11 +1295,14 @@ object AccountDeviceHistoryManager {
         val ok = problems.isEmpty()
         val text = (if (ok) "sync ok" else problems.joinToString(" | ")) +
                 (if (notes.isNotEmpty()) " [" + notes.joinToString("; ") + "]" else "")
-        recordCloudStatus(context, ok, text)
-        return ok
+        return ok to text
     }
 
-    private fun buildOwnCallsJson(context: Context, ownList: List<SyncedCallRecord>? = null): String {
+    private fun buildOwnCallsJson(
+        context: Context,
+        ownList: List<SyncedCallRecord>? = null,
+        accountId: String = getAccountId(context)
+    ): String {
         val own = ownList ?: queryLocalDeviceCallLog(context, maxCount = CLOUD_MAX_OWN_CALLS)
         val myDeviceId = getCurrentDeviceId(context)
         val myDeviceName = getCurrentDeviceName(context)
@@ -1173,7 +1320,7 @@ object AccountDeviceHistoryManager {
                 })
             }
             return JSONObject().apply {
-                put("accountId", getAccountId(context))
+                put("accountId", accountId)
                 put("deviceId", myDeviceId)
                 put("deviceName", myDeviceName)
                 put("updatedAt", System.currentTimeMillis())
@@ -1190,9 +1337,13 @@ object AccountDeviceHistoryManager {
         return body
     }
 
-    private fun buildRosterJson(context: Context, previousRemote: JSONObject?): JSONObject {
+    private fun buildRosterJson(
+        context: Context,
+        previousRemote: JSONObject?,
+        accountId: String = getAccountId(context)
+    ): JSONObject {
         val myDeviceId = getCurrentDeviceId(context)
-        val myAccountId = getAccountId(context)
+        val myAccountId = accountId
         val now = System.currentTimeMillis()
         val devicesMap = linkedMapOf<String, JSONObject>()
         previousRemote?.optJSONArray("devices")?.let { arr ->
@@ -1202,7 +1353,7 @@ object AccountDeviceHistoryManager {
                 if (id.isNotBlank()) devicesMap[id] = d
             }
         }
-        getPeerDevices(context).forEach { peer ->
+        peersInAccount(context, myAccountId).forEach { peer ->
             if (peer.deviceId.isNotBlank()) {
                 devicesMap[peer.deviceId] = JSONObject().apply {
                     put("accountId", myAccountId)
@@ -1255,10 +1406,14 @@ object AccountDeviceHistoryManager {
         }
     }
 
-    private fun buildFullAccountSnapshotJson(context: Context, previousRemote: JSONObject?): JSONObject {
+    private fun buildFullAccountSnapshotJson(
+        context: Context,
+        previousRemote: JSONObject?,
+        accountId: String = getAccountId(context)
+    ): JSONObject {
         val myDeviceId = getCurrentDeviceId(context)
         val myDeviceName = getCurrentDeviceName(context)
-        val myAccountId = getAccountId(context)
+        val myAccountId = accountId
         val myNumbers = getVerifiedNumbers(context)
         val now = System.currentTimeMillis()
 
@@ -1270,7 +1425,7 @@ object AccountDeviceHistoryManager {
                 if (id.isNotBlank()) devicesMap[id] = d
             }
         }
-        getPeerDevices(context).forEach { peer ->
+        peersInAccount(context, myAccountId).forEach { peer ->
             if (peer.deviceId.isNotBlank()) {
                 devicesMap[peer.deviceId] = JSONObject().apply {
                     put("accountId", myAccountId)
@@ -1289,9 +1444,10 @@ object AccountDeviceHistoryManager {
             put("lastSyncTimestamp", now)
         }
 
+        // Own calls only. Forwarding the calls received from one phone to another would let every phone that is
+        // linked to the same middle phone see the calls of all the others.
         val combinedCalls = mutableListOf<SyncedCallRecord>()
         combinedCalls.addAll(queryLocalDeviceCallLog(context, maxCount = 120))
-        combinedCalls.addAll(getSyncedCallHistory(context))
 
         val deduplicatedCalls = mutableListOf<SyncedCallRecord>()
         for (call in combinedCalls.sortedByDescending { it.timestamp }) {
@@ -1328,9 +1484,13 @@ object AccountDeviceHistoryManager {
         }
     }
 
-    private fun ingestAccountSnapshotJson(context: Context, root: JSONObject) {
+    private fun ingestAccountSnapshotJson(
+        context: Context,
+        root: JSONObject,
+        accountId: String = getAccountId(context)
+    ) {
         val myDeviceId = getCurrentDeviceId(context)
-        val myAccountId = getAccountId(context)
+        val myAccountId = accountId
         val prefs = getPrefs(context)
 
         val devicesArr = root.optJSONArray("devices")
@@ -1371,6 +1531,9 @@ object AccountDeviceHistoryManager {
 
             val rootDevId = root.optString("deviceId").ifBlank { root.optString("senderDeviceId") }.trim()
             val rootDevName = root.optString("deviceName").ifBlank { root.optString("senderDeviceName") }.ifBlank { "Linked Device" }.trim()
+            // A direct sync carries only the sender's own calls. Anything claiming another phone as its source was
+            // forwarded by an older build and must not reach a phone that is not linked to that phone.
+            val directSender = root.optString("senderDeviceId").trim()
 
             for (i in 0 until callsArr.length()) {
                 val c = callsArr.optJSONObject(i) ?: continue
@@ -1383,6 +1546,7 @@ object AccountDeviceHistoryManager {
                 if (srcDevId.isBlank()) {
                     srcDevId = getPeerDevices(context).firstOrNull { it.deviceId != myDeviceId }?.deviceId.orEmpty()
                 }
+                if (directSender.isNotBlank() && srcDevId != directSender) continue
                 val ts = c.optLong("timestamp", c.optLong("date", 0L))
                 if (ts <= 0L) continue
 
@@ -1440,12 +1604,13 @@ object AccountDeviceHistoryManager {
 
     private fun broadcastUdpAccountBeacon(context: Context) {
         runCatching {
-            val accountKey = getCanonicalAccountKey(context)
             val myDeviceId = getCurrentDeviceId(context)
             val tsIp = getOwnTailscaleIp()
-            val beacon = "CALLER_ACCT_SYNC|$accountKey|$myDeviceId|$TCP_SYNC_PORT" +
-                    if (tsIp.isNotBlank()) "|$tsIp" else ""
-            val bytes = beacon.toByteArray(Charsets.UTF_8)
+            // One beacon per account (the shared one and every private link), so each link syncs on its own key.
+            val payloads = getAllAccountIds(context).map { canonicalKeyFor(it) }.distinct().map { accountKey ->
+                ("CALLER_ACCT_SYNC|$accountKey|$myDeviceId|$TCP_SYNC_PORT" +
+                        if (tsIp.isNotBlank()) "|$tsIp" else "").toByteArray(Charsets.UTF_8)
+            }
 
             DatagramSocket().use { socket ->
                 socket.broadcast = true
@@ -1455,20 +1620,24 @@ object AccountDeviceHistoryManager {
                     if (!intf.isUp || intf.isLoopback) continue
                     for (ifaceAddr in intf.interfaceAddresses) {
                         val broadcast = ifaceAddr.broadcast ?: continue
-                        runCatching {
-                            socket.send(DatagramPacket(bytes, bytes.size, broadcast, UDP_DISCOVERY_PORT))
+                        payloads.forEach { bytes ->
+                            runCatching {
+                                socket.send(DatagramPacket(bytes, bytes.size, broadcast, UDP_DISCOVERY_PORT))
+                            }
                         }
                     }
                 }
-                runCatching {
-                    socket.send(
-                        DatagramPacket(
-                            bytes,
-                            bytes.size,
-                            InetAddress.getByName("255.255.255.255"),
-                            UDP_DISCOVERY_PORT
+                payloads.forEach { bytes ->
+                    runCatching {
+                        socket.send(
+                            DatagramPacket(
+                                bytes,
+                                bytes.size,
+                                InetAddress.getByName("255.255.255.255"),
+                                UDP_DISCOVERY_PORT
+                            )
                         )
-                    )
+                    }
                 }
             }
         }
@@ -1482,12 +1651,12 @@ object AccountDeviceHistoryManager {
         val remotePort = parts.getOrNull(3)?.toIntOrNull() ?: TCP_SYNC_PORT
 
         if (remoteDeviceId == getCurrentDeviceId(context)) return
-        if (remoteAccountKey != getCanonicalAccountKey(context)) return
+        val matchedAccountId = getAllAccountIds(context).firstOrNull { canonicalKeyFor(it) == remoteAccountKey } ?: return
 
         parts.getOrNull(4)?.let { updatePeerTailscaleIp(context, remoteDeviceId, it) }
 
         scope.launch {
-            syncViaTcpWithSameAccountPeer(context, senderIp, remotePort)
+            syncViaTcpWithSameAccountPeer(context, senderIp, remotePort, accountId = matchedAccountId)
         }
     }
 
@@ -1512,7 +1681,8 @@ object AccountDeviceHistoryManager {
                 expectedDeviceId = peer.deviceId,
                 via = "tailscale",
                 connectTimeoutMs = TAILSCALE_CONNECT_TIMEOUT_MS,
-                readTimeoutMs = TAILSCALE_READ_TIMEOUT_MS
+                readTimeoutMs = TAILSCALE_READ_TIMEOUT_MS,
+                accountId = accountIdForPeer(context, peer)
             )
         }
     }
@@ -1524,9 +1694,11 @@ object AccountDeviceHistoryManager {
         expectedDeviceId: String? = null,
         via: String = "lan",
         connectTimeoutMs: Int = 2500,
-        readTimeoutMs: Int = 4000
+        readTimeoutMs: Int = 4000,
+        accountId: String = getAccountId(context)
     ): Boolean {
         val startedAt = System.currentTimeMillis()
+        val accountKey = canonicalKeyFor(accountId)
         // LAN attempts happen on every beacon, so keep their failures at debug level; Tailscale failures are warnings.
         fun logFail(msg: String) { if (via == "lan") Log.d(TAG, msg) else Log.w(TAG, msg) }
         try {
@@ -1536,8 +1708,8 @@ object AccountDeviceHistoryManager {
                 val writer = PrintWriter(OutputStreamWriter(socket.getOutputStream(), Charsets.UTF_8), true)
                 val reader = BufferedReader(InputStreamReader(socket.getInputStream(), Charsets.UTF_8))
 
-                val mySnapshot = buildFullAccountSnapshotJson(context, null)
-                mySnapshot.put("accountKey", getCanonicalAccountKey(context))
+                val mySnapshot = buildFullAccountSnapshotJson(context, null, accountId)
+                mySnapshot.put("accountKey", accountKey)
                 mySnapshot.put("senderDeviceId", getCurrentDeviceId(context))
                 getOwnTailscaleIp().takeIf { it.isNotBlank() }?.let { mySnapshot.put("tailscaleIp", it) }
                 writer.println(mySnapshot.toString())
@@ -1548,7 +1720,7 @@ object AccountDeviceHistoryManager {
                     return false
                 }
                 val replyObj = JSONObject(replyLine)
-                if (replyObj.optString("accountKey") != getCanonicalAccountKey(context)) {
+                if (replyObj.optString("accountKey") != accountKey) {
                     logFail("Direct sync ($via) with $host:$port: reply rejected (account mismatch)")
                     return false
                 }
@@ -1563,7 +1735,7 @@ object AccountDeviceHistoryManager {
                     logFail("Direct sync ($via) with $host:$port: reply rejected (unexpected device identity)")
                     return false
                 }
-                ingestAccountSnapshotJson(context, replyObj)
+                ingestAccountSnapshotJson(context, replyObj, accountId)
                 recordDirectSync(replyDeviceId.ifBlank { expectedDeviceId.orEmpty() })
                 if (!expectedDeviceId.isNullOrBlank()) {
                     recordDirectSync(expectedDeviceId)
@@ -1601,7 +1773,9 @@ object AccountDeviceHistoryManager {
                     return@use
                 }
                 val incomingObj = JSONObject(line)
-                if (incomingObj.optString("accountKey") != getCanonicalAccountKey(context)) {
+                val incomingKey = incomingObj.optString("accountKey")
+                val accountId = getAllAccountIds(context).firstOrNull { canonicalKeyFor(it) == incomingKey }
+                if (accountId == null) {
                     Log.w(TAG, "Rejected incoming sync from $remoteIp: account mismatch")
                     return@use
                 }
@@ -1613,7 +1787,7 @@ object AccountDeviceHistoryManager {
                     val senderDeviceName = incomingObj.optString("deviceName").trim()
                     val linked = senderDeviceId.isNotBlank() &&
                             senderDeviceId != getCurrentDeviceId(context) &&
-                            (getPeerDevices(context).any { it.deviceId == senderDeviceId || (it.deviceName.isNotBlank() && it.deviceName.equals(senderDeviceName, ignoreCase = true)) } ||
+                            (peersInAccount(context, accountId).any { it.deviceId == senderDeviceId || (it.deviceName.isNotBlank() && it.deviceName.equals(senderDeviceName, ignoreCase = true)) } ||
                              getTrustStore(context).getAllApprovedPeers().any { it.deviceId == senderDeviceId || "dev_" + it.fingerprint == senderDeviceId })
                     if (!linked) {
                         Log.w(TAG, "Rejected incoming sync from $remoteIp (tailscale): sender is not a linked device")
@@ -1623,10 +1797,10 @@ object AccountDeviceHistoryManager {
                     updatePeerTailscaleIp(context, senderDeviceId, remoteIp)
                 }
 
-                ingestAccountSnapshotJson(context, incomingObj)
+                ingestAccountSnapshotJson(context, incomingObj, accountId)
 
-                val replySnapshot = buildFullAccountSnapshotJson(context, incomingObj)
-                replySnapshot.put("accountKey", getCanonicalAccountKey(context))
+                val replySnapshot = buildFullAccountSnapshotJson(context, incomingObj, accountId)
+                replySnapshot.put("accountKey", incomingKey)
                 replySnapshot.put("senderDeviceId", getCurrentDeviceId(context))
                 getOwnTailscaleIp().takeIf { it.isNotBlank() }?.let { replySnapshot.put("tailscaleIp", it) }
                 writer.println(replySnapshot.toString())

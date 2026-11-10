@@ -2033,8 +2033,8 @@ class MyInCallService : InCallService() {
             override fun onTaskRemoved(rootIntent: Intent?) {
                 super.onTaskRemoved(rootIntent)
                 // The swiped card may have been the spare task that made the pill safe: drop the pill
-                // before a second swipe can find it.
-                if (!CallBubbleOverlay.hasSpareRecentsTask(this)) CallBubbleOverlay.hide(this)
+                // before a second swipe can find it. With no card of ours left the pill stays (or returns).
+                if (CallBubbleOverlay.lastCardSwipePossible(this)) CallBubbleOverlay.hide(this)
                 val liveCalls = getLiveCalls()
                 val hasActiveSession = hasLiveOrStickyCallSession()
                 Log.w(

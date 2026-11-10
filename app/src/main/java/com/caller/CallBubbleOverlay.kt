@@ -133,13 +133,25 @@ object CallBubbleOverlay {
         } >= 2
     }.getOrDefault(false)
 
+    /**
+     * True while a swipe in Recents could still hit our last card: no spare card exists but at least one
+     * of our tasks does. Once every task of ours is gone there is nothing left for ColorOS Athena to kill
+     * on a swipe, so the pill may be attached again right away, as it is on the Redmi/HyperOS.
+     * Fails closed: if the task list cannot be read, a last-card swipe is assumed possible.
+     */
+    fun lastCardSwipePossible(context: Context): Boolean = runCatching {
+        val am = context.getSystemService(Context.ACTIVITY_SERVICE) as android.app.ActivityManager
+        val hasOwnTasks = am.appTasks.isNotEmpty()
+        hasOwnTasks && !hasSpareRecentsTask(context)
+    }.getOrDefault(true)
+
     fun canDrawOverlays(context: Context): Boolean =
         Build.VERSION.SDK_INT < Build.VERSION_CODES.M || Settings.canDrawOverlays(context)
 
     /**
      * With a single Recents card the pill is still allowed, because it hides itself the moment Recents
-     * opens (see recentsReceiver), which always happens before a swipe. After any task removal the
-     * strict hasSpareRecentsTask check applies.
+     * opens (see recentsReceiver), which always happens before a swipe. After any task removal it hides
+     * while a last-card swipe is still possible (lastCardSwipePossible) and returns once none is left.
      */
     fun canShow(context: Context): Boolean = canDrawOverlays(context)
 
@@ -165,10 +177,11 @@ object CallBubbleOverlay {
             val ctx = context ?: return
             val reason = intent?.getStringExtra("reason").orEmpty()
             val spare = hasSpareRecentsTask(ctx)
-            Log.w(TAG, "close_system_dialogs reason=$reason spareRecentsTask=$spare pillShowing=${view != null}")
+            val lastCardPossible = lastCardSwipePossible(ctx)
+            Log.w(TAG, "close_system_dialogs reason=$reason spareRecentsTask=$spare lastCardSwipePossible=$lastCardPossible pillShowing=${view != null}")
             if (reason != "recentapps") return
             recentsOpenedSinceCallUi = true
-            if (!spare) hide(ctx)
+            if (lastCardPossible) hide(ctx)
         }
     }
 
@@ -379,8 +392,8 @@ object CallBubbleOverlay {
             Log.w(TAG, "skip: overlay permission missing")
             return
         }
-        if (recentsOpenedSinceCallUi && !hasSpareRecentsTask(context)) {
-            Log.w(TAG, "skip: Recents was opened since the call screen and no spare Recents task")
+        if (recentsOpenedSinceCallUi && lastCardSwipePossible(context)) {
+            Log.w(TAG, "skip: Recents was opened since the call screen and a last-card swipe is still possible")
             return
         }
 
