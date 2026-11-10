@@ -73,7 +73,7 @@ data class SimScan(
     val numbers: List<DetectedSimNumber>
 )
 
-data class DetectedSimNumber(val slot: Int, val carrier: String, val number: String)
+data class DetectedSimNumber(val slot: Int, val number: String)
 
 private fun simNumberPermission(): String =
     if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) Manifest.permission.READ_PHONE_NUMBERS
@@ -102,7 +102,7 @@ fun scanSimNumbers(context: Context): SimScan {
             } else ""
             val number = cleanIndianMobileInput(fromSystem.ifBlank { info.number.orEmpty() })
             if (number.length == 10) {
-                found += DetectedSimNumber(info.simSlotIndex + 1, info.carrierName?.toString().orEmpty().trim(), number)
+                found += DetectedSimNumber(info.simSlotIndex + 1, number)
             }
         }
     }
@@ -111,7 +111,7 @@ fun scanSimNumbers(context: Context): SimScan {
             val line1 = (context.getSystemService(Context.TELEPHONY_SERVICE) as? TelephonyManager)?.line1Number.orEmpty()
             val number = cleanIndianMobileInput(line1)
             if (number.length == 10) {
-                found += DetectedSimNumber(1, "", number)
+                found += DetectedSimNumber(1, number)
                 if (count == 0) count = 1
             }
         }
@@ -195,8 +195,7 @@ private fun SimNumberSuggestions(value: String, onPick: (String) -> Unit) {
             scan.numbers.forEach { sim ->
                 Spacer(modifier = Modifier.height(4.dp))
                 OutlinedButton(onClick = { onPick(sim.number) }, modifier = Modifier.fillMaxWidth()) {
-                    val carrier = if (sim.carrier.isBlank()) "" else " (${sim.carrier})"
-                    Text("SIM ${sim.slot}$carrier  •  +91 ${groupMobileDigits(sim.number)}")
+                    Text("SIM ${sim.slot}  •  +91 ${groupMobileDigits(sim.number)}")
                 }
             }
         }
