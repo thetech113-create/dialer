@@ -958,7 +958,7 @@ private fun ConversationMessageBubble(
             color = bubbleColor
         ) {
             Column(modifier = Modifier.padding(horizontal = 14.dp, vertical = 10.dp)) {
-                if (message.spamVerdict.isPotentialSpam) {
+                if (!message.isOutgoing && message.spamVerdict.isPotentialSpam) {
                     Surface(
                         shape = RoundedCornerShape(10.dp),
                         color = MaterialTheme.colorScheme.errorContainer,

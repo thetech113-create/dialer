@@ -52,6 +52,13 @@ data class SmsConversationMessage(
     val spamVerdict: SmsSpamVerdict = SmsSpamVerdict()
 )
 
+/**
+ * Only a message that was received can be spam. What you send, a draft, or a message that failed to send is never
+ * checked and never marked: [analyze] is not even called for it.
+ */
+internal fun verdictForMessageType(type: Int, analyze: () -> SmsSpamVerdict): SmsSpamVerdict =
+    if (type == SMS_TYPE_INBOX) analyze() else SmsSpamVerdict()
+
 fun isDefaultSmsApp(context: Context): Boolean {
     if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
         try {
@@ -132,7 +139,8 @@ fun loadSmsThreads(context: Context, limit: Int = 50): List<SmsThread> {
         SMS_COLUMN_THREAD_ID,
         SMS_COLUMN_ADDRESS,
         SMS_COLUMN_BODY,
-        SMS_COLUMN_DATE
+        SMS_COLUMN_DATE,
+        SMS_COLUMN_TYPE
     )
 
     context.contentResolver.query(
@@ -146,6 +154,7 @@ fun loadSmsThreads(context: Context, limit: Int = 50): List<SmsThread> {
         val addressIndex = cursor.getColumnIndex(SMS_COLUMN_ADDRESS)
         val bodyIndex = cursor.getColumnIndex(SMS_COLUMN_BODY)
         val dateIndex = cursor.getColumnIndex(SMS_COLUMN_DATE)
+        val typeIndex = cursor.getColumnIndex(SMS_COLUMN_TYPE)
 
         while (cursor.moveToNext() && threads.size < limit) {
             val threadId = if (threadIdIndex >= 0) cursor.getString(threadIdIndex).orEmpty() else ""
@@ -161,8 +170,11 @@ fun loadSmsThreads(context: Context, limit: Int = 50): List<SmsThread> {
             }
 
             val date = if (dateIndex >= 0) cursor.getLong(dateIndex) else 0L
-            val spamVerdict = spamVerdictCache.getOrPut("$address|$body") {
-                analyzeSmsSpam(context = context, sender = address, body = body)
+            val type = if (typeIndex >= 0) cursor.getInt(typeIndex) else SMS_TYPE_INBOX
+            val spamVerdict = verdictForMessageType(type) {
+                spamVerdictCache.getOrPut("$address|$body") {
+                    analyzeSmsSpam(context = context, sender = address, body = body)
+                }
             }
             threads[threadGroupKey] = SmsThread(
                 threadId = threadId.ifBlank { threadGroupKey },
@@ -238,8 +250,10 @@ fun loadSmsConversation(
             }
 
             val type = if (typeIndex >= 0) cursor.getInt(typeIndex) else SMS_TYPE_INBOX
-            val spamVerdict = spamVerdictCache.getOrPut("$address|$body") {
-                analyzeSmsSpam(context = context, sender = address, body = body)
+            val spamVerdict = verdictForMessageType(type) {
+                spamVerdictCache.getOrPut("$address|$body") {
+                    analyzeSmsSpam(context = context, sender = address, body = body)
+                }
             }
             messages += SmsConversationMessage(
                 id = if (idIndex >= 0) cursor.getString(idIndex).orEmpty() else messages.size.toString(),
