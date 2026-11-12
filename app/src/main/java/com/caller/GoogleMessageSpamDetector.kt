@@ -474,16 +474,14 @@ private fun evaluateHybridSmsSpam(
         (hasOtpCode && (hasDefensiveDoNotShare || bigrams.contains("valid for"))) ||
             hasStandardBankLedger || hasStandardDeliveryStatus
         )
-    val riskTier = when {
-        // These are independently deceptive technical indicators, not ordinary keywords.
-        hasIndependentTechnicalThreat -> SmsSpamRiskTier.HIGH_CONFIDENCE_SPAM
-        // Strong one-way transactional patterns prevent a generic corpus model from warning on
-        // routine OTPs, ledger entries, and delivery status messages.
-        hasKnownLegitimatePattern -> SmsSpamRiskTier.LOW_RISK
-        model != null && probability >= model.highConfidenceThreshold -> SmsSpamRiskTier.HIGH_CONFIDENCE_SPAM
-        model != null && probability >= model.suspiciousThreshold -> SmsSpamRiskTier.SUSPICIOUS
-        else -> SmsSpamRiskTier.LOW_RISK
-    }
+    val riskTier = smsRiskTier(
+        hasIndependentTechnicalThreat = hasIndependentTechnicalThreat,
+        hasKnownLegitimatePattern = hasKnownLegitimatePattern,
+        hasScamIndicator = hasHighRiskScamIndicator,
+        probability = probability,
+        suspiciousThreshold = model?.suspiciousThreshold,
+        highConfidenceThreshold = model?.highConfidenceThreshold
+    )
     val isPotentialSpam = riskTier != SmsSpamRiskTier.LOW_RISK
     val distinctReasons = reasons.distinct()
 
@@ -499,6 +497,31 @@ private fun evaluateHybridSmsSpam(
         mlProbability = probability,
         modelVersion = SMS_SPAM_MODEL_VERSION
     )
+}
+
+/**
+ * Decides how a message is shown. The bundled model was trained on English personal chat against premium-rate
+ * spam, so every automated business message (bank statement, recharge, receipt, appointment, order update) looks
+ * like spam to it and scores above its thresholds. The model may therefore only confirm a message that also shows a
+ * real scam sign ([hasScamIndicator]: a scam phrase pattern or a suspicious link); on its own it never flags one.
+ */
+internal fun smsRiskTier(
+    hasIndependentTechnicalThreat: Boolean,
+    hasKnownLegitimatePattern: Boolean,
+    hasScamIndicator: Boolean,
+    probability: Float,
+    suspiciousThreshold: Double?,
+    highConfidenceThreshold: Double?
+): SmsSpamRiskTier = when {
+    // These are independently deceptive technical indicators, not ordinary keywords.
+    hasIndependentTechnicalThreat -> SmsSpamRiskTier.HIGH_CONFIDENCE_SPAM
+    // Strong one-way transactional patterns prevent a generic corpus model from warning on
+    // routine OTPs, ledger entries, and delivery status messages.
+    hasKnownLegitimatePattern -> SmsSpamRiskTier.LOW_RISK
+    !hasScamIndicator -> SmsSpamRiskTier.LOW_RISK
+    highConfidenceThreshold != null && probability >= highConfidenceThreshold -> SmsSpamRiskTier.HIGH_CONFIDENCE_SPAM
+    suspiciousThreshold != null && probability >= suspiciousThreshold -> SmsSpamRiskTier.SUSPICIOUS
+    else -> SmsSpamRiskTier.LOW_RISK
 }
 
 internal data class UrlSignalAnalysis(
