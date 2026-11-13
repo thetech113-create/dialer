@@ -50,3 +50,15 @@ CREATE TABLE IF NOT EXISTS account_calls (
 
 CREATE INDEX IF NOT EXISTS idx_account_calls_recent
   ON account_calls (account_key, timestamp DESC);
+
+-- Spam reports shared between phones that paired with each other. The sender is a hash made on the phone (never
+-- the number or any message text); account_key is a hash of the private pairing id. One row per phone and sender.
+CREATE TABLE IF NOT EXISTS spam_reports (
+  account_key TEXT NOT NULL,
+  device_id   TEXT NOT NULL,
+  sender      TEXT NOT NULL,
+  spam        INTEGER NOT NULL DEFAULT 0,
+  ham         INTEGER NOT NULL DEFAULT 0,
+  updated_at  INTEGER NOT NULL,
+  PRIMARY KEY (account_key, device_id, sender)
+);

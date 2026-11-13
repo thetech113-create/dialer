@@ -31,3 +31,9 @@ Edit `src/index.js`, then `npx wrangler deploy` again.
 The Worker also provides the cloud endpoint used by the app's multi-device Recents. It works when
 phones are on different networks. After updating an already deployed Worker, run the schema command
 above once to create the `account_devices` and `account_calls` tables, then deploy the Worker.
+
+## Shared spam reports
+
+`POST /spam-sync` lets phones that are paired with each other share which senders they reported as spam
+(hashed sender ids and counts only, never a number or a message). It needs the `spam_reports` table: run the schema
+command above once (every statement is `IF NOT EXISTS`), then deploy. Until then the app gets a 404 and just waits.

@@ -6,11 +6,14 @@
 // POST /profile        {name}   (Bearer)   -> {ok}      save my profile name
 // GET  /name?number=…           (Bearer)   -> {name}    caller name for a number (used during calls)
 // POST /account-sync    {accountKey, devices, calls} (Bearer) -> merged account history
+// POST /spam-sync       {accountKey, deviceId, reports:[{sender,spam,ham}]} (Bearer) -> the paired phones' reports
 
 const CODE_TTL_MS = 10 * 60 * 1000;
 const MAX_CODE_ATTEMPTS = 5;
 const MAX_LOOKUPS_PER_DAY = 300;
 const MAX_NAME_LENGTH = 40;
+const MAX_SPAM_REPORTS = 200;
+const MAX_SPAM_COUNT = 1000;
 
 export default {
   async fetch(request, env) {
@@ -23,6 +26,7 @@ export default {
         case "POST /profile": return await saveProfile(request, env);
         case "GET /name": return await lookupName(url, request, env);
         case "POST /account-sync": return await syncAccountHistory(request, env);
+        case "POST /spam-sync": return await syncSpamReports(request, env);
         default: return json({ error: "not_found" }, 404);
       }
     } catch (e) {
@@ -219,6 +223,55 @@ async function syncAccountHistory(request, env) {
       callTypeInt: c.call_type,
       timestamp: c.timestamp,
       durationSec: c.duration_sec,
+    })),
+  });
+}
+
+function clampCount(raw) {
+  const n = Math.floor(Number(raw));
+  return Number.isFinite(n) ? Math.min(MAX_SPAM_COUNT, Math.max(0, n)) : 0;
+}
+
+/**
+ * Spam reports shared between phones that paired with each other. Each phone writes only its own rows
+ * (one per hashed sender id: how many times it said spam and "not spam") and gets back the rows of the OTHER
+ * phones under the same private pairing key. No message text and no sender number is ever stored: the sender is a
+ * 24-character hash made on the phone, the pairing key a hash of the private link id.
+ */
+async function syncSpamReports(request, env) {
+  const user = await authUser(request, env);
+  if (!user) return json({ error: "unauthorized" }, 401);
+
+  const payload = await readJson(request);
+  const accountKey = String(payload.accountKey || "").trim().toLowerCase();
+  if (!/^[a-f0-9]{32,64}$/.test(accountKey)) return json({ error: "bad_account" }, 400);
+  const deviceId = String(payload.deviceId || "").trim().slice(0, 120);
+  if (!deviceId) return json({ error: "bad_device" }, 400);
+
+  const reports = Array.isArray(payload.reports) ? payload.reports.slice(0, MAX_SPAM_REPORTS) : [];
+  const now = Date.now();
+  const statements = [];
+  for (const report of reports) {
+    const sender = String(report?.sender || "").trim().toLowerCase();
+    if (!/^[a-f0-9]{24}$/.test(sender)) continue;
+    statements.push(env.DB.prepare(
+      "INSERT INTO spam_reports (account_key, device_id, sender, spam, ham, updated_at) VALUES (?, ?, ?, ?, ?, ?) " +
+      "ON CONFLICT(account_key, device_id, sender) DO UPDATE SET spam = excluded.spam, ham = excluded.ham, updated_at = excluded.updated_at"
+    ).bind(accountKey, deviceId, sender, clampCount(report?.spam), clampCount(report?.ham), now));
+  }
+  if (statements.length) await env.DB.batch(statements);
+
+  const rows = await env.DB.prepare(
+    "SELECT device_id, sender, spam, ham, updated_at FROM spam_reports WHERE account_key = ? AND device_id != ? " +
+    "ORDER BY updated_at DESC LIMIT 2000"
+  ).bind(accountKey, deviceId).all();
+  return json({
+    reports: (rows.results || []).map((r) => ({
+      deviceId: r.device_id,
+      sender: r.sender,
+      spam: r.spam,
+      ham: r.ham,
+      updatedAt: r.updated_at,
     })),
   });
 }

@@ -10,8 +10,43 @@ class SmsRiskTierTest {
         scamSign: Boolean = false,
         probability: Float,
         suspicious: Double? = 0.33,
-        high: Double? = 0.85
-    ) = smsRiskTier(technical, legitimate, scamSign, probability, suspicious, high)
+        high: Double? = 0.85,
+        senderReported: Boolean = false
+    ) = smsRiskTier(technical, legitimate, scamSign, probability, suspicious, high, senderReported)
+
+    @Test
+    fun aReportedSenderOnlyAddsEvidenceAndTheModelMustStillAgree() {
+        // A promotion from a reported sender: the model scores it 0.5 to 0.9 -> marked, but never "high risk".
+        assertEquals(SmsSpamRiskTier.SUSPICIOUS, tier(senderReported = true, probability = 0.33f))
+        assertEquals(SmsSpamRiskTier.SUSPICIOUS, tier(senderReported = true, probability = 0.50f))
+        assertEquals(SmsSpamRiskTier.SUSPICIOUS, tier(senderReported = true, probability = 0.99f))
+        // A real or personal message from the same sender: the model scores it near zero -> not marked.
+        assertEquals(SmsSpamRiskTier.LOW_RISK, tier(senderReported = true, probability = 0.05f))
+        assertEquals(SmsSpamRiskTier.LOW_RISK, tier(senderReported = true, probability = 0.32f))
+        assertEquals(SmsSpamRiskTier.LOW_RISK, tier(senderReported = true, probability = 0.99f, suspicious = null, high = null))
+    }
+
+    @Test
+    fun aReportedSenderNeverBeatsAKnownRealPattern() {
+        // An OTP, a bank ledger entry or a delivery status from a reported sender stays clean.
+        assertEquals(SmsSpamRiskTier.LOW_RISK, tier(legitimate = true, senderReported = true, probability = 0.99f))
+    }
+
+    @Test
+    fun aReportedSenderWithAScamSignIsStillHighRisk() {
+        assertEquals(SmsSpamRiskTier.HIGH_CONFIDENCE_SPAM, tier(scamSign = true, senderReported = true, probability = 0.90f))
+        assertEquals(SmsSpamRiskTier.SUSPICIOUS, tier(scamSign = true, senderReported = true, probability = 0.50f))
+    }
+
+    @Test
+    fun aDeceptiveLinkStillBeatsEverythingForAReportedSender() {
+        assertEquals(SmsSpamRiskTier.HIGH_CONFIDENCE_SPAM, tier(technical = true, senderReported = true, probability = 0.0f))
+    }
+
+    @Test
+    fun withoutAReportedSenderTheOldRuleIsUnchanged() {
+        assertEquals(SmsSpamRiskTier.LOW_RISK, tier(senderReported = false, probability = 0.99f))
+    }
 
     @Test
     fun theModelAloneNeverFlagsAMessage() {

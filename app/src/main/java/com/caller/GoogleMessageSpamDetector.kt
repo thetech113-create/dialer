@@ -36,6 +36,10 @@ private const val SMS_SPAM_PREFS = "google_message_spam_detector"
 private const val SENDER_SPAM_COUNT_PREFIX = "sender_spam_cnt_"
 private const val SENDER_HAM_COUNT_PREFIX = "sender_ham_cnt_"
 private const val MSG_USER_OVERRIDE_PREFIX = "msg_override_"
+private const val SENDER_REMOTE_NET_PREFIX = "sender_remote_net_"
+
+/** Net reports (spam minus "Not spam", over this phone and its paired phones) after which a sender counts as reported. */
+internal const val SENDER_REPORTS_NEEDED = 2
 private const val SMS_SPAM_MODEL_ASSET = "sms_spam_model.json"
 
 private val memoryVerdictCache = LruCache<String, SmsSpamVerdict>(512)
@@ -236,7 +240,8 @@ fun recordSmsUserFeedback(context: Context, sender: String, body: String, isSpam
     val normalizedSender = sender.trim().lowercase(Locale.ROOT)
     val strippedBody = body.trim().replaceFirst(TEST_PREFIX_REGEX, "").trim()
     val cacheKey = buildMessageCacheKey(normalizedSender, strippedBody)
-    memoryVerdictCache.remove(cacheKey)
+    // The sender's reputation changes too, which reaches its other messages: forget every cached verdict.
+    memoryVerdictCache.evictAll()
 
     runCatching {
         val prefs = context.getSharedPreferences(SMS_SPAM_PREFS, Context.MODE_PRIVATE)
@@ -244,7 +249,7 @@ fun recordSmsUserFeedback(context: Context, sender: String, body: String, isSpam
         editor.putString(MSG_USER_OVERRIDE_PREFIX + cacheKey, if (isSpam) "SPAM" else "HAM")
 
         if (normalizedSender.isNotBlank()) {
-            val senderKey = sha256(normalizedSender).take(24)
+            val senderKey = senderReportKey(normalizedSender)
             if (isSpam) {
                 val prev = prefs.getInt(SENDER_SPAM_COUNT_PREFIX + senderKey, 0)
                 editor.putInt(SENDER_SPAM_COUNT_PREFIX + senderKey, prev + 1)
@@ -255,6 +260,58 @@ fun recordSmsUserFeedback(context: Context, sender: String, body: String, isSpam
         }
         editor.apply()
     }
+    // Tell the paired phones (hashed sender and counts only, never the message).
+    SpamReportSharing.syncNow(context)
+}
+
+/**
+ * The key under which a sender's reports are kept and shared: a hash, never the sender itself. A phone number is
+ * reduced to its last 10 digits, so "+919876543210", "09876543210" and "9876543210" are one sender on every phone.
+ */
+internal fun senderReportKey(sender: String): String {
+    val clean = sender.trim().lowercase(Locale.ROOT)
+    val digits = clean.filter { it.isDigit() }
+    val isNumber = digits.length >= 10 && clean.all { it.isDigit() || it in "+ -()" }
+    return sha256(if (isNumber) "n" + digits.takeLast(10) else clean).take(24)
+}
+
+/** True when the reports against a sender, net of "Not spam" answers, reach [SENDER_REPORTS_NEEDED]. */
+internal fun isSenderReportedAsSpam(spamReports: Int, hamReports: Int, remoteNet: Int): Boolean =
+    spamReports - hamReports + remoteNet >= SENDER_REPORTS_NEEDED
+
+/** This phone's own reports, one entry per sender key, for sharing with the paired phones. */
+internal fun ownSenderReports(context: Context): List<SenderReport> {
+    val prefs = context.getSharedPreferences(SMS_SPAM_PREFS, Context.MODE_PRIVATE)
+    val spam = HashMap<String, Int>()
+    val ham = HashMap<String, Int>()
+    for ((key, value) in prefs.all) {
+        val count = value as? Int ?: continue
+        when {
+            key.startsWith(SENDER_SPAM_COUNT_PREFIX) -> spam[key.removePrefix(SENDER_SPAM_COUNT_PREFIX)] = count
+            key.startsWith(SENDER_HAM_COUNT_PREFIX) -> ham[key.removePrefix(SENDER_HAM_COUNT_PREFIX)] = count
+        }
+    }
+    return (spam.keys + ham.keys).distinct()
+        .map { SenderReport(it, spam[it] ?: 0, ham[it] ?: 0) }
+        .filter { it.spam > 0 || it.ham > 0 }
+}
+
+/**
+ * Stores what the paired phones reported (sender key -> their net reports), replacing the previous copy.
+ * The cached verdicts are dropped when something changed.
+ */
+internal fun storeRemoteSenderNets(context: Context, nets: Map<String, Int>) {
+    val prefs = context.getSharedPreferences(SMS_SPAM_PREFS, Context.MODE_PRIVATE)
+    val old = prefs.all.filterKeys { it.startsWith(SENDER_REMOTE_NET_PREFIX) }
+        .mapKeys { it.key.removePrefix(SENDER_REMOTE_NET_PREFIX) }
+        .mapValues { it.value as? Int ?: 0 }
+    val fresh = nets.filterValues { it != 0 }
+    if (old == fresh) return
+    val editor = prefs.edit()
+    old.keys.forEach { editor.remove(SENDER_REMOTE_NET_PREFIX + it) }
+    fresh.forEach { (sender, net) -> editor.putInt(SENDER_REMOTE_NET_PREFIX + sender, net) }
+    editor.apply()
+    memoryVerdictCache.evictAll()
 }
 
 private fun evaluateHybridSmsSpam(
@@ -435,8 +492,8 @@ private fun evaluateHybridSmsSpam(
         reasons += "legitimate_delivery_status"
     }
 
-    // 5. Sender format and local reputation are explanatory only. A sender is never classified
-    // solely because it is unknown, alphanumeric, or has one unverified report.
+    // 5. Sender format is explanatory only. A sender is never classified solely because it is unknown or
+    // alphanumeric; see the reputation below for what a sender the user reported can do.
     val isVerifiedDlt = isVerifiedIndianDltHeader(senderTrimmed)
     if (!isVerifiedDlt && looksLikeMobileNumberSender(senderTrimmed) &&
         (hasAccountOrSimTarget || hasUtilityOrSimContext || hasParcelContext || hasLegalThreat) &&
@@ -448,15 +505,20 @@ private fun evaluateHybridSmsSpam(
         reasons += "unverified_sender_format"
     }
 
-    // Local verified sender reputation (requires >= 2 net reports before shifting score significantly)
-    if (prefs != null && senderTrimmed.isNotBlank()) {
-        val senderKey = sha256(senderTrimmed).take(24)
-        val spamReports = prefs.getInt(SENDER_SPAM_COUNT_PREFIX + senderKey, 0)
-        val hamReports = prefs.getInt(SENDER_HAM_COUNT_PREFIX + senderKey, 0)
-        val netSpamReports = spamReports - hamReports
-        if (netSpamReports >= 2 && !isVerifiedDlt) {
-            reasons += "sender_reported_as_spam"
-        }
+    // Sender reputation: reported as spam at least twice by this phone and the user's paired phones, net of "Not spam"
+    // answers. A verified DLT header is never judged by sender: a header can be spoofed, so a report on one only
+    // affects that exact message, and a real bank text from the same header stays clean (a spoofed scam is still
+    // caught by its own content). Even for other senders the report only adds evidence: the message must still look
+    // spammy to the model, so a real or personal message from that sender is not marked.
+    var senderReportedSpam = false
+    if (prefs != null && senderTrimmed.isNotBlank() && !isVerifiedDlt) {
+        val senderKey = senderReportKey(senderTrimmed)
+        senderReportedSpam = isSenderReportedAsSpam(
+            spamReports = prefs.getInt(SENDER_SPAM_COUNT_PREFIX + senderKey, 0),
+            hamReports = prefs.getInt(SENDER_HAM_COUNT_PREFIX + senderKey, 0),
+            remoteNet = prefs.getInt(SENDER_REMOTE_NET_PREFIX + senderKey, 0)
+        )
+        if (senderReportedSpam) reasons += "sender_reported_as_spam"
     }
 
     // 6. The trained model is the primary decision maker. Its thresholds were selected by the
@@ -480,7 +542,8 @@ private fun evaluateHybridSmsSpam(
         hasScamIndicator = hasHighRiskScamIndicator,
         probability = probability,
         suspiciousThreshold = model?.suspiciousThreshold,
-        highConfidenceThreshold = model?.highConfidenceThreshold
+        highConfidenceThreshold = model?.highConfidenceThreshold,
+        senderReported = senderReportedSpam
     )
     val isPotentialSpam = riskTier != SmsSpamRiskTier.LOW_RISK
     val distinctReasons = reasons.distinct()
@@ -504,6 +567,8 @@ private fun evaluateHybridSmsSpam(
  * spam, so every automated business message (bank statement, recharge, receipt, appointment, order update) looks
  * like spam to it and scores above its thresholds. The model may therefore only confirm a message that also shows a
  * real scam sign ([hasScamIndicator]: a scam phrase pattern or a suspicious link); on its own it never flags one.
+ * A sender the user reported as spam ([senderReported]) counts as such a sign too, but only up to "suspicious": the
+ * model must still agree, so a real or personal message from that sender is not marked.
  */
 internal fun smsRiskTier(
     hasIndependentTechnicalThreat: Boolean,
@@ -511,15 +576,17 @@ internal fun smsRiskTier(
     hasScamIndicator: Boolean,
     probability: Float,
     suspiciousThreshold: Double?,
-    highConfidenceThreshold: Double?
+    highConfidenceThreshold: Double?,
+    senderReported: Boolean = false
 ): SmsSpamRiskTier = when {
     // These are independently deceptive technical indicators, not ordinary keywords.
     hasIndependentTechnicalThreat -> SmsSpamRiskTier.HIGH_CONFIDENCE_SPAM
     // Strong one-way transactional patterns prevent a generic corpus model from warning on
     // routine OTPs, ledger entries, and delivery status messages.
     hasKnownLegitimatePattern -> SmsSpamRiskTier.LOW_RISK
-    !hasScamIndicator -> SmsSpamRiskTier.LOW_RISK
-    highConfidenceThreshold != null && probability >= highConfidenceThreshold -> SmsSpamRiskTier.HIGH_CONFIDENCE_SPAM
+    !hasScamIndicator && !senderReported -> SmsSpamRiskTier.LOW_RISK
+    hasScamIndicator && highConfidenceThreshold != null && probability >= highConfidenceThreshold ->
+        SmsSpamRiskTier.HIGH_CONFIDENCE_SPAM
     suspiciousThreshold != null && probability >= suspiciousThreshold -> SmsSpamRiskTier.SUSPICIOUS
     else -> SmsSpamRiskTier.LOW_RISK
 }
@@ -660,6 +727,7 @@ private fun buildSmsSpamSummary(
         reasons.contains("advance_fee_or_instant_loan_scam") -> "$prefix: instant loan or advance-fee lure"
         reasons.contains("suspicious_domain_extension") || reasons.contains("deceptive_or_ip_url") ->
             "$prefix: untrusted link domain"
+        reasons.contains("sender_reported_as_spam") -> "$prefix: this sender was reported as spam"
         else -> "$prefix: flagged by on-device ML classifier"
     }
 }

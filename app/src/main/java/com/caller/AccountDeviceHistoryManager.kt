@@ -363,6 +363,17 @@ object AccountDeviceHistoryManager {
         }.getOrDefault(emptyList())
     }
 
+    /**
+     * One cloud key per private link, for sharing spam reports with the paired phones. It is derived differently from
+     * [canonicalKeyFor] (which names the public ntfy topics), so knowing a call-sync topic name never gives access to
+     * the reports. Only the hash leaves the phone, never the link id.
+     */
+    fun getLinkSpamShareKeys(context: Context): List<String> = getLinkAccountIds(context).map { linkId ->
+        MessageDigest.getInstance("SHA-256")
+            .digest("caller_spam_v1|${linkId.trim().lowercase(Locale.ROOT)}".toByteArray(Charsets.UTF_8))
+            .joinToString("") { "%02x".format(it) }.take(32)
+    }
+
     private fun saveLinkAccountIds(context: Context, ids: List<String>) {
         getPrefs(context).edit().putString(KEY_LINK_ACCOUNT_IDS, JSONArray(ids.distinct()).toString()).apply()
     }

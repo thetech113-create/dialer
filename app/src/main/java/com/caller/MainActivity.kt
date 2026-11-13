@@ -1269,6 +1269,7 @@ class MainActivity : ComponentActivity() {
         )
         if (uiState.isDefaultDialer) maybeAskUsageAccess()
         AppUpdateManager.checkAndInstallPending(this)
+        SpamReportSharing.syncIfDue(applicationContext)
         syncContactsObserverRegistration()
         refreshPowerSaveModeState("resume")
         refreshPowerPermissionPrompts()

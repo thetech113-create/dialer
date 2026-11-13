@@ -12,6 +12,7 @@ import okhttp3.OkHttpClient
 import okhttp3.Request
 import okhttp3.RequestBody.Companion.toRequestBody
 import okhttp3.dnsoverhttps.DnsOverHttps
+import org.json.JSONArray
 import org.json.JSONObject
 import java.net.InetAddress
 import java.net.URLEncoder
@@ -254,4 +255,40 @@ fun requestP2PServerCallerName(context: Context, remoteNumber: String) {
             Log.e(P2P_FORENSIC_TAG, "p2p_server_lookup result=failed error=${e.message}")
         }
     }
+}
+
+/**
+ * Shares this phone's sender reports (hashed sender ids and counts, never message text) with the phones paired through
+ * [accountKey] and returns theirs. The status is -1 when nothing was sent because the server is off or this phone is
+ * not verified on it. Blocking: call it from a background thread.
+ */
+internal fun syncSpamReportsWithServer(
+    context: Context,
+    accountKey: String,
+    deviceId: String,
+    reports: List<SenderReport>
+): SpamSyncResult {
+    if (!isP2PServerEnabled()) return SpamSyncResult(-1, emptyList())
+    val token = p2pServerToken(context) ?: return SpamSyncResult(-1, emptyList())
+    val body = JSONObject()
+        .put("accountKey", accountKey)
+        .put("deviceId", deviceId)
+        .put("reports", JSONArray().apply {
+            reports.forEach { put(JSONObject().put("sender", it.sender).put("spam", it.spam).put("ham", it.ham)) }
+        })
+    val (status, json) = serverRequest("POST", "/spam-sync", body, token)
+    if (status != 200) return SpamSyncResult(status, emptyList())
+    val array = json.optJSONArray("reports") ?: JSONArray()
+    val remote = (0 until array.length()).mapNotNull { index ->
+        array.optJSONObject(index)?.let {
+            RemoteSenderReport(
+                deviceId = it.optString("deviceId"),
+                sender = it.optString("sender"),
+                spam = it.optInt("spam"),
+                ham = it.optInt("ham"),
+                updatedAt = it.optLong("updatedAt")
+            )
+        }
+    }
+    return SpamSyncResult(200, remote)
 }
