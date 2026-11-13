@@ -692,25 +692,32 @@ private fun resolveDeviceDeclaredNumber(context: Context): String {
     }
 }
 
+private const val P2P_RECENTS_TRIGGER = "Recents"
+
 fun lookupP2PCache(context: Context, phoneNumber: String, trigger: String): P2PCacheLookupResult {
     val safeContext = p2pContext(context)
     val prefs = safeContext.getSharedPreferences(P2P_CACHE_PREFS, Context.MODE_PRIVATE)
     val snapshot = buildP2PNumberSnapshot(phoneNumber)
-    logP2PNumberTrace("lookup:$trigger", snapshot)
+    // The Recents list looks up every row on each refresh (100+ numbers, several refreshes a second). Logging each
+    // one floods the log: ColorOS drops this app's log lines over its quota (LOG_FLOWCTRL ... DROPPED), which can
+    // include the call lines that matter, and the log kept for diagnostics fills up with them. Lookups for a call, an
+    // SMS or a tap stay fully logged.
+    val quiet = trigger == P2P_RECENTS_TRIGGER
+    if (!quiet) logP2PNumberTrace("lookup:$trigger", snapshot)
 
     val keysTried = mutableListOf<String>()
     for (key in snapshot.lookupKeys) {
         keysTried.add(key)
         val rawValue = prefs.getString(key, null)
         if (rawValue.isNullOrBlank()) {
-            logP2PThrottled(
+            if (!quiet) logP2PThrottled(
                 level = Log.DEBUG,
                 dedupeKey = "cache_lookup_miss:$trigger:$key",
                 message = "cache_lookup trigger=$trigger key=${maskP2PNumberForLog(key)} value=null"
             )
             continue
         }
-        Log.w(
+        if (!quiet) Log.w(
             P2P_FORENSIC_TAG,
             "cache_lookup trigger=$trigger key=${maskP2PNumberForLog(key)} value=${maskP2PCacheValueForLog(rawValue)}"
         )
@@ -719,7 +726,7 @@ fun lookupP2PCache(context: Context, phoneNumber: String, trigger: String): P2PC
         val name = sanitizeP2PDisplayName(parts.getOrNull(0) ?: "")
         val expiry = parts.getOrNull(1)?.toLongOrNull() ?: 0L
         val isValid = name.isNotBlank() && name != P2P_UNKNOWN_NAME && System.currentTimeMillis() < expiry
-        Log.w(
+        if (!quiet) Log.w(
             P2P_FORENSIC_TAG,
             "cache_validation trigger=$trigger key=${maskP2PNumberForLog(key)} parsedName=${maskP2PDisplayValueForLog(name)} expiry=$expiry valid=$isValid now=${System.currentTimeMillis()}"
         )
@@ -760,7 +767,7 @@ fun lookupP2PCache(context: Context, phoneNumber: String, trigger: String): P2PC
  * Used by Recents so a caller's shared name is shown for a limited window after the call.
  */
 fun lookupRecentP2PName(context: Context, phoneNumber: String, maxAgeMs: Long): String? {
-    val lookup = lookupP2PCache(context, phoneNumber, "Recents")
+    val lookup = lookupP2PCache(context, phoneNumber, P2P_RECENTS_TRIGGER)
     val name = lookup.name ?: return null
     val expiry = lookup.rawCacheValue?.split("|")?.getOrNull(1)?.toLongOrNull() ?: return null
     val receivedAt = expiry - P2P_PROFILE_CACHE_TTL_MS
