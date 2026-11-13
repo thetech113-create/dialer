@@ -44,6 +44,12 @@ object AppLogRecorder {
         return readTail(File(dir, OLD_FILE), maxChars - current.length) + current
     }
 
+    /** The recorded files that exist and are not empty, oldest first (for the Share Logs file). */
+    fun files(): List<File> {
+        val dir = directory ?: return emptyList()
+        return listOf(File(dir, OLD_FILE), File(dir, CURRENT_FILE)).filter { it.isFile && it.length() > 0 }
+    }
+
     /** Empties the recorded lines. The recorder keeps running and appends to the emptied file. */
     fun clear() {
         val dir = directory ?: return

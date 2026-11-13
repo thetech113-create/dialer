@@ -1,5 +1,6 @@
 <?xml version="1.0" encoding="utf-8"?>
 <paths xmlns:android="http://schemas.android.com/apk/res/android">
-    <!-- Only updater-managed APKs in the app-specific external files directory are shared. -->
+    <!-- Only updater-managed APKs in the app-specific external files directory, and the exported log file, are shared. -->
     <external-files-path name="managed_updates" path="Download/updates/" />
+    <cache-path name="shared_logs" path="shared_logs/" />
 </paths>
