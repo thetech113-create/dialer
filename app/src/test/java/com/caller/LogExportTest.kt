@@ -73,4 +73,48 @@ class LogExportTest {
         val text = export(listOf(empty), emptyList(), 100_000)
         assertEquals(2, Regex("\\(none\\)").findAll(text).count())
     }
+
+    private val callLine = "11-13 19:40:01.100 31909 31909 E CallForensic: [t=1] onCallAdded call=7 state=4"
+    private val forensicLine = "11-13 19:40:01.200 31909 31909 W P2P_FORENSIC: ui_launch_owner source=onBringToForeground"
+    private val callScreenLine = "11-13 19:40:01.300 31909 31909 D VRI[CallActivity]: onFocusEvent true"
+    private val errorLine = "11-13 19:40:01.400 31909 31909 E IJankManager: slideSceneEnd unknown scene 1000"
+    private val noiseLine = "11-13 19:40:01.500 31909 32157 D HWUI    : RenderProxy::destroy: this=0xb4"
+    private val otherLauncher = "11-13 19:40:01.600 31909 31909 D VRI[PhoneLauncherAlias]: onFocusEvent true"
+
+    @Test
+    fun theCallLinesAndErrorsAreKeyLinesAndTheFrameworkChatterIsNot() {
+        assertTrue(LogExport.isKeyLine(callLine))
+        assertTrue(LogExport.isKeyLine(forensicLine))
+        assertTrue(LogExport.isKeyLine(callScreenLine))
+        assertTrue(LogExport.isKeyLine(errorLine))
+        assertFalse(LogExport.isKeyLine(noiseLine))
+        assertFalse(LogExport.isKeyLine(otherLauncher))
+        assertFalse(LogExport.isKeyLine("--------- beginning of main"))
+        assertFalse(LogExport.isKeyLine(""))
+    }
+
+    @Test
+    fun theRecentKeyLinesAreTheNewestOnesAndStartAtALine() {
+        val log = listOf(noiseLine, callLine, noiseLine, forensicLine, callScreenLine, noiseLine).joinToString("\n")
+        assertEquals(listOf(callLine, forensicLine, callScreenLine).joinToString("\n"), LogExport.recentKeyLines(log, 10_000))
+        // Only the newest line fits.
+        assertEquals(callScreenLine, LogExport.recentKeyLines(log, callScreenLine.length + 2))
+        assertEquals("", LogExport.recentKeyLines("", 100))
+    }
+
+    @Test
+    fun theRecentKeyLinesComeFirstSoACutShortTextStillHoldsThem() {
+        val old = file("old", "11111\n22222\n")
+        val out = ByteArrayOutputStream()
+        LogExport.write(out, "H\n", listOf(old), emptyList(), 100_000, recentAppLog = callLine)
+        val text = out.toString(Charsets.UTF_8.name())
+        assertTrue(text.indexOf("RECENT KEY LINES") < text.indexOf("FORENSIC EVENTS"))
+        assertTrue(text.indexOf("onCallAdded") < text.indexOf("11111"))
+    }
+
+    @Test
+    fun noRecentSectionIsWrittenWhenThereAreNoKeyLines() {
+        val text = export(emptyList(), emptyList(), 100_000)
+        assertFalse(text.contains("RECENT KEY LINES"))
+    }
 }
