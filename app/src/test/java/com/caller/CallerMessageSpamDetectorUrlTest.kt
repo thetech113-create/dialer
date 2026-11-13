@@ -4,7 +4,7 @@ import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
 import org.junit.Test
 
-class GoogleMessageSpamDetectorUrlTest {
+class CallerMessageSpamDetectorUrlTest {
     @Test
     fun verifiedKotakFraudReportingHostIsNotCalledALookalike() {
         val result = analyzeUrlStructure(

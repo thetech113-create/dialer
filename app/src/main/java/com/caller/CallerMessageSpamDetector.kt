@@ -25,7 +25,7 @@ data class SmsSpamVerdict(
     val summary: String = "",
     val provider: String = "On-Device Hybrid ML ($SMS_SPAM_MODEL_VERSION)",
     val detectedUrl: String = "",
-    val googleThreatTypes: List<String> = emptyList(),
+    val threatTypes: List<String> = emptyList(),
     val riskTier: SmsSpamRiskTier = SmsSpamRiskTier.LOW_RISK,
     val mlProbability: Float = 0f,
     val modelVersion: String = SMS_SPAM_MODEL_VERSION
@@ -555,7 +555,7 @@ private fun evaluateHybridSmsSpam(
         summary = buildSmsSpamSummary(riskTier, detectedUrl, distinctReasons),
         provider = "On-Device Hybrid ML ($SMS_SPAM_MODEL_VERSION)",
         detectedUrl = detectedUrl,
-        googleThreatTypes = emptyList(),
+        threatTypes = emptyList(),
         riskTier = riskTier,
         mlProbability = probability,
         modelVersion = SMS_SPAM_MODEL_VERSION
