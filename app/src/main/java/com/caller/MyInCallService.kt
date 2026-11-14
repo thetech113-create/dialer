@@ -1804,14 +1804,24 @@ class MyInCallService : InCallService() {
                 )
             }
 
-            private fun getCustomRingtoneUriForNumber(phoneNumber: String): Uri? {
+            private fun getSafeRingtoneContext(): Context {
+                val userManager = getSystemService(Context.USER_SERVICE) as? android.os.UserManager
+                val isUnlocked = userManager?.isUserUnlocked == true
+                return if (!isUnlocked && Build.VERSION.SDK_INT >= Build.VERSION_CODES.N) {
+                    createDeviceProtectedStorageContext() ?: this
+                } else {
+                    this
+                }
+            }
+
+            private fun getCustomRingtoneUriForNumber(safeContext: Context, phoneNumber: String): Uri? {
                 if (phoneNumber.isBlank()) return null
                 return try {
                     val lookupUri = Uri.withAppendedPath(
                         ContactsContract.PhoneLookup.CONTENT_FILTER_URI,
                         Uri.encode(phoneNumber)
                     )
-                    contentResolver.query(
+                    safeContext.contentResolver.query(
                         lookupUri,
                         arrayOf(ContactsContract.PhoneLookup.CUSTOM_RINGTONE),
                         null,
@@ -1857,8 +1867,6 @@ class MyInCallService : InCallService() {
                     Log.e("CMF_RINGTONE_DEBUG", "BLOCKED: user_silenced")
                     return
                 }
-                // incomingRingtone counts while non-null (even if not yet reported playing),
-                // so the notification reposter doesn't start a second ringtone during verification.
                 if (incomingRingtone != null) {
                     Log.e("CMF_RINGTONE_DEBUG", "BLOCKED: already_playing")
                     return
@@ -1904,13 +1912,11 @@ class MyInCallService : InCallService() {
                     return
                 }
 
-                val customRingtoneUri = getCustomRingtoneUriForNumber(phoneNumber)
-                val defaultRingtoneUri = RingtoneManager.getActualDefaultRingtoneUri(this, RingtoneManager.TYPE_RINGTONE)
-
-                if (customRingtoneUri == null && defaultRingtoneUri == null) {
-                    Log.e("CMF_RINGTONE_DEBUG", "BLOCKED: no ringtone set (silent / none set in settings)")
-                    return
-                }
+                val safeContext = getSafeRingtoneContext()
+                val customRingtoneUri = getCustomRingtoneUriForNumber(safeContext, phoneNumber)
+                val defaultRingtoneUri = runCatching {
+                    RingtoneManager.getActualDefaultRingtoneUri(safeContext, RingtoneManager.TYPE_RINGTONE)
+                }.getOrNull()
 
                 // Ringtone usage → plays on the ring stream, so it follows the phone's ring volume.
                 val attributes = AudioAttributes.Builder()
@@ -1922,33 +1928,31 @@ class MyInCallService : InCallService() {
                 if (customRingtoneUri != null) {
                     candidates.add(customRingtoneUri)
                     Log.e("CMF_RINGTONE_DEBUG", "Primary candidate: custom contact ringtone $customRingtoneUri")
-                } else if (defaultRingtoneUri != null) {
+                }
+                if (defaultRingtoneUri != null) {
                     candidates.add(defaultRingtoneUri)
                     Log.e("CMF_RINGTONE_DEBUG", "Primary candidate: actual default system ringtone $defaultRingtoneUri")
                 }
 
-                // Append fallback URIs only for backup in case primary cannot be played
+                // Append fallback URIs for Direct Boot / DPS mode
                 candidates.add(RingtoneManager.getDefaultUri(RingtoneManager.TYPE_RINGTONE))
-                findInternalRingtoneUri()?.let(candidates::add)
+                candidates.add(android.provider.Settings.System.DEFAULT_RINGTONE_URI)
+                findInternalRingtoneUri(safeContext)?.let(candidates::add)
 
-                // Playback goes through android.media.Ringtone, which hands off to the system's ringtone
-                // player when the app can't open the file itself (e.g. a user ringtone on external storage,
-                // since the app holds no READ_MEDIA_AUDIO). If the user's tone isn't playing shortly after,
-                // the next candidate (ending with a built-in internal tone) is tried.
-                if (!startSystemRingtone(candidates.toList(), attributes)) {
+                if (!startSystemRingtone(safeContext, candidates.toList(), attributes)) {
                     Log.e("CMF_RINGTONE_DEBUG", "EXCEPTION: no playable ringtone URI among $candidates")
                 }
             }
 
-            private fun startSystemRingtone(uris: List<Uri>, attributes: AudioAttributes): Boolean {
+            private fun startSystemRingtone(safeContext: Context, uris: List<Uri>, attributes: AudioAttributes): Boolean {
                 val uri = uris.firstOrNull() ?: return false
                 val backupUris = uris.drop(1)
                 val ringtone = try {
-                    RingtoneManager.getRingtone(this, uri)
+                    RingtoneManager.getRingtone(safeContext, uri)
                 } catch (e: Exception) {
                     Log.e("CMF_RINGTONE_DEBUG", "System ringtone unavailable: $uri (${e.message})")
                     null
-                } ?: return startSystemRingtone(backupUris, attributes)
+                } ?: return startSystemRingtone(safeContext, backupUris, attributes)
                 return try {
                     ringtone.audioAttributes = attributes
                     if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
@@ -1957,7 +1961,6 @@ class MyInCallService : InCallService() {
                     ringtone.play()
                     incomingRingtone = ringtone
                     Log.e("CMF_RINGTONE_DEBUG", "System Ringtone.play() requested uri=$uri — verifying")
-                    // Remote playback can fail silently; if it isn't playing shortly after, use the backup.
                     Handler(Looper.getMainLooper()).postDelayed({
                         if (incomingRingtone !== ringtone) return@postDelayed
                         if (ringtone.isPlaying) {
@@ -1967,7 +1970,7 @@ class MyInCallService : InCallService() {
                         Log.e("CMF_RINGTONE_DEBUG", "System Ringtone not playing uri=$uri — trying next")
                         try { ringtone.stop() } catch (_: Exception) {}
                         incomingRingtone = null
-                        if (!startSystemRingtone(backupUris, attributes)) {
+                        if (!startSystemRingtone(safeContext, backupUris, attributes)) {
                             Log.e("CMF_RINGTONE_DEBUG", "EXCEPTION: backup ringtone also failed")
                         }
                     }, SYSTEM_RINGTONE_VERIFY_DELAY_MS)
@@ -1975,13 +1978,13 @@ class MyInCallService : InCallService() {
                 } catch (e: Exception) {
                     Log.e("CMF_RINGTONE_DEBUG", "System Ringtone failed: $uri (${e.message})")
                     try { ringtone.stop() } catch (_: Exception) {}
-                    startSystemRingtone(backupUris, attributes)
+                    startSystemRingtone(safeContext, backupUris, attributes)
                 }
             }
 
-            private fun findInternalRingtoneUri(): Uri? {
+            private fun findInternalRingtoneUri(safeContext: Context): Uri? {
                 return try {
-                    contentResolver.query(
+                    safeContext.contentResolver.query(
                         MediaStore.Audio.Media.INTERNAL_CONTENT_URI,
                         arrayOf(MediaStore.Audio.Media._ID),
                         "${MediaStore.Audio.Media.IS_RINGTONE} = 1",
