@@ -2509,6 +2509,50 @@ fun MultiDeviceSettingsCard(
                     Text("Synced Calls (${syncedCalls.size})", fontSize = 13.sp)
                 }
             }
+
+            Spacer(modifier = Modifier.height(14.dp))
+            Divider(color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.08f))
+            Spacer(modifier = Modifier.height(14.dp))
+
+            // 7. PC Link Connection (Windows App Link & Audio Relay)
+            val linkPrefs = remember { LinkPrefs(context) }
+            var pcLinkAutoStart by remember { mutableStateOf(linkPrefs.autoStart) }
+
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.SpaceBetween
+            ) {
+                Column(modifier = Modifier.weight(1f).padding(end = 8.dp)) {
+                    Text(
+                        text = "PC Link (Windows App Sync)",
+                        style = MaterialTheme.typography.bodyLarge,
+                        fontWeight = FontWeight.SemiBold,
+                        color = MaterialTheme.colorScheme.onSurface
+                    )
+                    Text(
+                        text = when {
+                            LinkState.connectedPc != null -> "Connected to ${LinkState.connectedPc}"
+                            LinkState.running -> "Server active — waiting for PC connection"
+                            else -> "Sync calls, SMS & audio with your Windows PC"
+                        },
+                        style = MaterialTheme.typography.bodySmall,
+                        color = if (LinkState.connectedPc != null) Color(0xFF2E7D32) else MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                }
+                Switch(
+                    checked = LinkState.running,
+                    onCheckedChange = { start ->
+                        pcLinkAutoStart = start
+                        linkPrefs.autoStart = start
+                        if (start) {
+                            LinkService.start(context)
+                        } else {
+                            LinkService.stop(context)
+                        }
+                    }
+                )
+            }
         }
     }
 

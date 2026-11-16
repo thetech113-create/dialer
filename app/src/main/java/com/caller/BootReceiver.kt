@@ -37,6 +37,13 @@ class BootReceiver : BroadcastReceiver() {
         // 2. Reschedule any direct boot or pending call state restorations
         try { DirectBootCallRescheduler(context).restoreCallNotifications() } catch (_: Exception) {}
 
+        // 3. Start PC Link service if autoStart is enabled
+        try {
+            if (LinkPrefs(context).autoStart) {
+                LinkService.start(context)
+            }
+        } catch (_: Exception) {}
+
         if (action == Intent.ACTION_USER_UNLOCKED && PendingCallStateStore.hasPendingCall(context)) {
             val serviceIntent = Intent(context, CallStateResumeService::class.java)
             if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.O) {
