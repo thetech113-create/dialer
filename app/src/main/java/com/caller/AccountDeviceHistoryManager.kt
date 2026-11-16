@@ -2553,7 +2553,83 @@ fun MultiDeviceSettingsCard(
                     }
                 )
             }
+
+            if (LinkState.running) {
+                Spacer(modifier = Modifier.height(10.dp))
+                val localIps = remember(refreshTick, LinkState.running) { getPcLocalAddresses() }
+                Surface(
+                    modifier = Modifier.fillMaxWidth(),
+                    shape = RoundedCornerShape(14.dp),
+                    color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.5f)
+                ) {
+                    Column(modifier = Modifier.padding(12.dp)) {
+                        Text(
+                            text = "Phone Address",
+                            style = MaterialTheme.typography.labelMedium,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                        Text(
+                            text = if (localIps.isEmpty()) "Join Wi-Fi network" else localIps.joinToString { "$it:${com.caller.link.Proto.TCP_PORT}" },
+                            style = MaterialTheme.typography.bodyMedium,
+                            fontWeight = FontWeight.Medium,
+                            color = MaterialTheme.colorScheme.onSurface
+                        )
+                    }
+                }
+
+                Spacer(modifier = Modifier.height(10.dp))
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.spacedBy(8.dp)
+                ) {
+                    OutlinedButton(
+                        onClick = { sendPcClipboard(context) },
+                        enabled = LinkState.connectedPc != null,
+                        modifier = Modifier.weight(1f),
+                        shape = RoundedCornerShape(12.dp)
+                    ) {
+                        Text("Send Clipboard")
+                    }
+                }
+            }
+
+            val pairedPcs = remember(LinkState.pairingsVersion) { linkPrefs.pairedPcs() }
+            if (pairedPcs.isNotEmpty()) {
+                Spacer(modifier = Modifier.height(10.dp))
+                Text(
+                    text = "Paired PCs",
+                    style = MaterialTheme.typography.labelLarge,
+                    fontWeight = FontWeight.Bold,
+                    color = MaterialTheme.colorScheme.onSurface
+                )
+                pairedPcs.forEach { pc ->
+                    Row(
+                        modifier = Modifier.fillMaxWidth().padding(vertical = 4.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.SpaceBetween
+                    ) {
+                        Column(modifier = Modifier.weight(1f)) {
+                            Text(text = pc.name, style = MaterialTheme.typography.bodyMedium, fontWeight = FontWeight.SemiBold)
+                            Text(text = "Paired PC", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                        }
+                        TextButton(onClick = {
+                            linkPrefs.remove(pc.id)
+                            LinkState.pairingsVersion++
+                            LinkState.server?.let { s ->
+                                if (s.connectedPcId == pc.id) kotlin.concurrent.thread { s.disconnect() }
+                            }
+                        }) {
+                            Text("Unpair", color = MaterialTheme.colorScheme.error)
+                        }
+                    }
+                }
+            }
         }
+    }
+
+    // Pair Request Dialog for PC Pairing
+    LinkState.pairRequest?.let { request ->
+        PcPairDialog(request)
     }
 
     // Dialog 1: Show 6-Digit Pairing Code (for Phone 1)
@@ -2867,4 +2943,79 @@ fun MultiDeviceSettingsCard(
             }
         )
     }
+}
+
+private fun getPcLocalAddresses(): List<String> = try {
+    java.net.NetworkInterface.getNetworkInterfaces().asSequence()
+        .filter { it.isUp && !it.isLoopback }
+        .flatMap { it.inetAddresses.asSequence() }
+        .filterIsInstance<java.net.Inet4Address>()
+        .filter { it.isSiteLocalAddress }
+        .mapNotNull { it.hostAddress }
+        .toList()
+} catch (_: Exception) {
+    emptyList()
+}
+
+private fun sendPcClipboard(context: Context) {
+    val clipboard = context.getSystemService(Context.CLIPBOARD_SERVICE) as? android.content.ClipboardManager ?: return
+    val text = clipboard.primaryClip?.takeIf { it.itemCount > 0 }?.getItemAt(0)?.coerceToText(context)?.toString()
+    val message = when {
+        text.isNullOrEmpty() -> "Clipboard is empty"
+        LinkState.send(org.json.JSONObject().put("t", "clip").put("text", text)) -> "Sent clipboard to PC"
+        else -> "PC is not connected"
+    }
+    android.widget.Toast.makeText(context, message, android.widget.Toast.LENGTH_SHORT).show()
+}
+
+@Composable
+private fun PcPairDialog(request: PcPairRequest) {
+    AlertDialog(
+        onDismissRequest = {},
+        shape = RoundedCornerShape(24.dp),
+        title = {
+            Text(
+                "Pair with ${request.pcName}?",
+                fontWeight = FontWeight.Bold,
+                textAlign = TextAlign.Center,
+                modifier = Modifier.fillMaxWidth()
+            )
+        },
+        text = {
+            Column(
+                horizontalAlignment = Alignment.CenterHorizontally,
+                verticalArrangement = Arrangement.spacedBy(14.dp),
+                modifier = Modifier.fillMaxWidth()
+            ) {
+                Text(
+                    "Continue only if your PC shows the same code.",
+                    style = MaterialTheme.typography.bodyMedium,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    textAlign = TextAlign.Center
+                )
+                Surface(
+                    shape = RoundedCornerShape(16.dp),
+                    color = MaterialTheme.colorScheme.primaryContainer
+                ) {
+                    Text(
+                        request.sas.chunked(3).joinToString("  "),
+                        style = MaterialTheme.typography.headlineLarge,
+                        fontWeight = FontWeight.Bold,
+                        color = MaterialTheme.colorScheme.onPrimaryContainer,
+                        modifier = Modifier.padding(horizontal = 28.dp, vertical = 14.dp)
+                    )
+                }
+            }
+        },
+        confirmButton = {
+            Button(onClick = { request.answer.complete(true) }) {
+                Text("Pair")
+            }
+        },
+        dismissButton = {
+            TextButton(onClick = { request.answer.complete(false) }) {
+                Text("Cancel")
+            }
+        }
+    )
 }

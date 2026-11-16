@@ -1277,21 +1277,6 @@ class MainActivity : ComponentActivity() {
             scheduleOemDialerFallbackProbe("main_onResume")
         }
 
-        val activeInCallService = MyInCallService.getInstance()
-        if (activeInCallService != null && activeInCallService.hasActiveCall() && intent?.action != "ADD_CALL_FROM_INCALL") {
-            Log.w(P2P_FORENSIC_TAG, "main_onResume: live call active — auto-recovering CallActivity UI")
-            startActivity(Intent(this, CallActivity::class.java).apply {
-                action = CALL_UI_ACTION_WAKE
-                addFlags(
-                    Intent.FLAG_ACTIVITY_NEW_TASK or
-                        Intent.FLAG_ACTIVITY_SINGLE_TOP or
-                        Intent.FLAG_ACTIVITY_CLEAR_TOP or
-                        Intent.FLAG_ACTIVITY_REORDER_TO_FRONT or
-                        Intent.FLAG_ACTIVITY_EXCLUDE_FROM_RECENTS
-                )
-            })
-        }
-
         if (hasReadCallLogPermission()) {
             refreshRecentCalls(withDelay = false)
         }
