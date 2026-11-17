@@ -145,6 +145,10 @@ object AccountDeviceHistoryManager {
     // Private sync channels: one per 6-digit pairing, so a phone linked to two others never joins them together.
     private const val KEY_LINK_ACCOUNT_IDS = "link_account_ids_json"
     private const val LINK_ACCOUNT_PREFIX = "link_"
+    // Which way each private link shares call history on this phone ("<linkId>:SOURCE,<linkId>:RECEIVER"); see LinkRole.
+    private const val KEY_LINK_ROLES = "link_roles_v1"
+    // Trust-store ids of phones that joined one of MY pairing codes: they may read my calls, they are not my sources.
+    private const val KEY_RECEIVER_ONLY_PEERS = "receiver_only_peers_v1"
     private const val KEY_REMOVED_PEERS_JSON = "removed_peers_json"
     // ntfy.sh keeps a message of up to 4096 bytes as text for 12 h. A larger body is stored as a file attachment that
     // expires after 3 h and whose message text is only "You received a file", which cloudGet cannot read. Stay under it.
@@ -384,6 +388,41 @@ object AccountDeviceHistoryManager {
         saveLinkAccountIds(context, getLinkAccountIds(context) + clean)
     }
 
+    /**
+     * What this phone is on a private link. Pairing is one-way: the phone that generated the code is the SOURCE of
+     * that link (it shares its calls and never reads the other phone's), the phone that entered it is the RECEIVER
+     * (it reads the source's calls and shares none through that link). A link made before this rule has no stored
+     * role and stays MUTUAL, as it always was: the old records do not say who generated the code, so no direction is
+     * guessed and nothing is switched off. Removing the phone and pairing again makes the link one-way.
+     */
+    private fun linkRole(context: Context, accountId: String): LinkRole {
+        if (!accountId.startsWith(LINK_ACCOUNT_PREFIX)) return LinkRole.MUTUAL
+        return parseLinkRoles(getPrefs(context).getString(KEY_LINK_ROLES, null).orEmpty())[accountId.trim()] ?: LinkRole.MUTUAL
+    }
+
+    private fun setLinkRole(context: Context, linkId: String, role: LinkRole) {
+        val clean = linkId.trim()
+        if (!clean.startsWith(LINK_ACCOUNT_PREFIX)) return
+        val roles = parseLinkRoles(getPrefs(context).getString(KEY_LINK_ROLES, null).orEmpty()) + (clean to role)
+        getPrefs(context).edit().putString(KEY_LINK_ROLES, formatLinkRoles(roles)).apply()
+    }
+
+    private fun receiverOnlyIds(context: Context): Set<String> =
+        getPrefs(context).getString(KEY_RECEIVER_ONLY_PEERS, null).orEmpty().split(',').filter { it.isNotBlank() }.toSet()
+
+    private fun markReceiverOnly(context: Context, ids: Collection<String>) {
+        val all = receiverOnlyIds(context) + ids.map { it.trim() }.filter { it.isNotBlank() }
+        getPrefs(context).edit().putString(KEY_RECEIVER_ONLY_PEERS, all.joinToString(",")).apply()
+    }
+
+    /** A trust-store phone that only joined one of my pairing codes: it reads my calls, it is not one of my sources. */
+    private fun isReceiverOnly(context: Context, tp: TrustedPeerRecord): Boolean {
+        val ids = receiverOnlyIds(context)
+        if (ids.isEmpty()) return false
+        return tp.deviceId in ids || (tp.modelDeviceId.isNotBlank() && tp.modelDeviceId in ids) ||
+            (tp.fingerprint.isNotBlank() && "dev_" + tp.fingerprint in ids)
+    }
+
     /** The shared (legacy / manually signed-in) account first, then one private account per direct link. */
     private fun getAllAccountIds(context: Context): List<String> =
         (listOf(getAccountId(context)) + getLinkAccountIds(context)).distinct()
@@ -410,7 +449,8 @@ object AccountDeviceHistoryManager {
             }) return true
         return runCatching {
             getTrustStore(context).getAllApprovedPeers().any {
-                it.deviceId == deviceId || it.modelDeviceId == deviceId || "dev_" + it.fingerprint == deviceId
+                (it.deviceId == deviceId || it.modelDeviceId == deviceId || "dev_" + it.fingerprint == deviceId) &&
+                    !isReceiverOnly(context, it)
             }
         }.getOrDefault(false)
     }
@@ -426,7 +466,8 @@ object AccountDeviceHistoryManager {
         val links = getLinkAccountIds(context)
         if (links.isEmpty()) return
         val used = getPeerDevices(context).map { it.accountId }.toSet()
-        val keep = links.filter { it in used }
+        // A link this phone generated stays while its receiver reads it, although the receiver is not listed as a peer.
+        val keep = links.filter { keepLinkWhenPruning(linkRole(context, it), it in used) }
         if (keep.size != links.size) saveLinkAccountIds(context, keep)
     }
 
@@ -755,7 +796,8 @@ object AccountDeviceHistoryManager {
                 (tp.fingerprint.isNotBlank() && it.deviceId == "dev_" + tp.fingerprint) ||
                 (it.deviceName.equals(tp.deviceName, ignoreCase = true))
             }
-            if (!exists) {
+            // A phone that only joined one of my pairing codes reads my calls; it is not listed as a source of mine.
+            if (!exists && !isReceiverOnly(context, tp)) {
                 result.add(
                     AccountDeviceRegistration(
                         accountId = myAccountId,
@@ -943,6 +985,8 @@ object AccountDeviceHistoryManager {
                                 // Join the pairing's private link instead of replacing my own account, so phones
                                 // I was already linked to keep syncing with me and never merge with the new one.
                                 addLinkAccountId(appCtx, remoteLinkId)
+                                // I entered the code: I am the RECEIVER of this link (I read the host's calls, I share none).
+                                setLinkRole(appCtx, remoteLinkId, LinkRole.RECEIVER)
                                 val sharedAccountId = remoteLinkId
                                 val peerReg = AccountDeviceRegistration(
                                     accountId = sharedAccountId,
@@ -983,23 +1027,32 @@ object AccountDeviceHistoryManager {
             activePairingCode = null
             activePairingLinkId = null
             if (pendingRec != null) {
-                val peerAccountId = if (linkId != null) {
+                if (linkId != null) {
+                    // One pairing is one direction. I generated this code, so I am the SOURCE of this link: the joining
+                    // phone is its RECEIVER and may read my calls, but it is not registered as a phone I read from and it
+                    // is not listed (its trust-store entry is marked receiver-only, because the trust store would list it).
                     addLinkAccountId(appCtx, linkId)
-                    linkId
+                    setLinkRole(appCtx, linkId, LinkRole.SOURCE)
+                    markReceiverOnly(
+                        appCtx,
+                        listOf(pendingRec.deviceId, pendingRec.modelDeviceId, "dev_" + pendingRec.fingerprint)
+                    )
                 } else {
-                    getAccountId(appCtx)
+                    // No link id is known (the app restarted while the code was offered), so there is no private link to
+                    // make one-way: this keeps the old behaviour and lists the joining phone.
+                    // The joining phone uploads, announces itself and syncs under its model id (dev_<MODEL>_<n>), which its
+                    // pairing request carries. pendingRec.deviceId is only the key-derived trust-store id.
+                    registerPeerDevice(
+                        appCtx,
+                        AccountDeviceRegistration(
+                            accountId = getAccountId(appCtx),
+                            deviceId = pendingRec.modelDeviceId.ifBlank { pendingRec.deviceId },
+                            deviceName = pendingRec.deviceName,
+                            verifiedNumbers = emptyList(),
+                            lastSyncTimestamp = System.currentTimeMillis()
+                        )
+                    )
                 }
-                // The joining phone uploads, announces itself and syncs under its model id (dev_<MODEL>_<n>), which its pairing
-                // request carries. pendingRec.deviceId is only the key-derived trust-store id. Registering that one left the
-                // phone's real id unknown here: its direct syncs were refused as "removed" after an earlier removal.
-                val peerReg = AccountDeviceRegistration(
-                    accountId = peerAccountId,
-                    deviceId = pendingRec.modelDeviceId.ifBlank { pendingRec.deviceId },
-                    deviceName = pendingRec.deviceName,
-                    verifiedNumbers = emptyList(),
-                    lastSyncTimestamp = System.currentTimeMillis()
-                )
-                registerPeerDevice(appCtx, peerReg)
             }
             if (code != null) {
                 val status = host.status(pairingId)
@@ -1301,6 +1354,8 @@ object AccountDeviceHistoryManager {
     ): Pair<Boolean, String> {
         val accountKey = canonicalKeyFor(accountId)
         val myDeviceId = getCurrentDeviceId(context)
+        // One-way links: the SOURCE only shares, the RECEIVER only reads (ingestAccountSnapshotJson enforces the reading side).
+        val role = linkRole(context, accountId)
         val problems = mutableListOf<String>()
         val notes = mutableListOf<String>()
 
@@ -1316,10 +1371,11 @@ object AccountDeviceHistoryManager {
         }
         remoteRoster?.let { ingestAccountSnapshotJson(context, it, accountId) }
 
-        val rosterJson = buildRosterJson(context, remoteRoster, accountId)
+        // The source's roster names only itself: a receiver's entry in a roster it read would list the receiver as a peer.
+        val rosterJson = buildRosterJson(context, if (role == LinkRole.SOURCE) null else remoteRoster, accountId)
         val rosterSig = computeRosterSignature(rosterJson)
         val rosterSigKey = publishSigKey(KEY_LAST_PUBLISHED_ROSTER_SIG, accountKey, isPrimary)
-        val shouldPostRoster = isPublishNeeded(context, rosterSigKey, rosterSig)
+        val shouldPostRoster = mayPostRoster(role) && isPublishNeeded(context, rosterSigKey, rosterSig)
 
         if (shouldPostRoster) {
             if (isRateLimitActive()) {
@@ -1342,7 +1398,7 @@ object AccountDeviceHistoryManager {
         val ownCalls = queryLocalDeviceCallLog(context, maxCount = CLOUD_MAX_OWN_CALLS)
         val ownCallsSig = computeOwnCallsSignature(ownCalls)
         val callsSigKey = publishSigKey(KEY_LAST_PUBLISHED_CALLS_SIG, accountKey, isPrimary)
-        val shouldPostCalls = isPublishNeeded(context, callsSigKey, ownCallsSig)
+        val shouldPostCalls = mayPublishOwnCalls(role) && isPublishNeeded(context, callsSigKey, ownCallsSig)
 
         val ownBody = buildOwnCallsJson(context, ownCalls, accountId)
         if (shouldPostCalls) {
@@ -1377,7 +1433,7 @@ object AccountDeviceHistoryManager {
         }
 
         // 3) Pull every known peer's calls
-        val peers = peersInAccount(context, accountId)
+        val peers = if (mayPullPeerCalls(role)) peersInAccount(context, accountId) else emptyList()
         if (peers.isEmpty()) notes += "no linked devices known yet"
         peers.forEach { peer ->
             if (isRateLimitActive()) {
@@ -1559,7 +1615,8 @@ object AccountDeviceHistoryManager {
     private fun buildFullAccountSnapshotJson(
         context: Context,
         previousRemote: JSONObject?,
-        accountId: String = getAccountId(context)
+        accountId: String = getAccountId(context),
+        includeCalls: Boolean = true
     ): JSONObject {
         val myDeviceId = getCurrentDeviceId(context)
         val myDeviceName = getCurrentDeviceName(context)
@@ -1597,7 +1654,7 @@ object AccountDeviceHistoryManager {
         // Own calls only. Forwarding the calls received from one phone to another would let every phone that is
         // linked to the same middle phone see the calls of all the others.
         val combinedCalls = mutableListOf<SyncedCallRecord>()
-        combinedCalls.addAll(queryLocalDeviceCallLog(context, maxCount = 120))
+        if (includeCalls) combinedCalls.addAll(queryLocalDeviceCallLog(context, maxCount = 120))
 
         val deduplicatedCalls = mutableListOf<SyncedCallRecord>()
         for (call in combinedCalls.sortedByDescending { it.timestamp }) {
@@ -1642,6 +1699,15 @@ object AccountDeviceHistoryManager {
         val myDeviceId = getCurrentDeviceId(context)
         val myAccountId = accountId
         val prefs = getPrefs(context)
+
+        // Direction: the SOURCE of a link takes nothing from it (no calls, no phone from its roster), and the RECEIVER
+        // takes only from the phone it was paired with.
+        val role = linkRole(context, accountId)
+        val linkPeerIds = if (role == LinkRole.RECEIVER) peersInAccount(context, accountId).map { it.deviceId }.toSet() else emptySet()
+        if (!mayIngestFrom(role, root.optString("senderDeviceId").trim(), linkPeerIds)) {
+            Log.d(TAG, "Not ingesting on a one-way link: this phone is the $role of it")
+            return
+        }
 
         // Only a private link may add a phone from the device list it carries: both of its phones were paired by code.
         // The shared Account ID's list names every phone that ever used that ID, which were never paired with this one.
@@ -1870,7 +1936,9 @@ object AccountDeviceHistoryManager {
                 val writer = PrintWriter(OutputStreamWriter(socket.getOutputStream(), Charsets.UTF_8), true)
                 val reader = BufferedReader(InputStreamReader(socket.getInputStream(), Charsets.UTF_8))
 
-                val mySnapshot = buildFullAccountSnapshotJson(context, null, accountId)
+                val mySnapshot = buildFullAccountSnapshotJson(
+                    context, null, accountId, includeCalls = mayPublishOwnCalls(linkRole(context, accountId))
+                )
                 mySnapshot.put("accountKey", accountKey)
                 mySnapshot.put("senderDeviceId", getCurrentDeviceId(context))
                 getOwnTailscaleIp().takeIf { it.isNotBlank() }?.let { mySnapshot.put("tailscaleIp", it) }
@@ -1978,7 +2046,9 @@ object AccountDeviceHistoryManager {
 
                 ingestAccountSnapshotJson(context, incomingObj, accountId)
 
-                val replySnapshot = buildFullAccountSnapshotJson(context, incomingObj, accountId)
+                val replySnapshot = buildFullAccountSnapshotJson(
+                    context, incomingObj, accountId, includeCalls = mayPublishOwnCalls(linkRole(context, accountId))
+                )
                 replySnapshot.put("accountKey", incomingKey)
                 replySnapshot.put("senderDeviceId", getCurrentDeviceId(context))
                 getOwnTailscaleIp().takeIf { it.isNotBlank() }?.let { replySnapshot.put("tailscaleIp", it) }
@@ -3019,3 +3089,41 @@ private fun PcPairDialog(request: PcPairRequest) {
         }
     )
 }
+
+/**
+ * What a phone is on one private link (see AccountDeviceHistoryManager.linkRole). SOURCE generated the pairing code,
+ * RECEIVER entered it, MUTUAL is a link made before pairing was one-way.
+ */
+internal enum class LinkRole { SOURCE, RECEIVER, MUTUAL }
+
+internal fun parseLinkRoles(text: String): Map<String, LinkRole> = text.split(',').mapNotNull { entry ->
+    val id = entry.substringBefore(':', "").trim()
+    val role = runCatching { LinkRole.valueOf(entry.substringAfter(':', "").trim()) }.getOrNull()
+    if (id.isBlank() || role == null) null else id to role
+}.toMap()
+
+internal fun formatLinkRoles(roles: Map<String, LinkRole>): String =
+    roles.entries.joinToString(",") { it.key + ":" + it.value.name }
+
+/** A receiver shares none of its calls through the link: it only reads. */
+internal fun mayPublishOwnCalls(role: LinkRole): Boolean = role != LinkRole.RECEIVER
+
+/** A source reads nobody's calls through the link: it only shares. */
+internal fun mayPullPeerCalls(role: LinkRole): Boolean = role != LinkRole.SOURCE
+
+/** A receiver does not announce itself in the link's roster; a source that read it would list the receiver as a peer. */
+internal fun mayPostRoster(role: LinkRole): Boolean = role != LinkRole.RECEIVER
+
+/**
+ * Whether data that arrived on a link may be taken in (calls and the phones of a roster alike). A source takes nothing.
+ * A receiver takes it only from a phone registered on that link ([linkPeerIds]); data without a sender, such as a cloud
+ * document the caller already attributed to a registered peer, is judged by that caller.
+ */
+internal fun mayIngestFrom(role: LinkRole, senderDeviceId: String, linkPeerIds: Set<String>): Boolean = when (role) {
+    LinkRole.SOURCE -> false
+    LinkRole.RECEIVER -> senderDeviceId.isBlank() || senderDeviceId in linkPeerIds
+    LinkRole.MUTUAL -> true
+}
+
+/** A link is dropped when no phone uses it, except one this phone generated: its receiver is not listed as a peer. */
+internal fun keepLinkWhenPruning(role: LinkRole, hasPeer: Boolean): Boolean = hasPeer || role == LinkRole.SOURCE
