@@ -5082,6 +5082,19 @@ class MainActivity : ComponentActivity() {
             var pairingStatusMsg by remember { mutableStateOf("") }
             var generatedCode by remember { mutableStateOf("") }
 
+            // The code is offered until the pairing is approved or denied (both clear the active code and notify the
+            // listeners); then this page has done its job and closes by itself instead of staying until Close is tapped.
+            DisposableEffect(Unit) {
+                val listener = {
+                    if (pairingCodePageShouldClose(generatedCode.isNotEmpty(), AccountDeviceHistoryManager.activePairingCode)) {
+                        showLinkDevicesDialog = false
+                    }
+                    Unit
+                }
+                AccountDeviceHistoryManager.addStateListener(listener)
+                onDispose { AccountDeviceHistoryManager.removeStateListener(listener) }
+            }
+
             AlertDialog(
                 onDismissRequest = { showLinkDevicesDialog = false },
                 title = { Text("Link Another Phone (6-Digit Pairing)", fontWeight = FontWeight.Bold) },

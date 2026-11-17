@@ -2259,6 +2259,14 @@ fun MultiDeviceSettingsCard(
     var showGenerateCodeDialog by remember { mutableStateOf(false) }
     var generatedCode by remember { mutableStateOf("") }
 
+    // The code page only offers the code. Approving or denying the pairing clears the active code, and then the page has
+    // done its job: it closes by itself instead of staying until Done is tapped.
+    LaunchedEffect(refreshTick) {
+        if (pairingCodePageShouldClose(showGenerateCodeDialog, AccountDeviceHistoryManager.activePairingCode)) {
+            showGenerateCodeDialog = false
+        }
+    }
+
     var showEnterCodeDialog by remember { mutableStateOf(false) }
     var enterCodeInput by remember { mutableStateOf("") }
     var enterCodeMessage by remember { mutableStateOf("") }
@@ -3127,3 +3135,11 @@ internal fun mayIngestFrom(role: LinkRole, senderDeviceId: String, linkPeerIds: 
 
 /** A link is dropped when no phone uses it, except one this phone generated: its receiver is not listed as a peer. */
 internal fun keepLinkWhenPruning(role: LinkRole, hasPeer: Boolean): Boolean = hasPeer || role == LinkRole.SOURCE
+
+/**
+ * Whether a page that shows a pairing code has done its job. The code stays active until the pairing is approved or
+ * denied (both clear it), so a shown code with no active code means the pairing is over. A new code replacing the old
+ * one is still an active code, so asking for another code does not close the page.
+ */
+internal fun pairingCodePageShouldClose(codeIsShown: Boolean, activePairingCode: String?): Boolean =
+    codeIsShown && activePairingCode == null
