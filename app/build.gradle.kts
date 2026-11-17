@@ -10,10 +10,10 @@ android {
 
     defaultConfig {
         applicationId = "com.caller"
-        minSdk = 24
+        minSdk = 26
         targetSdk = 35
-        versionCode = 215
-        versionName = "8.10.77"
+        versionCode = 216
+        versionName = "8.10.78"
     }
 
     buildTypes {

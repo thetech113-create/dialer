@@ -21,6 +21,7 @@ const val TWILIO_VOICEMAIL_NUMBER = "+15104910090"
 
 private const val VOICEMAIL_PREFS = "voicemail_prefs"
 private const val KEY_FORWARDING_ENABLED = "forwarding_enabled"
+private const val KEY_VOICEMAIL_KEY = "voicemail_key"
 
 /**
  * Carrier call forwarding to the Twilio number (standard GSM codes):
@@ -65,14 +66,28 @@ object VoicemailForwarding {
     }
 }
 
-/** Twilio voicemails from the server. Signs in with the P2P login key (number check in Profile). */
+/** The voicemail key the owner chose (the voicemail server's VOICEMAIL_KEY secret). Kept on this phone only. */
+internal object VoicemailKeyStore {
+    fun get(context: Context): String? =
+        context.getSharedPreferences(VOICEMAIL_PREFS, Context.MODE_PRIVATE)
+            .getString(KEY_VOICEMAIL_KEY, null)?.takeIf { voicemailKeyProblem(it) == null }
+
+    fun isSet(context: Context): Boolean = get(context) != null
+
+    fun save(context: Context, key: String) {
+        context.getSharedPreferences(VOICEMAIL_PREFS, Context.MODE_PRIVATE)
+            .edit().putString(KEY_VOICEMAIL_KEY, key.trim()).apply()
+    }
+}
+
+/** Twilio voicemails from the server. Signs in with the voicemail key (the server's VOICEMAIL_KEY secret). */
 object VoicemailServerClient {
     fun isAvailable(context: Context): Boolean =
-        VOICEMAIL_SERVER_URL.isNotBlank() && p2pServerToken(context) != null
+        VOICEMAIL_SERVER_URL.isNotBlank() && VoicemailKeyStore.isSet(context)
 
     suspend fun list(context: Context): List<VoicemailItem> = withContext(Dispatchers.IO) {
-        val token = p2pServerToken(context) ?: return@withContext emptyList()
-        val body = request(context, "GET", "/voicemails", token) ?: return@withContext emptyList()
+        if (!isAvailable(context)) return@withContext emptyList()
+        val body = request(context, "GET", "/voicemails") ?: return@withContext emptyList()
         val arr = JSONArray(body)
         (0 until arr.length()).map { i ->
             val o = arr.getJSONObject(i)
@@ -92,13 +107,13 @@ object VoicemailServerClient {
     }
 
     suspend fun markHeard(context: Context, remoteId: String) = withContext(Dispatchers.IO) {
-        val token = p2pServerToken(context) ?: return@withContext
-        runCatching { request(context, "POST", "/voicemails/${enc(remoteId)}/heard", token) }
+        if (!isAvailable(context)) return@withContext
+        runCatching { request(context, "POST", "/voicemails/${enc(remoteId)}/heard") }
     }
 
     suspend fun delete(context: Context, remoteId: String): Boolean = withContext(Dispatchers.IO) {
-        val token = p2pServerToken(context) ?: return@withContext false
-        runCatching { request(context, "DELETE", "/voicemails/${enc(remoteId)}", token) != null }.getOrDefault(false)
+        if (!isAvailable(context)) return@withContext false
+        runCatching { request(context, "DELETE", "/voicemails/${enc(remoteId)}") != null }.getOrDefault(false)
     }
 
     /**
@@ -106,13 +121,13 @@ object VoicemailServerClient {
      * (The system media player can't reach the server on Jio, which blocks *.workers.dev DNS.)
      */
     suspend fun downloadAudio(context: Context, remoteId: String): Uri? = withContext(Dispatchers.IO) {
-        val token = p2pServerToken(context) ?: return@withContext null
+        if (!isAvailable(context)) return@withContext null
         val file = File(context.cacheDir, "voicemail_${remoteId.filter { it.isLetterOrDigit() }}.mp3")
         if (file.length() > 0L) return@withContext Uri.fromFile(file)
         runCatching {
             val req = Request.Builder()
                 .url(VOICEMAIL_SERVER_URL.trimEnd('/') + "/voicemails/${enc(remoteId)}/audio")
-                .header("Authorization", "Bearer $token")
+                .withLogin(context)
                 .build()
             serverHttpClient.newCall(req).execute().use { response ->
                 if (!response.isSuccessful) return@runCatching null
@@ -123,16 +138,23 @@ object VoicemailServerClient {
     }
 
     /** Body text on 2xx (empty for 204), null otherwise. */
-    private fun request(context: Context, method: String, path: String, token: String): String? {
+    private fun request(context: Context, method: String, path: String): String? {
         val req = Request.Builder()
             .url(VOICEMAIL_SERVER_URL.trimEnd('/') + path)
             .method(method, if (method == "POST") ByteArray(0).toRequestBody(null) else null)
-            .header("Authorization", "Bearer $token")
+            .withLogin(context)
             .build()
         serverHttpClient.newCall(req).execute().use { response ->
             if (!response.isSuccessful) return null
             return response.body?.string().orEmpty()
         }
+    }
+
+    private fun Request.Builder.withLogin(context: Context): Request.Builder {
+        VoicemailKeyStore.get(context)?.let { header("X-Voicemail-Key", it) }
+        // A server from before the secret key still reads the P2P login key, so it is sent as well until that server is replaced.
+        p2pServerToken(context)?.let { header("Authorization", "Bearer $it") }
+        return this
     }
 
     private fun enc(s: String) = URLEncoder.encode(s, "UTF-8")

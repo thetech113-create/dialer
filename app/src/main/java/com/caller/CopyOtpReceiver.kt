@@ -28,7 +28,7 @@ class CopyOtpReceiver : BroadcastReceiver() {
             val clip = ClipData.newPlainText("OTP", otpCode)
             clipboard.setPrimaryClip(clip)
 
-            Log.w(TAG, "OTP code copied to clipboard: $otpCode")
+            Log.w(TAG, "OTP code copied to clipboard (${otpCode.length} characters)")
             Toast.makeText(context, "OTP copied: $otpCode", Toast.LENGTH_SHORT).show()
 
             UltraForensicLogger.debug("OTP code successfully copied to clipboard")

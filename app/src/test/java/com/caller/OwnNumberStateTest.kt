@@ -4,8 +4,8 @@ import org.junit.Assert.assertEquals
 import org.junit.Test
 
 class OwnNumberStateTest {
-    private val a = "8431573944"
-    private val b = "9019051474"
+    private val a = "7000011111"
+    private val b = "7000022222"
 
     @Test
     fun notVerifiedAsksAndSuggestsTheSimNumber() {
@@ -17,7 +17,7 @@ class OwnNumberStateTest {
     fun verifiedAndTheSameSimIsLocked() {
         assertEquals(OwnNumberState.Verified(a), decideOwnNumberState(a, listOf(a)))
         // The server may hold the number with the country code.
-        assertEquals(OwnNumberState.Verified(a), decideOwnNumberState("918431573944", listOf(a)))
+        assertEquals(OwnNumberState.Verified(a), decideOwnNumberState("917000011111", listOf(a)))
     }
 
     @Test

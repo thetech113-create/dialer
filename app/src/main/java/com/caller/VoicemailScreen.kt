@@ -27,6 +27,7 @@ import androidx.compose.material.icons.filled.Stop
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.OutlinedButton
+import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.TextButton
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
@@ -46,6 +47,7 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import kotlinx.coroutines.launch
@@ -103,6 +105,7 @@ fun VoicemailScreen(refreshTrigger: Int, modifier: Modifier = Modifier) {
 
     var reloadKey by remember { mutableStateOf(0) }
     var forwardingOn by remember { mutableStateOf(VoicemailForwarding.isEnabled(context)) }
+    var keySaved by remember { mutableStateOf(VoicemailKeyStore.isSet(context)) }
     LaunchedEffect(refreshTrigger, reloadKey) {
         val server = runCatching { VoicemailServerClient.list(context) }.getOrDefault(emptyList())
         voicemails = (VoicemailManager.getLocalVoicemails(context) + VoicemailManager.getVoicemails(context) + server)
@@ -150,7 +153,12 @@ fun VoicemailScreen(refreshTrigger: Int, modifier: Modifier = Modifier) {
         if (VOICEMAIL_SERVER_URL.isNotBlank()) {
             VoicemailForwardingCard(
                 forwardingOn = forwardingOn,
-                signedIn = VoicemailServerClient.isAvailable(context),
+                keySaved = keySaved,
+                onSaveKey = { key ->
+                    VoicemailKeyStore.save(context, key)
+                    keySaved = true
+                    reloadKey++
+                },
                 onTurnOn = { sendForwardingCode(VoicemailForwarding.enableAllCode(), true) },
                 onTurnOff = { sendForwardingCode(VoicemailForwarding.DISABLE_CODE, false) },
                 onNoAnswer = { sendForwardingCode(VoicemailForwarding.noAnswerCode(), true) },
@@ -225,7 +233,8 @@ fun VoicemailScreen(refreshTrigger: Int, modifier: Modifier = Modifier) {
 @Composable
 private fun VoicemailForwardingCard(
     forwardingOn: Boolean,
-    signedIn: Boolean,
+    keySaved: Boolean,
+    onSaveKey: (String) -> Unit,
     onTurnOn: () -> Unit,
     onTurnOff: () -> Unit,
     onNoAnswer: () -> Unit,
@@ -243,14 +252,8 @@ private fun VoicemailForwardingCard(
                 style = MaterialTheme.typography.titleSmall,
                 fontWeight = FontWeight.Bold
             )
-            if (!signedIn) {
-                Spacer(modifier = Modifier.height(4.dp))
-                Text(
-                    text = "Verify your number in Profile to see your messages here.",
-                    style = MaterialTheme.typography.bodySmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant
-                )
-            }
+            Spacer(modifier = Modifier.height(4.dp))
+            VoicemailKeyRow(keySaved = keySaved, onSave = onSaveKey)
             Spacer(modifier = Modifier.height(8.dp))
             Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                 Button(onClick = onTurnOn, modifier = Modifier.weight(1f)) { Text("Turn on") }
@@ -270,6 +273,56 @@ private fun VoicemailForwardingCard(
             }
         }
     }
+}
+
+/** The owner's voicemail key (the server's VOICEMAIL_KEY secret): entered once, kept on this phone only. */
+@Composable
+private fun VoicemailKeyRow(keySaved: Boolean, onSave: (String) -> Unit) {
+    var editing by remember(keySaved) { mutableStateOf(!keySaved) }
+    var keyText by remember { mutableStateOf("") }
+    var problem by remember { mutableStateOf<String?>(null) }
+    if (!editing) {
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            Text(
+                text = "Voicemail key: saved",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                modifier = Modifier.weight(1f)
+            )
+            TextButton(onClick = { editing = true }) { Text("Change") }
+        }
+        return
+    }
+    Text(
+        text = "Enter your voicemail key to see your messages here (the same key you set on the voicemail server).",
+        style = MaterialTheme.typography.bodySmall,
+        color = MaterialTheme.colorScheme.onSurfaceVariant
+    )
+    Spacer(modifier = Modifier.height(4.dp))
+    OutlinedTextField(
+        value = keyText,
+        onValueChange = {
+            keyText = it
+            problem = null
+        },
+        label = { Text("Voicemail key") },
+        singleLine = true,
+        visualTransformation = PasswordVisualTransformation(),
+        isError = problem != null,
+        supportingText = problem?.let { message -> { Text(message) } },
+        modifier = Modifier.fillMaxWidth()
+    )
+    Spacer(modifier = Modifier.height(4.dp))
+    Button(onClick = {
+        val found = voicemailKeyProblem(keyText)
+        if (found != null) {
+            problem = found
+        } else {
+            onSave(keyText.trim())
+            keyText = ""
+            editing = false
+        }
+    }) { Text("Save key") }
 }
 
 @Composable

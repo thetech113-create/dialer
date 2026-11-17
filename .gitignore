@@ -22,3 +22,8 @@ tmp_video_frames/
 .vscode/
 
 
+
+# Release APKs are published as GitHub Release assets (the app updates from there). Committing each 14 MB build
+# had grown .git to 400 MB. Older APKs already in history stay tracked.
+release/*.apk
+/Caller-*.apk

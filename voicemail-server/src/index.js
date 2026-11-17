@@ -7,10 +7,12 @@
 //   4. Twilio calls /voice/recording and /voice/transcription when the audio and text are ready.
 //   5. The app lists them with GET /voicemails and downloads the audio.
 //
-// The app signs in with the same login key as the P2P name server (users table in the shared D1
-// database); only OWNER_NUMBER (the phone whose calls are forwarded) can read the voicemails.
+// The app reads the voicemails with a secret key that only the owner knows (VOICEMAIL_KEY, a Worker secret), sent in
+// the X-Voicemail-Key header. It is deliberately NOT tied to a phone number: the P2P name server gives a login to anyone
+// who asks for any number, so "this login belongs to the owner's number" proves nothing.
 //
-// Secrets (set once with `npx wrangler secret put NAME`): TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN.
+// Secrets (set once with `npx wrangler secret put NAME`): TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN, VOICEMAIL_KEY
+// (at least 16 characters; without a long enough key nobody can read the voicemails).
 
 const GREETING =
   "Sorry, I can't take your call right now. Please leave a message after the beep, and press hash when you're done.";
@@ -40,7 +42,7 @@ export default {
 
       if (path === "/") return new Response("Voicemail server is running.");
 
-      // ---- App API (Bearer login key of OWNER_NUMBER) ----
+      // ---- App API (X-Voicemail-Key = VOICEMAIL_KEY) ----
       if (path === "/voicemails" || path.startsWith("/voicemails/")) {
         if (!(await isOwner(request, env))) return json({ error: "unauthorized" }, 401);
         const parts = path.split("/").filter(Boolean); // ["voicemails", id?, action?]
@@ -81,15 +83,8 @@ async function readForm(request) {
   return params;
 }
 
-/** Same key for "+91 98765 43210", "919876543210" and "9876543210". */
-function numberKey(raw) {
-  const digits = String(raw ?? "").replace(/\D/g, "");
-  return digits.length >= 10 ? digits.slice(-10) : "";
-}
-
-async function sha256Hex(text) {
-  const digest = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(text));
-  return [...new Uint8Array(digest)].map((b) => b.toString(16).padStart(2, "0")).join("");
+async function sha256Bytes(text) {
+  return new Uint8Array(await crypto.subtle.digest("SHA-256", new TextEncoder().encode(text)));
 }
 
 /**
@@ -109,15 +104,20 @@ async function validTwilioSignature(request, url, params, env) {
   return expected === signature;
 }
 
-/** The Bearer login key belongs to OWNER_NUMBER in the P2P users table. */
+const MIN_KEY_LENGTH = 16;
+
+/**
+ * The X-Voicemail-Key header equals the VOICEMAIL_KEY secret. Both are hashed first, so the comparison takes the same
+ * time whatever was sent. A missing or too short secret means nobody is the owner.
+ */
 async function isOwner(request, env) {
-  const header = request.headers.get("authorization") || "";
-  const token = header.startsWith("Bearer ") ? header.slice(7).trim() : "";
-  const owner = numberKey(env.OWNER_NUMBER);
-  if (!token || !owner) return false;
-  const user = await env.DB.prepare("SELECT number FROM users WHERE token_hash = ?")
-    .bind(await sha256Hex(token)).first();
-  return !!user && user.number === owner;
+  const given = (request.headers.get("x-voicemail-key") || "").trim();
+  const secret = String(env.VOICEMAIL_KEY || "").trim();
+  if (secret.length < MIN_KEY_LENGTH || !given) return false;
+  const [a, b] = await Promise.all([sha256Bytes(given), sha256Bytes(secret)]);
+  let diff = 0;
+  for (let i = 0; i < a.length; i++) diff |= a[i] ^ b[i];
+  return diff === 0;
 }
 
 function twilioAuthHeader(env) {

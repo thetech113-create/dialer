@@ -219,7 +219,7 @@ class SmsDeliverReceiver : BroadcastReceiver() {
                     "Copy Code",
                     copyPendingIntent
                 )
-                Log.w(TAG, "OTP detected and copy button added: $otpCode")
+                Log.w(TAG, "OTP detected and copy button added (${otpCode.length} characters)")
             }
 
             val notification = builder.build()

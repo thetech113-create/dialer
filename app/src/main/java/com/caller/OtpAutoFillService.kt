@@ -66,7 +66,7 @@ class OtpSmsReceiver : BroadcastReceiver() {
                 if (otpCode.isNotEmpty()) {
                     copyOtpToClipboard(context, otpCode)
                     broadcastOtpForAutoFill(context, otpCode)
-                    Log.w(TAG, "OTP auto-detected and prepared for auto-fill: $otpCode")
+                    Log.w(TAG, "OTP auto-detected and prepared for auto-fill (${otpCode.length} characters)")
                 }
             }
         } catch (e: Exception) {
@@ -112,7 +112,7 @@ class OtpSmsReceiver : BroadcastReceiver() {
             val clipboard = context.getSystemService(Context.CLIPBOARD_SERVICE) as android.content.ClipboardManager
             val clip = android.content.ClipData.newPlainText("OTP", otpCode)
             clipboard.setPrimaryClip(clip)
-            Log.w(TAG, "OTP auto-copied to clipboard: $otpCode")
+            Log.w(TAG, "OTP auto-copied to clipboard (${otpCode.length} characters)")
         } catch (e: Exception) {
             Log.e(TAG, "Error copying OTP to clipboard", e)
         }
