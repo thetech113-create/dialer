@@ -133,10 +133,10 @@ object RoleManagerEnhancements {
         try {
             val telecomManager = context.getSystemService(Context.TELECOM_SERVICE) as TelecomManager
             
-            // Force refresh by accessing the property multiple times
+            // Read the property a few times. No sleeping: this runs on the main thread inside onCallAdded, before the
+            // incoming call screen is started.
             repeat(3) {
                 telecomManager.defaultDialerPackage
-                Thread.sleep(100)
             }
             
             Log.w(TAG, "Role cache refreshed")

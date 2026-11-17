@@ -2029,7 +2029,12 @@ class MyInCallService : InCallService() {
             }
 
             override fun onUnbind(intent: Intent?): Boolean {
-                Log.w(P2P_FORENSIC_TAG, "incall_service_onUnbind: Telecom unbinding — allowing clean framework teardown")
+                // onUnbind runs for every binding of this service: Telecom's and its own keep-alive binding. The action tells
+                // them apart, and the live-call count shows whether a call was still running.
+                Log.w(
+                    P2P_FORENSIC_TAG,
+                    "incall_service_onUnbind action=${intent?.action ?: "none"} selfKeepAlive=${intent?.action == ACTION_START_INCALL_KEEPALIVE} liveCalls=${getLiveCalls().size} — allowing clean framework teardown"
+                )
                 return super.onUnbind(intent)
             }
 
@@ -2082,8 +2087,8 @@ class MyInCallService : InCallService() {
                 android.util.Log.e("OEM_FALLBACK_TRACE", "=====================================================================")
         android.util.Log.e("OEM_FALLBACK_TRACE", "ULTRA SUPREME FORENSIC INFLOP PROFESSION LOGGING")
                 android.util.Log.e("OEM_FALLBACK_TRACE", "MyInCallService: onDestroy TRIGGERED!")
-                android.util.Log.e("OEM_FALLBACK_TRACE", "Our Service process is being MURDERED by Ultra Battery Saver mode.")
-                android.util.Log.e("OEM_FALLBACK_TRACE", "Because we died, TelecomManager will revive the OEM Dialer as a fail-safe.")
+                android.util.Log.e("OEM_FALLBACK_TRACE", if (getLiveCalls().isNotEmpty() || isTelecomFrameworkInCall()) "Service destroyed while a call is still live (the cause is not established here; see service_oem_fallback_probe)." else "Service destroyed after the last call ended: normal Telecom teardown.")
+                android.util.Log.e("OEM_FALLBACK_TRACE", "onDestroy state: liveCalls=${getLiveCalls().size} telecomInCall=${isTelecomFrameworkInCall()} powerSave=${isPowerSaveModeEnabledForDiagnostics()}")
                 android.util.Log.e("OEM_FALLBACK_TRACE", "=====================================================================")
                 
                 // COMPREHENSIVE CLEANUP AND OEM FALLBACK DETECTION
@@ -3035,7 +3040,7 @@ class MyInCallService : InCallService() {
         android.util.Log.e("OEM_FALLBACK_TRACE", "ULTRA SUPREME FORENSIC INFLOP PROFESSION LOGGING")
                 android.util.Log.e("OEM_FALLBACK_TRACE", "MyInCallService: onCallRemoved TRIGGERED!")
                 android.util.Log.e("OEM_FALLBACK_TRACE", "Call State at Removal: ${call.state}")
-                android.util.Log.e("OEM_FALLBACK_TRACE", "If state is NOT Disconnected, the OS is stripping the call from us!")
+                android.util.Log.e("OEM_FALLBACK_TRACE", if (call.state == Call.STATE_DISCONNECTED) "Call ended normally (state DISCONNECTED)." else "Call removed while its state was ${call.state}, not DISCONNECTED (the cause is not established here).")
                 android.util.Log.e("OEM_FALLBACK_TRACE", "=====================================================================")
                 super.onCallRemoved(call)
 
@@ -3102,7 +3107,7 @@ class MyInCallService : InCallService() {
                     UltraForensicLogger.ultra(
                         "MyInCallService", 
                         "OEM_FALLBACK_PREVENTION", 
-                        "ULTRA SUPREME FORENSIC INFLOP PROFESSION LOGGING: Call removed but state is ${call.state}. Transient unbind detected (Ultra Battery Saver). Blocking OEM fallback!"
+                        "Call removed but its state is ${call.state}, not DISCONNECTED. The cause is not established here; the removal is treated as not final."
                     )
                 }
                 val timerKey = callTimerKeyAliases.remove(callId).orEmpty().ifBlank { resolveCallTimerStateKey(call) }
@@ -3131,7 +3136,7 @@ class MyInCallService : InCallService() {
                         UltraForensicLogger.ultra(
                             "MyInCallService", 
                             "OEM_FALLBACK_PREVENTION", 
-                            "ULTRA SUPREME FORENSIC INFLOP PROFESSION LOGGING: liveCalls empty but not disconnected. Bypassing teardown to preserve ownership during Ultra Battery Saver mode switch."
+                            "No live call remains but the removed call was not DISCONNECTED (state ${call.state}); teardown is skipped for this removal."
                         )
                     }
                 } else {
@@ -3615,6 +3620,35 @@ class MyInCallService : InCallService() {
                 )
             }
 
+            /**
+             * Observes only. Records what was really posted for an incoming call (the number of Answer/Decline actions, the
+             * permissions that decide whether the full screen can show) and, two seconds after the full screen was
+             * requested, whether the call screen is in fact visible and which app is in front. A start request that Android
+             * refuses does not throw, so this is the only proof that the screen reached the user.
+             */
+            private fun logIncomingUiEvidence(notification: android.app.Notification, fullScreenRequested: Boolean, policyReason: String) {
+                val notificationManager = getSystemService(NotificationManager::class.java)
+                val canUseFullScreen = if (Build.VERSION.SDK_INT >= 34) notificationManager?.canUseFullScreenIntent() else null
+                Log.w(
+                    P2P_FORENSIC_TAG,
+                    "incoming_notification_built actions=${notification.actions?.size ?: 0} fullScreenRequested=$fullScreenRequested " +
+                        "canUseFullScreenIntent=${canUseFullScreen ?: "n/a"} notificationsEnabled=${notificationManager?.areNotificationsEnabled()} " +
+                        "usageAccess=${isUsageAccessGranted(this)} overlayPermission=${android.provider.Settings.canDrawOverlays(this)} policyReason=$policyReason"
+                )
+                if (!fullScreenRequested) return
+                val checkAfterMs = 2000L
+                Handler(Looper.getMainLooper()).postDelayed({
+                    if (getLiveCalls().none { it.state == Call.STATE_RINGING }) return@postDelayed
+                    val visible = CallBubbleOverlay.isCallActivityVisible
+                    val foreground = if (visible) packageName else getForegroundPackageName().ifBlank { "unknown" }
+                    val defaultDialer = runCatching { resolveDefaultDialerPackage(this) }.getOrDefault("")
+                    Log.w(
+                        P2P_FORENSIC_TAG,
+                        "incoming_ui_visibility_check afterMs=$checkAfterMs callActivityVisible=$visible foreground=$foreground defaultDialer=$defaultDialer policyReason=$policyReason"
+                    )
+                }, checkAfterMs)
+            }
+
             private fun showIncomingCallNotification(phoneNumber: String, contactName: String) {
                 Log.e("CMF_RINGTONE_DEBUG", "=== showIncomingCallNotification CALLED ===")
                 Log.e("CMF_RINGTONE_DEBUG", "Phone: $phoneNumber, Name: $contactName")
@@ -3704,7 +3738,7 @@ class MyInCallService : InCallService() {
                     builder.setFullScreenIntent(fullScreenPendingIntent, true)
                     Log.w(
                         P2P_FORENSIC_TAG,
-                        "incoming_fullscreen_execution source=MyInCallService.showIncomingCallNotification action=attach reason=${incomingDecision.policy.reason} notificationSurface=fullscreen_without_actions"
+                        "incoming_fullscreen_execution source=MyInCallService.showIncomingCallNotification action=attach reason=${incomingDecision.policy.reason} notificationSurface=fullscreen_intent_attached"
                     )
                     launchCallUI(
                         reason = "incoming_allowed:${incomingDecision.policy.reason}",
@@ -3727,6 +3761,7 @@ class MyInCallService : InCallService() {
                 }
 
                 val notification = builder.build().applyLockedForegroundFlags()
+                logIncomingUiEvidence(notification, allowFullScreen, incomingDecision.policy.reason)
 
                 try {
                     startCallForeground(notification)

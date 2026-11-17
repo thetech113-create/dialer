@@ -106,8 +106,8 @@ object InCallServiceEnhancements {
             
             if (!isIgnoring) {
                 Log.w(TAG, "Battery optimization not whitelisted - OEM Doze mode fallback risk")
-                // Attempt to request exemption (requires user approval)
-                requestBatteryOptimizationExemption(context)
+                // Only reported here. The exemption is asked for from the app's own screens (MainActivity and its Settings
+                // card): starting the system screen from a call would put it in front of the incoming call.
             }
             
             isIgnoring
@@ -160,7 +160,7 @@ object InCallServiceEnhancements {
             // MyInCallService already owns the real call notification/foreground entry.
             // Posting a second backup notification here creates an unwanted duplicate
             // swipe-away "Incoming Call" card.
-            Log.w(TAG, "UI display guarantee activated - direct launch only")
+            Log.w(TAG, "UI start requested (direct launch only); whether the screen became visible is recorded by incoming_ui_visibility_check")
             
         } catch (e: Exception) {
             Log.e(TAG, "UI display guarantee failed", e)
@@ -217,19 +217,6 @@ object InCallServiceEnhancements {
             Log.w(TAG, "Process wake lock acquired")
         } catch (e: Exception) {
             Log.e(TAG, "Wake lock acquisition failed", e)
-        }
-    }
-
-    private fun requestBatteryOptimizationExemption(context: Context) {
-        try {
-            val intent = Intent(android.provider.Settings.ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS).apply {
-                data = android.net.Uri.parse("package:${context.packageName}")
-                flags = Intent.FLAG_ACTIVITY_NEW_TASK
-            }
-            context.startActivity(intent)
-            Log.w(TAG, "Battery optimization exemption request sent")
-        } catch (e: Exception) {
-            Log.e(TAG, "Battery exemption request failed", e)
         }
     }
 
