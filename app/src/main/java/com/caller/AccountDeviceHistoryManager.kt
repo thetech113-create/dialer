@@ -2698,7 +2698,13 @@ fun MultiDeviceSettingsCard(
                     ) {
                         Column(modifier = Modifier.weight(1f)) {
                             Text(text = pc.name, style = MaterialTheme.typography.bodyMedium, fontWeight = FontWeight.SemiBold)
-                            Text(text = "Paired PC", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                            // A pairing is kept when the PC is out of range; only a live link is "Connected".
+                            val pcConnected = pcRowIsConnected(pc.id, LinkState.connectedPcId)
+                            Text(
+                                text = pcRowStatusText(pcConnected),
+                                style = MaterialTheme.typography.labelSmall,
+                                color = if (pcConnected) Color(0xFF2E7D32) else MaterialTheme.colorScheme.onSurfaceVariant
+                            )
                         }
                         TextButton(onClick = {
                             linkPrefs.remove(pc.id)

@@ -16,6 +16,9 @@ class PcPairRequest(val pcName: String, val sas: String) {
 object LinkState {
     var running by mutableStateOf(false)
     var connectedPc by mutableStateOf<String?>(null)
+
+    /** The id of the PC connected right now (null when none), so the paired-PC list can show which one is live. */
+    var connectedPcId by mutableStateOf<String?>(null)
     var pairRequest by mutableStateOf<PcPairRequest?>(null)
     var error by mutableStateOf<String?>(null)
 

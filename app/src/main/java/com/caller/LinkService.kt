@@ -177,6 +177,7 @@ class LinkService : Service(), LinkServer.Listener {
         LinkState.server = null
         LinkState.running = false
         LinkState.connectedPc = null
+        LinkState.connectedPcId = null
         if (stopping != null) thread { stopping.stop() }
         multicastLock?.let { if (it.isHeld) it.release() }
         ringtone?.stop()
@@ -238,6 +239,7 @@ class LinkService : Service(), LinkServer.Listener {
 
     override fun onConnected(pcId: String, pcName: String) {
         LinkState.connectedPc = pcName
+        LinkState.connectedPcId = pcId
         LinkState.pairingsVersion++
         refreshStatusNotification()
         sendStatus()
@@ -248,6 +250,7 @@ class LinkService : Service(), LinkServer.Listener {
     override fun onDisconnected() {
         callAudio.stop()
         LinkState.connectedPc = null
+        LinkState.connectedPcId = null
         refreshStatusNotification()
     }
 
