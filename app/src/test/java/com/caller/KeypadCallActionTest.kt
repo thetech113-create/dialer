@@ -82,3 +82,49 @@ class KeypadClearAfterCallTest {
         assertFalse(keypadShowsDialedNumber("9876543210", ""))
     }
 }
+
+class DeferredKeypadClearTest {
+    @Test
+    fun theKeypadIsClearedOnlyOnceItIsHidden() {
+        val clear = DeferredKeypadClear()
+        clear.request("9876543210", "9876543210")
+        // Nothing is returned until the keypad is hidden, so the keypad cannot be seen empty before the call screen opens.
+        assertEquals("", clear.digitsOnceHidden("9876543210"))
+    }
+
+    @Test
+    fun aCallThatDidNotStartKeepsTheNumber() {
+        val clear = DeferredKeypadClear()
+        clear.request("9876543210", "9876543210")
+        clear.cancel()
+        assertEquals("9876543210", clear.digitsOnceHidden("9876543210"))
+    }
+
+    @Test
+    fun hidingTheKeypadWithNoCallPlacedChangesNothing() {
+        assertEquals("98765", DeferredKeypadClear().digitsOnceHidden("98765"))
+    }
+
+    @Test
+    fun aCallToAnotherNumberLeavesTheKeypadAlone() {
+        val clear = DeferredKeypadClear()
+        clear.request("98765", "9123456789")
+        assertEquals("98765", clear.digitsOnceHidden("98765"))
+    }
+
+    @Test
+    fun aNumberTypedAfterTheCallIsNotCleared() {
+        val clear = DeferredKeypadClear()
+        clear.request("9876543210", "9876543210")
+        assertEquals("1234", clear.digitsOnceHidden("1234"))
+    }
+
+    @Test
+    fun theClearHappensOnlyOnce() {
+        val clear = DeferredKeypadClear()
+        clear.request("9876543210", "9876543210")
+        assertEquals("", clear.digitsOnceHidden("9876543210"))
+        // The next time the keypad is hidden (a later visit), a number typed meanwhile stays.
+        assertEquals("9876543210", clear.digitsOnceHidden("9876543210"))
+    }
+}

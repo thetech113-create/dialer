@@ -962,6 +962,7 @@ class MainActivity : ComponentActivity() {
     private var duplicatesRemaining by mutableStateOf(0)
     private var activeMergedContactEntry by mutableStateOf<ContactDisplayEntry?>(null)
     private var isMainActivityVisible = false
+    private val deferredKeypadClear = DeferredKeypadClear()
     private var inCallStateListenerRef: ((UnifiedCallState) -> Unit)? = null
     private var showBatteryOptimizationPrompt by mutableStateOf(false)
     private var showXiaomiOtherPermissionsPrompt by mutableStateOf(false)
@@ -2082,6 +2083,11 @@ class MainActivity : ComponentActivity() {
         super.onStop()
         isMainActivityVisible = false
         incomingUiGateMainVisible = false
+        // The keypad is out of sight now (the call screen is over it): empty it if its number was just dialed.
+        val keypadDigits = deferredKeypadClear.digitsOnceHidden(uiState.recentDialpadDigits)
+        if (keypadDigits != uiState.recentDialpadDigits) {
+            uiState = uiState.copy(recentDialpadDigits = keypadDigits)
+        }
         Log.w(
             P2P_FORENSIC_TAG,
             "main_lifecycle action=onStop selectedTab=${uiState.selectedTab} powerSaveMode=${uiState.isPowerSaveMode} dialpadVisible=${uiState.recentDialpadVisible} digits=${maskP2PNumberForLog(uiState.recentDialpadDigits)}"
@@ -3755,11 +3761,10 @@ class MainActivity : ComponentActivity() {
                 isVideoCall = isVideoCall
             )
         )
-        // The number on the keypad was just dialed: leave the keypad empty for the next call. A call that never gets here
+        // The number on the keypad was just dialed: the keypad is emptied for the next call, but only once it is out of
+        // sight (onStop), so an empty keypad never shows before the call screen opens. A call that never gets here
         // (invalid number, no permission, SIM choice cancelled) keeps its number on the keypad.
-        if (keypadShowsDialedNumber(uiState.recentDialpadDigits, dialableNumber)) {
-            uiState = uiState.copy(recentDialpadDigits = "")
-        }
+        deferredKeypadClear.request(uiState.recentDialpadDigits, dialableNumber)
 
         InCallServiceEnhancements.warmUpProcess(this)
         startActivity(Intent(this, CallActivity::class.java).apply {
@@ -3810,10 +3815,14 @@ class MainActivity : ComponentActivity() {
         try {
             if (hasCallPhonePermission()) {
                 telecomManager.placeCall(finalUri, extras)
+            } else {
+                deferredKeypadClear.cancel()
             }
         } catch (e: SecurityException) {
+            deferredKeypadClear.cancel()
             showError("Permission denied to place call")
         } catch (e: Exception) {
+            deferredKeypadClear.cancel()
             showError("Failed to start call")
         }
     }

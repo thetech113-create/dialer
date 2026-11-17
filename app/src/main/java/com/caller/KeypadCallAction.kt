@@ -31,3 +31,28 @@ internal fun keypadShowsDialedNumber(keypadDigits: String, dialedNumber: String)
     val dialed = sanitizePhoneNumberForCall(dialedNumber)
     return dialed.isNotEmpty() && sanitizePhoneNumberForCall(keypadDigits) == dialed
 }
+
+/**
+ * Clears the keypad after a call, but only once the keypad is out of sight. Clearing at the moment the call is placed
+ * showed an empty keypad for a moment, before the call screen had opened over it.
+ */
+internal class DeferredKeypadClear {
+    private var dialedNumber: String? = null
+
+    /** A call to [dialed] is being placed. Remembers to clear the keypad later if it holds that number. */
+    fun request(keypadDigits: String, dialed: String) {
+        dialedNumber = if (keypadShowsDialedNumber(keypadDigits, dialed)) dialed else null
+    }
+
+    /** The call did not start: the number stays on the keypad. */
+    fun cancel() {
+        dialedNumber = null
+    }
+
+    /** The keypad is no longer visible. Returns the digits it should hold from now on. */
+    fun digitsOnceHidden(keypadDigits: String): String {
+        val dialed = dialedNumber ?: return keypadDigits
+        dialedNumber = null
+        return if (keypadShowsDialedNumber(keypadDigits, dialed)) "" else keypadDigits
+    }
+}
