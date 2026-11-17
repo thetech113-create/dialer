@@ -862,6 +862,7 @@ object AccountDeviceHistoryManager {
                 // Poll Cloud KV for incoming PairRequest from Phone 2
                 val reqEndpoint = cloudTopicUrl("req_$code")
                 val deadline = System.currentTimeMillis() + 120_000L
+                var lastRequestLog = ""
                 while (System.currentTimeMillis() < deadline && activePairingCode == code) {
                     delay(1500L)
                     runCatching {
@@ -870,6 +871,15 @@ object AccountDeviceHistoryManager {
                             val pairReq = PairRequest.fromWire(getRes.body!!)
                             if (pairReq != null) {
                                 val handleRes = host.handleRequest(pairReq)
+                                // Proof for "the approval prompt did not come": what happened to the request that arrived.
+                                val requestLog = when (handleRes) {
+                                    is PairingHost.RequestResult.Accepted -> "waiting for approval, ${host.pendingRequests().size} prompt(s)"
+                                    is PairingHost.RequestResult.Rejected -> "refused: ${handleRes.reason}"
+                                }
+                                if (requestLog != lastRequestLog) {
+                                    lastRequestLog = requestLog
+                                    Log.w(TAG, "Pairing request from the joining phone: $requestLog")
+                                }
                                 val joinerKnowsLinks = runCatching {
                                     JSONObject(getRes.body!!).optBoolean("linkCapable", false)
                                 }.getOrDefault(false)

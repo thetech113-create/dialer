@@ -163,10 +163,9 @@ class PairingHost(
         val code = activeCode ?: return RequestResult.Rejected("no active offer")
         val devId = "dev_" + Crypto.publicKeyFingerprint(req.publicKey)
 
-        // Do not recreate pending approval dialog if device is already approved or handled
-        if (trustStore.getApprovedPeer(devId) != null) {
-            return RequestResult.Accepted("already_approved_$devId")
-        }
+        // Answered already in THIS offer (approved or denied): do not ask again while the host keeps polling. This host
+        // object is new for every code, so a phone approved by an EARLIER pairing is not in this set and is asked again:
+        // the code was entered just now, and the saved trust must not turn that into a request nobody is asked about.
         if (handledDevIds.contains(devId)) {
             return RequestResult.Rejected("request already handled for device $devId")
         }
