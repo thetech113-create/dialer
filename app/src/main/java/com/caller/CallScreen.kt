@@ -2224,6 +2224,8 @@ class CallActivity : ComponentActivity() {
         CallBubbleOverlay.hide(this)
         logCall("InCallActivity.onResume hasActiveCall=${hasLiveCall()}")
         logCallActivityLifecycle("onResume")
+        // Once this screen has been drawn, the keypad under it (this theme is translucent) can change out of sight.
+        CallScreenShown.announceAfterNextDraw(window.decorView)
     }
 
     override fun onPause() {

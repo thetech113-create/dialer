@@ -963,6 +963,7 @@ class MainActivity : ComponentActivity() {
     private var activeMergedContactEntry by mutableStateOf<ContactDisplayEntry?>(null)
     private var isMainActivityVisible = false
     private val deferredKeypadClear = DeferredKeypadClear()
+    private val callScreenDrawnListener: () -> Unit = { applyDeferredKeypadClear("call_screen_drawn") }
     private var inCallStateListenerRef: ((UnifiedCallState) -> Unit)? = null
     private var showBatteryOptimizationPrompt by mutableStateOf(false)
     private var showXiaomiOtherPermissionsPrompt by mutableStateOf(false)
@@ -1254,6 +1255,7 @@ class MainActivity : ComponentActivity() {
         super.onResume()
         isMainActivityVisible = true
         incomingUiGateMainVisible = true
+        applyDeferredKeypadClear("onResume")
 
         // Every time the app comes to the front (not only first start): right after Clear data Android can
         // refuse the system block list for a moment, so a later resume must still restore the blocks.
@@ -1296,6 +1298,7 @@ class MainActivity : ComponentActivity() {
         UltraForensicLogger.init(this)
         requestWindowFeature(Window.FEATURE_NO_TITLE)
         super.onCreate(savedInstanceState)
+        CallScreenShown.add(callScreenDrawnListener)
         if (intent?.action == "android.telecom.action.POST_CALL" ||
             intent?.action == POWER_END_RECOVERY_ACTION
         ) {
@@ -2055,6 +2058,7 @@ class MainActivity : ComponentActivity() {
     }
 
     override fun onDestroy() {
+        CallScreenShown.remove(callScreenDrawnListener)
         isMainActivityVisible = false
         incomingUiGateMainVisible = false
         AccountDeviceHistoryManager.removeStateListener(accountHistoryListener)
@@ -2083,15 +2087,25 @@ class MainActivity : ComponentActivity() {
         super.onStop()
         isMainActivityVisible = false
         incomingUiGateMainVisible = false
-        // The keypad is out of sight now (the call screen is over it): empty it if its number was just dialed.
-        val keypadDigits = deferredKeypadClear.digitsOnceHidden(uiState.recentDialpadDigits)
-        if (keypadDigits != uiState.recentDialpadDigits) {
-            uiState = uiState.copy(recentDialpadDigits = keypadDigits)
-        }
+        // Fallback: if the call screen never announced itself, the keypad is out of sight now anyway.
+        applyDeferredKeypadClear("onStop")
         Log.w(
             P2P_FORENSIC_TAG,
             "main_lifecycle action=onStop selectedTab=${uiState.selectedTab} powerSaveMode=${uiState.isPowerSaveMode} dialpadVisible=${uiState.recentDialpadVisible} digits=${maskP2PNumberForLog(uiState.recentDialpadDigits)}"
         )
+    }
+
+    /**
+     * Empties the keypad if its number was just dialed. Runs once the call screen has been drawn over the keypad (the call
+     * screen is translucent, so the keypad is never stopped while the call screen is on top), with onStop and onResume as
+     * a fallback so the number can never stay behind.
+     */
+    private fun applyDeferredKeypadClear(source: String) {
+        val keypadDigits = deferredKeypadClear.digitsOnceHidden(uiState.recentDialpadDigits)
+        if (keypadDigits != uiState.recentDialpadDigits) {
+            uiState = uiState.copy(recentDialpadDigits = keypadDigits)
+            Log.w(P2P_FORENSIC_TAG, "keypad_clear action=cleared source=$source")
+        }
     }
 
     override fun onTrimMemory(level: Int) {

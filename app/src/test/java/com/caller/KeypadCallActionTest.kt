@@ -128,3 +128,41 @@ class DeferredKeypadClearTest {
         assertEquals("9876543210", clear.digitsOnceHidden("9876543210"))
     }
 }
+
+class CallScreenShownTest {
+    @Test
+    fun everyListenerIsToldWhenTheCallScreenIsShown() {
+        var first = 0
+        var second = 0
+        val a: () -> Unit = { first++ }
+        val b: () -> Unit = { second++ }
+        CallScreenShown.add(a)
+        CallScreenShown.add(b)
+        CallScreenShown.notifyShown()
+        CallScreenShown.remove(a)
+        CallScreenShown.remove(b)
+        assertEquals(1, first)
+        assertEquals(1, second)
+    }
+
+    @Test
+    fun aRemovedListenerIsNotToldAgain() {
+        var calls = 0
+        val listener: () -> Unit = { calls++ }
+        CallScreenShown.add(listener)
+        CallScreenShown.remove(listener)
+        CallScreenShown.notifyShown()
+        assertEquals(0, calls)
+    }
+
+    @Test
+    fun theSameListenerAddedTwiceIsToldOnce() {
+        var calls = 0
+        val listener: () -> Unit = { calls++ }
+        CallScreenShown.add(listener)
+        CallScreenShown.add(listener)
+        CallScreenShown.notifyShown()
+        CallScreenShown.remove(listener)
+        assertEquals(1, calls)
+    }
+}
