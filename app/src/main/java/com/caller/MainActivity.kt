@@ -7283,7 +7283,6 @@ class MainActivity : ComponentActivity() {
         val configuration = LocalConfiguration.current
         val screenHeight = configuration.screenHeightDp
         val canRedial = phoneNumber.isEmpty() && lastRecentNumber.isNotBlank()
-        val callTargetNumber = if (phoneNumber.isNotEmpty()) phoneNumber else lastRecentNumber
 
         val buttonSize = if (screenHeight < 700) 62.dp else 72.dp
         val rowSpacing = if (screenHeight < 700) 10.dp else 14.dp
@@ -7526,8 +7525,12 @@ class MainActivity : ComponentActivity() {
                             .clip(CircleShape)
                             .background(OneUi.CallGreen)
                             .clickable {
-                                if (callTargetNumber.isNotBlank()) {
-                                    onCall(callTargetNumber)
+                                when (val action = keypadCallAction(phoneNumber, lastRecentNumber)) {
+                                    is KeypadCallAction.Dial -> onCall(action.number)
+                                    // Redial: the first tap only puts the last number on the keypad, so it can be checked
+                                    // or edited; the next tap dials it.
+                                    is KeypadCallAction.ShowLastNumber -> onPhoneNumberChange(action.number)
+                                    KeypadCallAction.Nothing -> Unit
                                 }
                             },
                         contentAlignment = Alignment.Center
