@@ -1629,6 +1629,10 @@ class CallActivity : ComponentActivity() {
     private var finishReceiver: BroadcastReceiver? = null
     private var isFinishingCallUi = false
     @Volatile private var isEndCallRequested = false
+    // The call session this screen shows (CallUiSession.kt). When a different session arrives, the call it showed is over.
+    private var ownSessionId: String = ""
+    // Changing this key makes Compose build the whole call screen again, so no state of the old call survives into the new.
+    private val uiGeneration = androidx.compose.runtime.mutableIntStateOf(0)
 
     private fun logCall(msg: String) {
         Log.e(
@@ -1657,6 +1661,14 @@ class CallActivity : ComponentActivity() {
             telephonyState == TelephonyManager.CALL_STATE_RINGING ||
             telephonyState == TelephonyManager.CALL_STATE_OFFHOOK
     }
+
+    /** The session a launch is for: the id it carries, else the service's current one (a launch from a notification has none). */
+    private fun sessionIdOf(intent: Intent?): String =
+        intent?.getStringExtra(CALL_UI_EXTRA_SESSION_ID).orEmpty().ifBlank { MyInCallService.currentCallUiSessionId() }
+
+    /** The saved call snapshot, only if it belongs to the session this screen shows. */
+    private fun stickySnapshotForThisCall(): UnifiedCallState? =
+        MyInCallService.peekLastCallUiSnapshot()?.takeIf { stickySnapshotBelongsToSession(it.sessionId, ownSessionId) }
 
     private fun logCallActivityLifecycle(event: String, extra: String = "") {
         val sticky = MyInCallService.peekLastCallUiSnapshot()
@@ -1744,7 +1756,7 @@ class CallActivity : ComponentActivity() {
 
     private fun updateSeededCallState(intent: Intent?) {
         val intentSeed = intent.toSeedCallUiState()
-        val stickySeed = MyInCallService.peekLastCallUiSnapshot()?.toCallUiState() ?: CallState()
+        val stickySeed = stickySnapshotForThisCall()?.toCallUiState() ?: CallState()
         val liveCallSeed = when {
             intentSeed.isInCall || stickySeed.isInCall -> CallState()
             hasLiveCall() -> {
@@ -1818,9 +1830,21 @@ class CallActivity : ComponentActivity() {
             return
         }
         isFinishingCallUi = false
+        // A call of a NEW session reaches this instance (it is kept alive between calls): nothing of the old call is reused.
+        val incomingSessionId = sessionIdOf(intent)
+        val newSession = callUiSessionChanged(ownSessionId, incomingSessionId)
+        if (newSession) {
+            Log.w(
+                CALL_UI_FORENSIC_TAG,
+                "call_ui_session action=reset old=$ownSessionId new=$incomingSessionId endRequestedBefore=$isEndCallRequested"
+            )
+            isEndCallRequested = false
+        }
+        if (ownSessionId.isBlank() || newSession) ownSessionId = incomingSessionId
         // Update activity's intent so action checks in CallingScreen work
         setIntent(intent)
         updateSeededCallState(intent)
+        if (newSession) uiGeneration.intValue++
         @Suppress("DEPRECATION")
         overridePendingTransition(0, 0)
 
@@ -1863,6 +1887,8 @@ class CallActivity : ComponentActivity() {
             finishCallUiAfterCall("create_terminal_intent")
             return
         }
+        ownSessionId = sessionIdOf(intent)
+        Log.w(CALL_UI_FORENSIC_TAG, "call_ui_session action=open id=$ownSessionId")
         updateSeededCallState(intent)
 
         try {
@@ -1934,6 +1960,7 @@ class CallActivity : ComponentActivity() {
         
         // Set up call UI
         setContent {
+            androidx.compose.runtime.key(uiGeneration.intValue) {
             CallerTheme {
                 val seededState = seededCallState.value
                 var callState by remember { mutableStateOf(seededState) }
@@ -2008,7 +2035,7 @@ class CallActivity : ComponentActivity() {
 
                     delay(if (seededState.isDialing) 2500L else 1200L)
 
-                    val stickyLiveState = MyInCallService.peekLastCallUiSnapshot()?.toCallUiState()
+                    val stickyLiveState = stickySnapshotForThisCall()?.toCallUiState()
                     val stillStale =
                         !callState.isInCall &&
                             !terminalState.isTerminal &&
@@ -2034,7 +2061,7 @@ class CallActivity : ComponentActivity() {
                     val uiListener: (UnifiedCallState) -> Unit = { stateObj ->
                         runOnUiThread {
                             val newState = stateObj.toCallUiState()
-                            val stickyLiveState = MyInCallService.peekLastCallUiSnapshot()?.toCallUiState()
+                            val stickyLiveState = stickySnapshotForThisCall()?.toCallUiState()
                             val shouldHoldForRecovery =
                                 !newState.isInCall &&
                                     !newState.isTerminal &&
@@ -2160,6 +2187,7 @@ class CallActivity : ComponentActivity() {
                         finishCallUiAfterCall("no_active_call")
                     }
                 }
+            }
             }
         }
     }

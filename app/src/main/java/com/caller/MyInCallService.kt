@@ -108,7 +108,9 @@ import kotlinx.coroutines.flow.MutableStateFlow
             val primaryTalkDurationMillis: Long = 0L,
             val primaryTalkTimerRunning: Boolean = false,
             val secondaryTalkDurationMillis: Long = 0L,
-            val secondaryTalkTimerRunning: Boolean = false
+            val secondaryTalkTimerRunning: Boolean = false,
+            // The call session this state was saved for (see CallUiSession.kt); empty when it was saved before one was known.
+            val sessionId: String = ""
         )
 
         private data class CallerDisplayResolution(
@@ -187,6 +189,8 @@ class MyInCallService : InCallService() {
                 private var callUIListener: ((UnifiedCallState) -> Unit)? = null
                 @Volatile private var lastCallUiSnapshot: UnifiedCallState? = null
                 @Volatile private var lastTerminalUiSnapshot: UnifiedCallState? = null
+                // Set when the first live call of a session is added: every call that overlaps it shares this id.
+                @Volatile private var callUiSessionId: String = ""
                 private const val TRANSIENT_CALL_GAP_MS: Long = 5000L
                 private const val TAG_CALL_FORENSIC = "CallForensic"
                 private const val ACTION_DISCONNECT_CALL = "DISCONNECT_CALL"
@@ -200,6 +204,7 @@ class MyInCallService : InCallService() {
 
                 fun getInstance(): MyInCallService? = instance
                 fun peekLastCallUiSnapshot(): UnifiedCallState? = lastCallUiSnapshot
+                fun currentCallUiSessionId(): String = callUiSessionId
 
                 fun setCallStateListener(listener: ((UnifiedCallState) -> Unit)?) {
                     callStateListener = listener
@@ -227,7 +232,7 @@ class MyInCallService : InCallService() {
             }
 
             private fun cacheLastCallUiSnapshot(state: UnifiedCallState, source: String) {
-                lastCallUiSnapshot = state
+                lastCallUiSnapshot = state.copy(sessionId = callUiSessionId)
                 if (state.isInCall) {
                     lastLiveCallSeenAtMs = System.currentTimeMillis()
                 }
@@ -2715,6 +2720,9 @@ class MyInCallService : InCallService() {
                 // return to the app (not the home screen) when the call ends.
                 if (getLiveCalls().count { it !== call } == 0) {
                     appWasOnScreenAtCallStart = MainActivity.isIncomingUiGateMainVisible()
+                    // A new call session: its call screen starts from nothing instead of resuming an older call's.
+                    callUiSessionId = newCallUiSessionId()
+                    Log.w(P2P_FORENSIC_TAG, "call_ui_session action=new id=$callUiSessionId callId=${stableCallId(call)} state=${call.state}")
                 }
                 Log.e("CMF_RINGTONE_DEBUG", "=== onCallAdded CALLED ===")
                 Log.e("CMF_RINGTONE_DEBUG", "Call state: ${call.state} (RINGING=${Call.STATE_RINGING})")
@@ -3930,6 +3938,7 @@ class MyInCallService : InCallService() {
                 putExtra(CALL_UI_EXTRA_STATE_HINT, stateHint)
                 putExtra(CALL_UI_EXTRA_CONTACT_NAME_HINT, contactNameHint)
                 putExtra(CALL_UI_EXTRA_SIM_LABEL, lastCallUiSnapshot?.simLabel.orEmpty())
+                putExtra(CALL_UI_EXTRA_SESSION_ID, callUiSessionId)
                 putExtra(CALL_UI_EXTRA_IS_CONFERENCE_HINT, isConferenceHint)
                 val isVideo = lastCallUiSnapshot?.isVideoCall == true ||
                     (getLiveCalls().firstOrNull()?.details?.videoState?.let { VideoProfile.isVideo(it) } == true)
