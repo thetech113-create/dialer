@@ -3755,6 +3755,11 @@ class MainActivity : ComponentActivity() {
                 isVideoCall = isVideoCall
             )
         )
+        // The number on the keypad was just dialed: leave the keypad empty for the next call. A call that never gets here
+        // (invalid number, no permission, SIM choice cancelled) keeps its number on the keypad.
+        if (keypadShowsDialedNumber(uiState.recentDialpadDigits, dialableNumber)) {
+            uiState = uiState.copy(recentDialpadDigits = "")
+        }
 
         InCallServiceEnhancements.warmUpProcess(this)
         startActivity(Intent(this, CallActivity::class.java).apply {

@@ -52,3 +52,33 @@ class KeypadCallActionTest {
         assertTrue(keypadCallAction("1", "") is KeypadCallAction.Dial)
     }
 }
+
+class KeypadClearAfterCallTest {
+    @Test
+    fun theKeypadIsClearedWhenItsNumberWasDialed() {
+        assertTrue(keypadShowsDialedNumber("9876543210", "9876543210"))
+    }
+
+    @Test
+    fun aFormattedDialedNumberStillMatchesTheKeypad() {
+        assertTrue(keypadShowsDialedNumber("+919876543210", "+91 98765-43210"))
+    }
+
+    @Test
+    fun aRedialedNumberShownOnTheKeypadIsCleared() {
+        val shown = (keypadCallAction("", "9123456789") as KeypadCallAction.ShowLastNumber).number
+        assertTrue(keypadShowsDialedNumber(shown, "9123456789"))
+    }
+
+    @Test
+    fun aCallToAnotherNumberLeavesTheKeypadAlone() {
+        assertFalse(keypadShowsDialedNumber("98765", "9123456789"))
+    }
+
+    @Test
+    fun anEmptyKeypadHasNothingToClear() {
+        assertFalse(keypadShowsDialedNumber("", "9123456789"))
+        assertFalse(keypadShowsDialedNumber("", ""))
+        assertFalse(keypadShowsDialedNumber("9876543210", ""))
+    }
+}

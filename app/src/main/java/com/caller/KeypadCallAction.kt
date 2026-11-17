@@ -21,3 +21,13 @@ internal fun keypadCallAction(typedNumber: String, lastRecentNumber: String): Ke
     lastRecentNumber.isNotBlank() -> KeypadCallAction.ShowLastNumber(lastRecentNumber)
     else -> KeypadCallAction.Nothing
 }
+
+/**
+ * True when the keypad holds the number that was just dialed, so the keypad is cleared for the next call. A call placed
+ * from somewhere else (a contact, another recent row) leaves a different number on the keypad alone.
+ */
+internal fun keypadShowsDialedNumber(keypadDigits: String, dialedNumber: String): Boolean {
+    if (keypadDigits.isEmpty()) return false
+    val dialed = sanitizePhoneNumberForCall(dialedNumber)
+    return dialed.isNotEmpty() && sanitizePhoneNumberForCall(keypadDigits) == dialed
+}
