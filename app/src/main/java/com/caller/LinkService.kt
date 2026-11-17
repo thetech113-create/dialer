@@ -240,6 +240,8 @@ class LinkService : Service(), LinkServer.Listener {
     override fun onConnected(pcId: String, pcName: String) {
         LinkState.connectedPc = pcName
         LinkState.connectedPcId = pcId
+        // This PC is live under this id, so any older pairing of the same PC under another id is a stale copy.
+        prefs.removeStaleCopies(pcId, pcName)
         LinkState.pairingsVersion++
         refreshStatusNotification()
         sendStatus()

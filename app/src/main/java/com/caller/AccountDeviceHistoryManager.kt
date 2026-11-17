@@ -784,7 +784,7 @@ object AccountDeviceHistoryManager {
             (p.deviceId != myDeviceId && p.deviceName.equals(myName, ignoreCase = true)) ||
                 isPeerRemoved(context, p.deviceId, p.deviceName)
 
-        if (approvedTrustPeers.isEmpty()) return stored.filterNot { isHidden(it) }
+        if (approvedTrustPeers.isEmpty()) return onePerDevice(stored.filterNot { isHidden(it) })
 
         val result = stored.toMutableList()
         for (tp in approvedTrustPeers) {
@@ -810,7 +810,23 @@ object AccountDeviceHistoryManager {
                 )
             }
         }
-        return result.filterNot { isHidden(it) }
+        return onePerDevice(result.filterNot { isHidden(it) })
+    }
+
+    /**
+     * One row per phone. A phone is already replaced when it is registered again, but a repeat that is already stored
+     * (from an older version) is never touched, so linking the same phone again listed it twice. A phone on a private link
+     * wins over one that only came from a roster, as in ingestAccountSnapshotJson.
+     */
+    private fun onePerDevice(peers: List<AccountDeviceRegistration>): List<AccountDeviceRegistration> {
+        val kept = keepOnePerDevice(
+            items = peers,
+            id = { it.deviceId },
+            name = { it.deviceName },
+            isPreferred = { it.accountId.startsWith(LINK_ACCOUNT_PREFIX) }
+        )
+        if (kept.size != peers.size) Log.w(P2P_FORENSIC_TAG, "peer_list_dedupe before=${peers.size} after=${kept.size}")
+        return kept
     }
 
     fun getLastAccountSyncTime(context: Context): Long =
@@ -2681,7 +2697,9 @@ fun MultiDeviceSettingsCard(
                 }
             }
 
-            val pairedPcs = remember(LinkState.pairingsVersion) { linkPrefs.pairedPcs() }
+            val pairedPcs = remember(LinkState.pairingsVersion, LinkState.connectedPcId) {
+                pcsToShow(linkPrefs.pairedPcs(), LinkState.connectedPcId)
+            }
             if (pairedPcs.isNotEmpty()) {
                 Spacer(modifier = Modifier.height(10.dp))
                 Text(
@@ -2707,10 +2725,10 @@ fun MultiDeviceSettingsCard(
                             )
                         }
                         TextButton(onClick = {
-                            linkPrefs.remove(pc.id)
+                            val removedIds = linkPrefs.removeWithCopies(pc)
                             LinkState.pairingsVersion++
                             LinkState.server?.let { s ->
-                                if (s.connectedPcId == pc.id) kotlin.concurrent.thread { s.disconnect() }
+                                if (s.connectedPcId in removedIds) kotlin.concurrent.thread { s.disconnect() }
                             }
                         }) {
                             Text("Unpair", color = MaterialTheme.colorScheme.error)

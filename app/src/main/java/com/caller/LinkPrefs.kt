@@ -2,10 +2,11 @@ package com.caller
 
 import android.content.Context
 import android.util.Base64
+import android.util.Log
 import com.caller.link.PairStore
 import java.util.UUID
 
-class PairedPc(val id: String, val name: String)
+class PairedPc(val id: String, val name: String, val pairedAtMs: Long = 0L)
 
 /** Device identity and the pairing keys of trusted PCs. Excluded from backups (res/xml). */
 class LinkPrefs(context: Context) : PairStore {
@@ -27,17 +28,35 @@ class LinkPrefs(context: Context) : PairStore {
         prefs.edit()
             .putString(PREFIX_KEY + pcId, Base64.encodeToString(key, Base64.NO_WRAP))
             .putString(PREFIX_NAME + pcId, pcName)
+            .putLong(PREFIX_TIME + pcId, System.currentTimeMillis())
             .apply()
+        // Pairing the same PC again is one PC, not a new one: an older pairing under the same name is dropped.
+        removeStaleCopies(pcId, pcName)
     }
 
     override fun remove(pcId: String) {
-        prefs.edit().remove(PREFIX_KEY + pcId).remove(PREFIX_NAME + pcId).apply()
+        prefs.edit().remove(PREFIX_KEY + pcId).remove(PREFIX_NAME + pcId).remove(PREFIX_TIME + pcId).apply()
+    }
+
+    /** Drops the older pairings of the PC [pcId] (other ids with the same name). Returns how many were dropped. */
+    fun removeStaleCopies(pcId: String, pcName: String): Int {
+        val stale = staleCopyIds(pairedPcs(), pcId, pcName)
+        stale.forEach(::remove)
+        if (stale.isNotEmpty()) Log.w("PcLink", "paired_pc_list action=dropped_older_copies count=${stale.size}")
+        return stale.size
+    }
+
+    /** Unpairs [pc] together with its older copies, so a copy that was hidden behind it does not show up instead. */
+    fun removeWithCopies(pc: PairedPc): List<String> {
+        val ids = listOf(pc.id) + staleCopyIds(pairedPcs(), pc.id, pc.name)
+        ids.forEach(::remove)
+        return ids
     }
 
     fun pairedPcs(): List<PairedPc> = prefs.all.keys
         .filter { it.startsWith(PREFIX_KEY) }
         .map { it.removePrefix(PREFIX_KEY) }
-        .map { PairedPc(it, prefs.getString(PREFIX_NAME + it, null) ?: "PC") }
+        .map { PairedPc(it, prefs.getString(PREFIX_NAME + it, null) ?: "PC", prefs.getLong(PREFIX_TIME + it, 0L)) }
         .sortedBy { it.name }
 
     private companion object {
@@ -46,5 +65,6 @@ class LinkPrefs(context: Context) : PairStore {
         const val KEY_AUTO_START = "auto_start"
         const val PREFIX_KEY = "key_"
         const val PREFIX_NAME = "name_"
+        const val PREFIX_TIME = "time_"
     }
 }
