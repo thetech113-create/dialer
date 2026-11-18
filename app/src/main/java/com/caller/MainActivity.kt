@@ -3775,10 +3775,15 @@ class MainActivity : ComponentActivity() {
                 isVideoCall = isVideoCall
             )
         )
-        // The number on the keypad was just dialed: the keypad is emptied for the next call, but only once it is out of
-        // sight (onStop), so an empty keypad never shows before the call screen opens. A call that never gets here
-        // (invalid number, no permission, SIM choice cancelled) keeps its number on the keypad.
-        deferredKeypadClear.request(uiState.recentDialpadDigits, dialableNumber)
+        // A call placed from the keypad screen (its green button, or a contact / recent row suggested for the typed
+        // digits) empties the keypad for the next call, but only once it is out of sight, so an empty keypad never
+        // shows before the call screen opens. A call that never gets here (invalid number, no permission, SIM choice
+        // cancelled) keeps its number on the keypad.
+        deferredKeypadClear.request(
+            uiState.recentDialpadDigits,
+            dialableNumber,
+            keypadOnScreen = uiState.selectedTab == TAB_KEYPAD || uiState.recentDialpadVisible
+        )
 
         InCallServiceEnhancements.warmUpProcess(this)
         startActivity(Intent(this, CallActivity::class.java).apply {

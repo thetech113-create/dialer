@@ -37,22 +37,27 @@ internal fun keypadShowsDialedNumber(keypadDigits: String, dialedNumber: String)
  * showed an empty keypad for a moment, before the call screen had opened over it.
  */
 internal class DeferredKeypadClear {
-    private var dialedNumber: String? = null
+    private var digitsDialedFrom: String? = null
 
-    /** A call to [dialed] is being placed. Remembers to clear the keypad later if it holds that number. */
-    fun request(keypadDigits: String, dialed: String) {
-        dialedNumber = if (keypadShowsDialedNumber(keypadDigits, dialed)) dialed else null
+    /**
+     * A call to [dialed] is being placed. Remembers to clear the keypad later when the call was placed from the keypad
+     * screen ([keypadOnScreen]: its green button, or a contact or recent row suggested for the typed digits, which
+     * differ from the number that gets dialed) or when the keypad holds exactly the dialed number.
+     */
+    fun request(keypadDigits: String, dialed: String, keypadOnScreen: Boolean) {
+        val fromKeypad = keypadOnScreen || keypadShowsDialedNumber(keypadDigits, dialed)
+        digitsDialedFrom = if (keypadDigits.isNotEmpty() && fromKeypad) keypadDigits else null
     }
 
     /** The call did not start: the number stays on the keypad. */
     fun cancel() {
-        dialedNumber = null
+        digitsDialedFrom = null
     }
 
     /** The keypad is no longer visible. Returns the digits it should hold from now on. */
     fun digitsOnceHidden(keypadDigits: String): String {
-        val dialed = dialedNumber ?: return keypadDigits
-        dialedNumber = null
-        return if (keypadShowsDialedNumber(keypadDigits, dialed)) "" else keypadDigits
+        val dialedFrom = digitsDialedFrom ?: return keypadDigits
+        digitsDialedFrom = null
+        return if (keypadDigits == dialedFrom) "" else keypadDigits
     }
 }
