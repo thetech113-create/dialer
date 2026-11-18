@@ -7308,6 +7308,16 @@ class MainActivity : ComponentActivity() {
         val clipboardManager = remember(context) {
             context.getSystemService(CLIPBOARD_SERVICE) as ClipboardManager
         }
+        // A number copied in another app is noticed when this screen comes back to the front.
+        var resumeCount by remember { mutableStateOf(0) }
+        val keypadLifecycleOwner = androidx.compose.ui.platform.LocalLifecycleOwner.current
+        DisposableEffect(keypadLifecycleOwner) {
+            val observer = androidx.lifecycle.LifecycleEventObserver { _, event ->
+                if (event == androidx.lifecycle.Lifecycle.Event.ON_RESUME) resumeCount++
+            }
+            keypadLifecycleOwner.lifecycle.addObserver(observer)
+            onDispose { keypadLifecycleOwner.lifecycle.removeObserver(observer) }
+        }
         var assigningKey by remember { mutableStateOf<String?>(null) }
         var managingSpeedDialKey by remember { mutableStateOf<String?>(null) }
         var promptZeroAction by remember { mutableStateOf(false) }
@@ -7438,22 +7448,38 @@ class MainActivity : ComponentActivity() {
                         }
                     )
                 } else {
-                    val clipText = remember(phoneNumber) {
-                        runCatching {
-                            clipboardManager.primaryClip
-                                ?.takeIf { it.itemCount > 0 }
-                                ?.getItemAt(0)
-                                ?.coerceToText(context)
-                                ?.toString()
-                                .orEmpty()
-                        }.getOrDefault("")
+                    // The chip is offered only for a number copied a short while ago and not pasted yet (PasteChip).
+                    val copiedAtMs = remember(phoneNumber, resumeCount) {
+                        runCatching { clipboardManager.primaryClipDescription?.timestamp ?: 0L }.getOrDefault(0L)
                     }
-                    val sanitizedClip = remember(clipText) { sanitizeDialableClipboardText(clipText) }
+                    var chipNowMs by remember(phoneNumber, resumeCount) { mutableStateOf(System.currentTimeMillis()) }
+                    val chipRemainingMs = PasteChip.shared.remainingMs(copiedAtMs, chipNowMs)
+                    LaunchedEffect(copiedAtMs, chipRemainingMs > 0L) {
+                        if (chipRemainingMs > 0L) {
+                            delay(chipRemainingMs)
+                            chipNowMs = System.currentTimeMillis()
+                        }
+                    }
+                    val sanitizedClip = remember(copiedAtMs, chipRemainingMs > 0L) {
+                        if (chipRemainingMs <= 0L) "" else sanitizeDialableClipboardText(
+                            runCatching {
+                                clipboardManager.primaryClip
+                                    ?.takeIf { it.itemCount > 0 }
+                                    ?.getItemAt(0)
+                                    ?.coerceToText(context)
+                                    ?.toString()
+                                    .orEmpty()
+                            }.getOrDefault("")
+                        )
+                    }
                     if (sanitizedClip.isNotBlank()) {
                         Surface(
                             modifier = Modifier
                                 .clip(RoundedCornerShape(20.dp))
-                                .clickable { onPhoneNumberChange(sanitizedClip) },
+                                .clickable {
+                                    PasteChip.shared.markUsed(copiedAtMs)
+                                    onPhoneNumberChange(sanitizedClip)
+                                },
                             shape = RoundedCornerShape(20.dp),
                             color = palette.chip
                         ) {
