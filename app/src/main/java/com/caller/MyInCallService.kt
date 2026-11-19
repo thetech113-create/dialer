@@ -146,6 +146,10 @@ class MyInCallService : InCallService() {
             private var screenStateReceiver: BroadcastReceiver? = null
             private var lastScreenOffAtElapsedMs: Long = 0L
             private var lastAppInitiatedDisconnectAtElapsedMs: Long = 0L
+            // Holds exclusive audio focus while a call is on a Bluetooth route (see BluetoothCallFocus.kt).
+            private val btCallFocus by lazy {
+                BluetoothCallFocus(getSystemService(Context.AUDIO_SERVICE) as? android.media.AudioManager)
+            }
             private var lastPowerEndRecoveryCallId: String = ""
 
             fun logCall(msg: String) {
@@ -2098,6 +2102,7 @@ class MyInCallService : InCallService() {
                 
                 // COMPREHENSIVE CLEANUP AND OEM FALLBACK DETECTION
                 logOemDialerFallbackServiceEvent("onDestroy")
+                btCallFocus.release()
 
                 val destroyedDuringLiveCall = !bubbleSuppressedForTermination &&
                     (getLiveCalls().isNotEmpty() || isTelecomFrameworkInCall())
@@ -2641,6 +2646,13 @@ class MyInCallService : InCallService() {
 
             private fun syncCalls() {
                 val allCalls = getSafeCalls()
+                // While a call is active on a Bluetooth route, other apps' audio must not reach it (BluetoothCallFocus).
+                btCallFocus.sync(
+                    hold = holdsExclusiveCallFocus(
+                        callActive = allCalls.any { it.state == Call.STATE_ACTIVE },
+                        routeIsBluetooth = callAudioState?.route == CallAudioState.ROUTE_BLUETOOTH
+                    )
+                )
                 val currentState = buildUnifiedCallState(allCalls, "syncCalls")
                 val now = System.currentTimeMillis()
                 val liveCallCount = allCalls.count {
@@ -3073,6 +3085,14 @@ class MyInCallService : InCallService() {
                 } catch (e: Exception) {
                     Log.e("CallAudio", "Error abandoning audio focus: ${e.message}")
                 }
+
+                // The removed call may have been the one on the Bluetooth route: give exclusive focus back if so.
+                btCallFocus.sync(
+                    hold = holdsExclusiveCallFocus(
+                        callActive = getSafeCalls().any { it !== call && it.state == Call.STATE_ACTIVE },
+                        routeIsBluetooth = callAudioState?.route == CallAudioState.ROUTE_BLUETOOTH
+                    )
+                )
 
                 
                 val callId = call.hashCode().toString()
