@@ -29,8 +29,15 @@ import android.provider.ContactsContract
 import android.telecom.Call
 import android.telecom.CallScreeningService
 import android.telecom.Connection
+import android.telecom.TelecomManager
 import androidx.core.content.ContextCompat
 import com.caller.logging.UltraForensicLogger
+
+/** True for a caller that shows no usable number: private or hidden caller ID, unknown caller ID, or no digits at all. */
+internal fun isHiddenCaller(number: String, presentation: Int): Boolean =
+    number.none { it.isDigit() } ||
+        presentation == TelecomManager.PRESENTATION_RESTRICTED ||
+        presentation == TelecomManager.PRESENTATION_UNKNOWN
 
 class SpamCallScreeningService : CallScreeningService() {
 
@@ -61,9 +68,10 @@ class SpamCallScreeningService : CallScreeningService() {
             return
         }
 
-        // --- 3. BLOCK UNKNOWN CALLERS IF SETTING ENABLED ---
-        if (isBlockUnknownEnabled) {
-            UltraForensicLogger.debug("SpamForensics", "BLOCKED_UNKNOWN", "Blocked unknown caller: ${maskPhoneNumber(cleanNum)}")
+        // --- 3. BLOCK PRIVATE / HIDDEN CALLERS IF SETTING ENABLED ---
+        // Only callers that hide their number. An ordinary number that is not saved in contacts still rings.
+        if (isBlockUnknownEnabled && isHiddenCaller(incomingNumber, callDetails.handlePresentation)) {
+            UltraForensicLogger.debug("SpamForensics", "BLOCKED_UNKNOWN", "Blocked hidden caller: ${maskPhoneNumber(cleanNum)}")
             blockCall(callDetails, rejectAndLog = true)
             return
         }
