@@ -8695,7 +8695,8 @@ fun SettingsScreen(
                     subtitle = if (isCallScreeningState) "Active — blocking & caller identification enabled" else "Tap to enable Call Screening role",
                     badgeText = if (isCallScreeningState) "Active" else "Disabled",
                     badgeColor = if (isCallScreeningState) Color(0xFF2E7D32) else Color(0xFFD84315),
-                    onClick = { onRequestCallScreeningRole() }
+                    onClick = { onRequestCallScreeningRole() },
+                    enabled = !isCallScreeningState
                 )
 
                 Divider(color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.5f))
@@ -8734,7 +8735,8 @@ fun SettingsScreen(
                                 context.startActivity(Intent(Settings.ACTION_MANAGE_OVERLAY_PERMISSION, Uri.parse("package:${context.packageName}")).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK))
                             }
                         }
-                    }
+                    },
+                    enabled = !hasOverlayState
                 )
 
                 Divider(color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.5f))
@@ -8748,7 +8750,8 @@ fun SettingsScreen(
                         runCatching {
                             context.startActivity(Intent(Settings.ACTION_USAGE_ACCESS_SETTINGS).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK))
                         }
-                    }
+                    },
+                    enabled = !isUsageState
                 )
 
                 Divider(color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.5f))
@@ -8764,7 +8767,8 @@ fun SettingsScreen(
                                 context.startActivity(Intent(Settings.ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS, Uri.parse("package:${context.packageName}")).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK))
                             }
                         }
-                    }
+                    },
+                    enabled = !isBatteryState
                 )
 
                 val isXiaomi = Build.MANUFACTURER.equals("Xiaomi", ignoreCase = true) ||
@@ -9080,12 +9084,13 @@ private fun SettingItemRow(
     subtitle: String,
     badgeText: String,
     badgeColor: Color,
-    onClick: () -> Unit
+    onClick: () -> Unit,
+    enabled: Boolean = true
 ) {
     Row(
         modifier = Modifier
             .fillMaxWidth()
-            .clickable { onClick() }
+            .clickable(enabled = enabled) { onClick() }
             .padding(vertical = 4.dp),
         horizontalArrangement = Arrangement.SpaceBetween,
         verticalAlignment = Alignment.CenterVertically
