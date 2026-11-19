@@ -70,6 +70,36 @@ class BluetoothCallSilenceTest {
     }
 
     @Test
+    fun theSilenceAppliesDuringABluetoothCallWithNothingRinging() {
+        assertEquals(true, bluetoothSilenceApplies(onBluetoothCall = true, callRinging = false))
+    }
+
+    @Test
+    fun theSilenceStepsAsideWhileASecondCallIsRinging() {
+        // On a phone the system volume is the ringer, so the silence would keep the waiting call from ringing.
+        assertEquals(false, bluetoothSilenceApplies(onBluetoothCall = true, callRinging = true))
+    }
+
+    @Test
+    fun theSilenceNeverAppliesOffBluetooth() {
+        assertEquals(false, bluetoothSilenceApplies(onBluetoothCall = false, callRinging = false))
+        assertEquals(false, bluetoothSilenceApplies(onBluetoothCall = false, callRinging = true))
+    }
+
+    @Test
+    fun aCallRingingDuringTheSilenceGetsTheRingerBackAndTheSilenceReturnsAfter() {
+        val levels = FakeLevels(music to 10, notification to 5, system to 7)
+        levels.zeroingNotificationSwitchesToVibrate = true
+        val guard = BluetoothCallSilence(levels, MemoryStore())
+        guard.sync(bluetoothSilenceApplies(onBluetoothCall = true, callRinging = false))
+        guard.sync(bluetoothSilenceApplies(onBluetoothCall = true, callRinging = true))
+        assertEquals(AudioManager.RINGER_MODE_NORMAL, levels.ringerMode())
+        assertEquals(7, levels.volume(system))
+        guard.sync(bluetoothSilenceApplies(onBluetoothCall = true, callRinging = false))
+        assertEquals(0, levels.volume(system))
+    }
+
+    @Test
     fun levelsSavedBeforeARestartAreRestoredAfterIt() {
         val levels = FakeLevels(music to 10, notification to 5, system to 7)
         val store = MemoryStore()

@@ -5,12 +5,24 @@ import android.content.SharedPreferences
 import android.media.AudioManager
 import android.util.Log
 
-/** The sound levels a call silences while it is on Bluetooth: media, notifications and system sounds. Alarms and ringtones are not silenced. */
+/**
+ * The sound levels a call silences while it is on Bluetooth: media, notifications and system sounds. Alarms are not
+ * silenced. On a phone Android ties the system volume to the ringer (AudioService aliases STREAM_SYSTEM to STREAM_RING,
+ * and a zero there switches the ringer to vibrate), so the silence steps aside whenever a call rings: see
+ * [bluetoothSilenceApplies].
+ */
 internal val CALL_SILENCED_STREAMS: List<Int> = listOf(
     AudioManager.STREAM_MUSIC,
     AudioManager.STREAM_NOTIFICATION,
     AudioManager.STREAM_SYSTEM,
 )
+
+/**
+ * Whether the Bluetooth-call silence applies now. Never while a call is ringing: a second call arriving during a
+ * Bluetooth call must ring, and the silence would keep the ringer at zero (vibrate) for the whole call.
+ */
+internal fun bluetoothSilenceApplies(onBluetoothCall: Boolean, callRinging: Boolean): Boolean =
+    onBluetoothCall && !callRinging
 
 /** The levels as they stood before a call silenced them. */
 internal data class SavedSound(val volumes: Map<Int, Int>, val ringerMode: Int)

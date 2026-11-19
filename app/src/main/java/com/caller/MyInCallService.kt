@@ -165,7 +165,9 @@ class MyInCallService : InCallService() {
                     routeIsBluetooth = callAudioState?.route == CallAudioState.ROUTE_BLUETOOTH
                 )
                 btCallFocus.sync(onBluetoothCall)
-                btCallSilence.sync(onBluetoothCall)
+                btCallSilence.sync(
+                    bluetoothSilenceApplies(onBluetoothCall, callRinging = calls.any { it.state == Call.STATE_RINGING })
+                )
             }
             private var lastPowerEndRecoveryCallId: String = ""
 
@@ -1929,6 +1931,9 @@ class MyInCallService : InCallService() {
                     return
                 }
 
+                // A Bluetooth call's silence also holds the ringer at vibrate; it steps aside for a ringing call, so
+                // apply that before reading the ringer mode, or a call arriving during a Bluetooth call never rings.
+                syncBluetoothCallGuards(getSafeCalls())
                 val audioManager = getSystemService(Context.AUDIO_SERVICE) as? AudioManager
                 val ringerMode = audioManager?.ringerMode
                 Log.e("CMF_RINGTONE_DEBUG", "Ringer mode: $ringerMode (NORMAL=${AudioManager.RINGER_MODE_NORMAL})")

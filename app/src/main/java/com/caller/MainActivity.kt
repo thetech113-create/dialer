@@ -256,7 +256,9 @@ data class RecentCall(
     val simLabel: String = "",
     val sourceDeviceName: String = "",
     val isVideo: Boolean = false,
-    val isTollFree: Boolean = false
+    val isTollFree: Boolean = false,
+    // Android logged this call as blocked (block list or call screening), whatever the local block list says now.
+    val blockedByType: Boolean = false
 )
 
 data class GroupedRecentCall(
@@ -425,7 +427,8 @@ private data class RecentCallRow(
     val phoneAccountId: String? = null,
     val phoneAccountComponentName: String? = null,
     val isVideo: Boolean = false,
-    val isTollFree: Boolean = false
+    val isTollFree: Boolean = false,
+    val blockedByType: Boolean = false
 )
 
 private data class PendingRecentDeleteRequest(
@@ -624,7 +627,7 @@ private fun groupRecentCallsFor(context: Context, calls: List<RecentCall>): List
         val providerRowIds = callList.map { it.id }.filter { it.isNotBlank() }.distinct()
         val name = callList.firstOrNull { it.name != "Unknown" }?.name ?: callList.first().name
         val callHistory = callList.map {
-            val isBlockedCall = it.duration <= 0L && isBlocked(it.phoneNumber)
+            val isBlockedCall = it.blockedByType || (it.duration <= 0L && isBlocked(it.phoneNumber))
             CallHistoryItem(
                 timestamp = it.timestamp, callType = it.callType, duration = it.duration,
                 formattedTime = formatTimestamp(it.timestamp),
@@ -746,12 +749,8 @@ internal fun buildRecentCallsSnapshot(context: Context, contacts: List<Contact>)
                 var name = c.getString(2) ?: "Unknown"
                 var number = c.getString(1) ?: ""
                 val timestamp = c.getLong(3)
-                val callType = when (c.getInt(4)) {
-                    Calls.OUTGOING_TYPE -> CallType.OUTGOING
-                    Calls.INCOMING_TYPE -> CallType.INCOMING
-                    Calls.MISSED_TYPE -> CallType.MISSED
-                    else -> CallType.OUTGOING
-                }
+                val callLogType = c.getInt(4)
+                val callType = recentCallTypeFor(callLogType)
                 val id = c.getString(0) ?: ""
 
                 if (number.isNotEmpty()) {
@@ -769,7 +768,8 @@ internal fun buildRecentCallsSnapshot(context: Context, contacts: List<Contact>)
                         phoneAccountId = c.getString(6),
                         phoneAccountComponentName = c.getString(7),
                         isVideo = isVideo,
-                        isTollFree = isTollFree
+                        isTollFree = isTollFree,
+                        blockedByType = isBlockedCallLogType(callLogType)
                     )
                     callRows.add(row)
                 }
@@ -866,7 +866,8 @@ internal fun buildRecentCallsSnapshot(context: Context, contacts: List<Contact>)
                 duration = row.duration,
                 simLabel = simLabel,
                 isVideo = row.isVideo,
-                isTollFree = row.isTollFree
+                isTollFree = row.isTollFree,
+                blockedByType = row.blockedByType
             )
         )
     }
@@ -876,11 +877,7 @@ internal fun buildRecentCallsSnapshot(context: Context, contacts: List<Contact>)
         .asSequence()
         .filter { it.sourceDeviceId.isNotBlank() && it.sourceDeviceId != currentDeviceId }
         .forEach { record ->
-            val callType = when (record.callTypeInt) {
-                Calls.INCOMING_TYPE -> CallType.INCOMING
-                Calls.MISSED_TYPE, Calls.REJECTED_TYPE -> CallType.MISSED
-                else -> CallType.OUTGOING
-            }
+            val callType = recentCallTypeFor(record.callTypeInt)
 
             if (AccountDeviceHistoryManager.shouldFilterCallHistoryItem(
                     context, record.remoteNumber, callType, record.sourceDeviceId)) {
@@ -901,7 +898,8 @@ internal fun buildRecentCallsSnapshot(context: Context, contacts: List<Contact>)
                     timestamp = record.timestamp,
                     callType = callType,
                     duration = record.durationSec,
-                    sourceDeviceName = record.sourceDeviceName
+                    sourceDeviceName = record.sourceDeviceName,
+                    blockedByType = isBlockedCallLogType(record.callTypeInt)
                 )
             )
         }
