@@ -1298,6 +1298,8 @@ class MainActivity : ComponentActivity() {
         UltraForensicLogger.init(this)
         requestWindowFeature(Window.FEATURE_NO_TITLE)
         super.onCreate(savedInstanceState)
+        // The app may have been killed during a call that silenced the phone's sounds: put them back (BluetoothCallSilence.kt).
+        restoreLeftOverCallSilence(this)
         CallScreenShown.add(callScreenDrawnListener)
         if (intent?.action == "android.telecom.action.POST_CALL" ||
             intent?.action == POWER_END_RECOVERY_ACTION

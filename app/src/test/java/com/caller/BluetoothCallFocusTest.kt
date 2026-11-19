@@ -6,19 +6,19 @@ import org.junit.Test
 
 class BluetoothCallFocusTest {
     @Test
-    fun exclusiveFocusIsHeldWhileACallIsActiveOnBluetooth() {
-        assertTrue(holdsExclusiveCallFocus(callActive = true, routeIsBluetooth = true))
+    fun theGuardsApplyWhileACallIsActiveOnBluetooth() {
+        assertTrue(callIsOnBluetoothRoute(callActive = true, routeIsBluetooth = true))
     }
 
     @Test
     fun aCallOnTheSpeakerOrEarpieceLeavesOtherAppsAlone() {
-        assertFalse(holdsExclusiveCallFocus(callActive = true, routeIsBluetooth = false))
+        assertFalse(callIsOnBluetoothRoute(callActive = true, routeIsBluetooth = false))
     }
 
     @Test
-    fun noActiveCallMeansNoFocusHold() {
-        assertFalse(holdsExclusiveCallFocus(callActive = false, routeIsBluetooth = true))
-        assertFalse(holdsExclusiveCallFocus(callActive = false, routeIsBluetooth = false))
+    fun noActiveCallMeansNoGuards() {
+        assertFalse(callIsOnBluetoothRoute(callActive = false, routeIsBluetooth = true))
+        assertFalse(callIsOnBluetoothRoute(callActive = false, routeIsBluetooth = false))
     }
 
     @Test

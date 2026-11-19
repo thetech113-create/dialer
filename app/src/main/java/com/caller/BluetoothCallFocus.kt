@@ -6,11 +6,11 @@ import android.media.AudioManager
 import android.util.Log
 
 /**
- * Whether exclusive audio focus should be held: a call is active and its audio is on a Bluetooth route. On this phone the
- * call's Bluetooth link also carries whatever else is playing (a YouTube video reached the PC during a call), so while
- * this holds other apps are kept from playing into it. Apps that respect audio focus pause and cannot start.
+ * Whether the Bluetooth-call guards apply: a call is active and its audio is on a Bluetooth route. On this phone the
+ * call's Bluetooth link also carries whatever else is playing (a YouTube video reached the PC during a call). While this
+ * holds, exclusive audio focus pauses apps that respect it, and their sounds are silenced (see BluetoothCallSilence).
  */
-internal fun holdsExclusiveCallFocus(callActive: Boolean, routeIsBluetooth: Boolean): Boolean =
+internal fun callIsOnBluetoothRoute(callActive: Boolean, routeIsBluetooth: Boolean): Boolean =
     callActive && routeIsBluetooth
 
 /** Holds one exclusive audio focus request, released by the same object that asked for it. */

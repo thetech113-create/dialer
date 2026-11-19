@@ -31,6 +31,9 @@ class BootReceiver : BroadcastReceiver() {
         val action = intent.action.orEmpty()
         Log.w("BootReceiver", "Boot broadcast received: action=$action")
 
+        // 0. Put back sounds that a call silenced if the app was killed during it (BluetoothCallSilence.kt)
+        try { restoreLeftOverCallSilence(context) } catch (_: Exception) {}
+
         // 1. Instantly warm up the com.caller process so Telecom binding never times out
         try { InCallServiceEnhancements.warmUpProcess(context) } catch (_: Exception) {}
 
