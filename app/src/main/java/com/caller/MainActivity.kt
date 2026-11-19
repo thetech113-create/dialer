@@ -1256,6 +1256,9 @@ class MainActivity : ComponentActivity() {
         isMainActivityVisible = true
         incomingUiGateMainVisible = true
         applyDeferredKeypadClear("onResume")
+        // Android does not restart the PC link after a force stop or an update. If the user left it on, bring it back
+        // whenever the app comes to the front, so the PC Link switch matches what the user chose.
+        if (LinkPrefs(this).autoStart && !LinkState.running) LinkService.start(this)
 
         // Every time the app comes to the front (not only first start): right after Clear data Android can
         // refuse the system block list for a moment, so a later resume must still restore the blocks.
