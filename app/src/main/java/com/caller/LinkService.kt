@@ -300,6 +300,16 @@ class LinkService : Service(), LinkServer.Listener {
                     telecom().placeCall(Uri.fromParts("tel", msg.getString("number"), null), Bundle())
                     result(op, true)
                 }
+                "dtmf" -> {
+                    // A keypad press on the PC's call card: the tone goes into the phone's active call.
+                    val digit = linkDtmfDigit(msg.optString("digit"))
+                    val callService = MyInCallService.getInstance()
+                    when {
+                        digit == null -> result(op, false, "Not a keypad character")
+                        callService == null -> result(op, false, "No call in progress")
+                        else -> callService.playDtmfTone(digit)
+                    }
+                }
                 "dismiss" -> NotifListener.instance?.dismiss(msg.getString("key"))
                 "clip" -> {
                     val text = msg.getString("text")
