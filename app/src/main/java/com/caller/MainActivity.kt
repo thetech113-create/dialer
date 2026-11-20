@@ -3673,9 +3673,7 @@ class MainActivity : ComponentActivity() {
 
         try {
             val telecomManager = getSystemService(TELECOM_SERVICE) as TelecomManager
-            val displayNumber = formatPhoneNumberForDisplay(rawPhoneNumber)
             val finalUri = Uri.fromParts("tel", dialableNumber, null)
-            val resolvedContactName = getContactName(dialableNumber)
             val hadActiveCallBeforeLaunch = uiState.callState.isInCall
             val simOptions = DualSimFixes.resolveSimCallOptions(this)
 
@@ -3689,8 +3687,6 @@ class MainActivity : ComponentActivity() {
                         finalUri = finalUri,
                         rawPhoneNumber = rawPhoneNumber,
                         dialableNumber = dialableNumber,
-                        displayNumber = displayNumber,
-                        resolvedContactName = resolvedContactName,
                         hadActiveCallBeforeLaunch = hadActiveCallBeforeLaunch,
                         selectedSim = simOptions.first(),
                         isVideoCall = effectiveIsVideoCall
@@ -3706,8 +3702,6 @@ class MainActivity : ComponentActivity() {
                                 finalUri = finalUri,
                                 rawPhoneNumber = rawPhoneNumber,
                                 dialableNumber = dialableNumber,
-                                displayNumber = displayNumber,
-                                resolvedContactName = resolvedContactName,
                                 hadActiveCallBeforeLaunch = hadActiveCallBeforeLaunch,
                                 selectedSim = selectedSim,
                                 isVideoCall = effectiveIsVideoCall
@@ -3738,8 +3732,6 @@ class MainActivity : ComponentActivity() {
         finalUri: Uri,
         rawPhoneNumber: String,
         dialableNumber: String,
-        displayNumber: String,
-        resolvedContactName: String,
         hadActiveCallBeforeLaunch: Boolean,
         selectedSim: DualSimFixes.SimCallOption,
         isVideoCall: Boolean = false
@@ -3753,16 +3745,6 @@ class MainActivity : ComponentActivity() {
             "outgoing_call_prepare branch=main_activity_start raw=${maskP2PNumberForLog(rawPhoneNumber)} dialable=${maskP2PNumberForLog(dialableNumber)} isVideoCall=$isVideoCall finalUri=${maskP2PNumberForLog(finalUri.schemeSpecificPart.orEmpty())} api=TelecomManager.placeCall selectedSimId=${selectedSim.subscriptionId} slot=${selectedSim.slotIndex} carrier=${selectedSim.carrierName} handle=${selectedSim.phoneAccountHandle.id}"
         )
 
-        uiState = uiState.copy(
-            callState = uiState.callState.copy(
-                isInCall = true,
-                isDialing = true,
-                phoneNumber = displayNumber,
-                contactName = resolvedContactName,
-                simLabel = selectedSim.compactLabel(),
-                isVideoCall = isVideoCall
-            )
-        )
         // A call placed from the keypad screen (its green button, or a contact / recent row suggested for the typed
         // digits) empties the keypad for the next call, but only once it is out of sight, so an empty keypad never
         // shows before the call screen opens. A call that never gets here (invalid number, no permission, SIM choice
@@ -3774,25 +3756,8 @@ class MainActivity : ComponentActivity() {
         )
 
         InCallServiceEnhancements.warmUpProcess(this)
-        startActivity(Intent(this, CallActivity::class.java).apply {
-            action = CALL_UI_ACTION_WAKE
-            addFlags(
-                Intent.FLAG_ACTIVITY_NEW_TASK or
-                    Intent.FLAG_ACTIVITY_SINGLE_TOP or
-                    Intent.FLAG_ACTIVITY_CLEAR_TOP or
-                    Intent.FLAG_ACTIVITY_REORDER_TO_FRONT or
-                    Intent.FLAG_ACTIVITY_EXCLUDE_FROM_RECENTS
-            )
-            attachCallUiSeed(
-                phoneNumber = displayNumber,
-                contactName = resolvedContactName,
-                stateHint = "DIALING",
-                simLabel = selectedSim.compactLabel(),
-                isVideoCall = isVideoCall
-            )
-        })
-        @Suppress("DEPRECATION")
-        overridePendingTransition(0, 0)
+        // The call screen opens when Telecom adds the call (MyInCallService.onCallAdded), not before, as in Google's
+        // Dialer. A dial that never reaches Telecom leaves no "Dialling" screen behind; the system reports why.
 
         val inCallService = MyInCallService.getInstance()
         if (inCallService != null && hadActiveCallBeforeLaunch) {
@@ -3832,22 +3797,6 @@ class MainActivity : ComponentActivity() {
             deferredKeypadClear.cancel()
             showError("Failed to start call")
         }
-    }
-    private fun Intent.attachCallUiSeed(
-        phoneNumber: String,
-        contactName: String,
-        stateHint: String,
-        simLabel: String = "",
-        isConference: Boolean = false,
-        isVideoCall: Boolean = false
-    ): Intent {
-        putExtra(CALL_UI_EXTRA_PHONE_NUMBER_HINT, phoneNumber)
-        putExtra(CALL_UI_EXTRA_CONTACT_NAME_HINT, contactName)
-        putExtra(CALL_UI_EXTRA_STATE_HINT, stateHint)
-        putExtra(CALL_UI_EXTRA_SIM_LABEL, simLabel)
-        putExtra(CALL_UI_EXTRA_IS_CONFERENCE_HINT, isConference)
-        putExtra("EXTRA_IS_VIDEO_CALL", isVideoCall)
-        return this
     }
 
     private var avatarLookupSource: List<Contact>? = null
