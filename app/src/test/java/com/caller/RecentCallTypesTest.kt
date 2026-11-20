@@ -16,15 +16,9 @@ class RecentCallTypesTest {
     }
 
     @Test
-    fun aBlockedIncomingCallIsNotShownAsOutgoing() {
+    fun aStoppedIncomingCallIsAMissedCallNotAnOutgoingOne() {
         assertEquals(CallType.MISSED, recentCallTypeFor(Calls.BLOCKED_TYPE))
-        assertTrue(isBlockedCallLogType(Calls.BLOCKED_TYPE))
-    }
-
-    @Test
-    fun aRejectedIncomingCallIsNotShownAsOutgoing() {
         assertEquals(CallType.MISSED, recentCallTypeFor(Calls.REJECTED_TYPE))
-        assertFalse(isBlockedCallLogType(Calls.REJECTED_TYPE))
     }
 
     @Test
@@ -34,9 +28,21 @@ class RecentCallTypesTest {
     }
 
     @Test
-    fun onlyTheBlockedTypeCountsAsBlocked() {
-        assertFalse(isBlockedCallLogType(Calls.INCOMING_TYPE))
-        assertFalse(isBlockedCallLogType(Calls.MISSED_TYPE))
-        assertFalse(isBlockedCallLogType(Calls.OUTGOING_TYPE))
+    fun aNumberIsBlockedOnlyWhenItIsOnTheBlockList() {
+        val list = setOf("912231394334")
+        assertTrue(isOnBlockList("+91 22 3139 4334") { it in list })
+        assertFalse(isOnBlockList("+918035792626") { it in list })
+    }
+
+    @Test
+    fun theLastTenDigitsAlsoMatchTheBlockList() {
+        val list = setOf("2231394334")
+        assertTrue(isOnBlockList("+912231394334") { it in list })
+    }
+
+    @Test
+    fun aHiddenNumberIsNeverOnTheBlockList() {
+        assertFalse(isOnBlockList("") { true })
+        assertFalse(isOnBlockList("Private") { true })
     }
 }

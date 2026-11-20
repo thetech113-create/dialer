@@ -415,11 +415,15 @@ class LinkService : Service(), LinkServer.Listener {
             CallLog.Calls.NUMBER, CallLog.Calls.CACHED_NAME, CallLog.Calls.TYPE,
             CallLog.Calls.DATE, CallLog.Calls.DURATION,
         )
+        // The same block list the app's own screens use: "blocked" only for a number that really is blocked.
+        val blocklist = (if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.N) createDeviceProtectedStorageContext() else this)
+            .getSharedPreferences("local_spam_blocklist", Context.MODE_PRIVATE)
         contentResolver.query(CallLog.Calls.CONTENT_URI, columns, null, null, "date DESC")?.use { c ->
             while (items.length() < limit && c.moveToNext()) {
-                val type = linkCallLogType(c.getInt(2))
+                val number = c.getString(0).orEmpty()
+                val type = linkCallLogType(c.getInt(2), isOnBlockList(number) { blocklist.getBoolean(it, false) })
                 items.put(
-                    JSONObject().put("number", c.getString(0).orEmpty())
+                    JSONObject().put("number", number)
                         .put("name", c.getString(1).orEmpty())
                         .put("type", type)
                         .put("time", c.getLong(3))

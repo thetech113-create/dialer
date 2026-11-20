@@ -256,9 +256,7 @@ data class RecentCall(
     val simLabel: String = "",
     val sourceDeviceName: String = "",
     val isVideo: Boolean = false,
-    val isTollFree: Boolean = false,
-    // Android logged this call as blocked (block list or call screening), whatever the local block list says now.
-    val blockedByType: Boolean = false
+    val isTollFree: Boolean = false
 )
 
 data class GroupedRecentCall(
@@ -427,8 +425,7 @@ private data class RecentCallRow(
     val phoneAccountId: String? = null,
     val phoneAccountComponentName: String? = null,
     val isVideo: Boolean = false,
-    val isTollFree: Boolean = false,
-    val blockedByType: Boolean = false
+    val isTollFree: Boolean = false
 )
 
 private data class PendingRecentDeleteRequest(
@@ -580,10 +577,6 @@ private fun formatCallDuration(durationSeconds: Long, callType: CallType): Strin
 
 private fun callTypeToString(callType: String): String = callType
 
-private fun getBlockedNumberKey(phoneNumber: String): String {
-    return phoneNumber.filter { it.isDigit() }
-}
-
 private fun buildContactLookupMap(contacts: List<Contact>): Map<String, Contact> {
     val contactMap = linkedMapOf<String, Contact>()
     contacts.forEach { contact ->
@@ -613,12 +606,7 @@ private fun groupRecentCallsFor(context: Context, calls: List<RecentCall>): List
         else "peer:${it.sourceDeviceName.trim().lowercase(Locale.ROOT)}:$numberKey"
     }
     val blocklistPrefs = blocklistPreferencesFor(context)
-    fun isBlocked(num: String): Boolean {
-        val cleanNum = getBlockedNumberKey(num)
-        if (cleanNum.isBlank()) return false
-        return blocklistPrefs.getBoolean(cleanNum, false) ||
-            (cleanNum.length >= 10 && blocklistPrefs.getBoolean(cleanNum.takeLast(10), false))
-    }
+    fun isBlocked(num: String): Boolean = isOnBlockList(num) { blocklistPrefs.getBoolean(it, false) }
 
     return grouped.map { (groupKey, callList) ->
         val canonicalPhoneNumber = callList.first().phoneNumber.trim().ifBlank {
@@ -627,7 +615,7 @@ private fun groupRecentCallsFor(context: Context, calls: List<RecentCall>): List
         val providerRowIds = callList.map { it.id }.filter { it.isNotBlank() }.distinct()
         val name = callList.firstOrNull { it.name != "Unknown" }?.name ?: callList.first().name
         val callHistory = callList.map {
-            val isBlockedCall = it.blockedByType || (it.duration <= 0L && isBlocked(it.phoneNumber))
+            val isBlockedCall = it.duration <= 0L && isBlocked(it.phoneNumber)
             CallHistoryItem(
                 timestamp = it.timestamp, callType = it.callType, duration = it.duration,
                 formattedTime = formatTimestamp(it.timestamp),
@@ -768,8 +756,7 @@ internal fun buildRecentCallsSnapshot(context: Context, contacts: List<Contact>)
                         phoneAccountId = c.getString(6),
                         phoneAccountComponentName = c.getString(7),
                         isVideo = isVideo,
-                        isTollFree = isTollFree,
-                        blockedByType = isBlockedCallLogType(callLogType)
+                        isTollFree = isTollFree
                     )
                     callRows.add(row)
                 }
@@ -866,8 +853,7 @@ internal fun buildRecentCallsSnapshot(context: Context, contacts: List<Contact>)
                 duration = row.duration,
                 simLabel = simLabel,
                 isVideo = row.isVideo,
-                isTollFree = row.isTollFree,
-                blockedByType = row.blockedByType
+                isTollFree = row.isTollFree
             )
         )
     }
@@ -898,8 +884,7 @@ internal fun buildRecentCallsSnapshot(context: Context, contacts: List<Contact>)
                     timestamp = record.timestamp,
                     callType = callType,
                     duration = record.durationSec,
-                    sourceDeviceName = record.sourceDeviceName,
-                    blockedByType = isBlockedCallLogType(record.callTypeInt)
+                    sourceDeviceName = record.sourceDeviceName
                 )
             )
         }
