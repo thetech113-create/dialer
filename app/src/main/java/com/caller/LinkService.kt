@@ -417,13 +417,7 @@ class LinkService : Service(), LinkServer.Listener {
         )
         contentResolver.query(CallLog.Calls.CONTENT_URI, columns, null, null, "date DESC")?.use { c ->
             while (items.length() < limit && c.moveToNext()) {
-                val type = when (c.getInt(2)) {
-                    CallLog.Calls.INCOMING_TYPE -> "in"
-                    CallLog.Calls.OUTGOING_TYPE -> "out"
-                    CallLog.Calls.MISSED_TYPE -> "missed"
-                    CallLog.Calls.REJECTED_TYPE -> "rejected"
-                    else -> "other"
-                }
+                val type = linkCallLogType(c.getInt(2))
                 items.put(
                     JSONObject().put("number", c.getString(0).orEmpty())
                         .put("name", c.getString(1).orEmpty())

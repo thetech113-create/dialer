@@ -13,5 +13,18 @@ internal fun recentCallTypeFor(callLogType: Int): CallType = when (callLogType) 
     else -> CallType.OUTGOING
 }
 
+/**
+ * The call type the PC Link sends for a call-log row. Like Recents: voicemail counts as missed, answered elsewhere as
+ * incoming, and a blocked call is "blocked" (older PCs show unknown values as "Other", as before).
+ */
+internal fun linkCallLogType(callLogType: Int): String = when (callLogType) {
+    Calls.INCOMING_TYPE, Calls.ANSWERED_EXTERNALLY_TYPE -> "in"
+    Calls.OUTGOING_TYPE -> "out"
+    Calls.MISSED_TYPE, Calls.VOICEMAIL_TYPE -> "missed"
+    Calls.REJECTED_TYPE -> "rejected"
+    Calls.BLOCKED_TYPE -> "blocked"
+    else -> "other"
+}
+
 /** True for a call Android logged as blocked (by the block list or by call screening). */
 internal fun isBlockedCallLogType(callLogType: Int): Boolean = callLogType == Calls.BLOCKED_TYPE
