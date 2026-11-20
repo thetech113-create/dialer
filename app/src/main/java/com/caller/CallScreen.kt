@@ -2156,7 +2156,11 @@ class CallActivity : ComponentActivity() {
                             isEndCallRequested = true
                             CallBubbleOverlay.suppressForTermination(this)
                             Log.w(CALL_UI_FORENSIC_TAG, "call_ui_local_end action=end")
+                            // With no call left in the call service, End has nothing to disconnect: close the screen
+                            // rather than wait for a terminal state that never arrives.
+                            val hadServiceCall = MyInCallService.getInstance()?.hasActiveCall() == true
                             endCall(this)
+                            if (!hadServiceCall) finishCallUiAfterCall("end_pressed_no_service_call")
                         },
                         onToggleMute = { toggleMute(this, renderState.isMuted) { newMuteState ->
                             MyInCallService.getInstance()?.setMuted(newMuteState)
