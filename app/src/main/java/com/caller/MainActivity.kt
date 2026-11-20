@@ -8794,7 +8794,7 @@ fun SettingsScreen(
                 ) {
                     Column(modifier = Modifier.weight(1f)) {
                         Text(text = "Smart Spam Protection", fontWeight = FontWeight.SemiBold)
-                        Text(text = "Automatically detect and flag suspected spam calls and messages", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                        Text(text = "Flag suspected spam calls and messages; only clear spam calls are blocked", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
                     }
                     Switch(
                         checked = spamProtectionEnabled,

@@ -2626,7 +2626,8 @@ class MyInCallService : InCallService() {
                     val safeContext = createDeviceProtectedStorageContext()
                     val blocklistPrefs = safeContext.getSharedPreferences("local_spam_blocklist", Context.MODE_PRIVATE)
                     return blocklistPrefs.getBoolean(cleanNum, false) ||
-                            (cleanNum.length >= 10 && blocklistPrefs.getBoolean(cleanNum.takeLast(10), false))
+                            (cleanNum.length >= 10 && blocklistPrefs.getBoolean(cleanNum.takeLast(10), false)) ||
+                            isFlaggedSuspectedSpam(this, cleanNum)
                 } catch (_: Exception) {
                     return false
                 }

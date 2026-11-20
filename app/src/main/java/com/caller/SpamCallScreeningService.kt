@@ -94,15 +94,19 @@ class SpamCallScreeningService : CallScreeningService() {
         // --- 5. FORENSIC ANALYSIS ---
         val forensicSignal = ZeroDaySpamDetector.analyzeForensicThreat(incomingNumber, this)
 
-        // Block Wangiri international fraud or verified severe threat
-        if (forensicSignal.isWangiriFraud || forensicSignal.finalThreatScore >= 80f) {
-            UltraForensicLogger.deepest("SpamForensics", "SPAM_KILL", "Threats: ${forensicSignal.threatSignatures} Score: ${forensicSignal.finalThreatScore}")
-            blockCall(callDetails, rejectAndLog = true)
-            return
+        // Drop only clear spam; suspected spam rings, flagged as "Potential spam" on the call screen.
+        when (spamDecision(forensicSignal.finalThreatScore, forensicSignal.isWangiriFraud, stirFailed = false)) {
+            SpamAction.DROP -> {
+                UltraForensicLogger.deepest("SpamForensics", "SPAM_KILL", "Threats: ${forensicSignal.threatSignatures} Score: ${forensicSignal.finalThreatScore}")
+                blockCall(callDetails, rejectAndLog = true)
+            }
+            SpamAction.FLAG -> {
+                UltraForensicLogger.deepest("SpamForensics", "SPAM_FLAG", "Threats: ${forensicSignal.threatSignatures} Score: ${forensicSignal.finalThreatScore}")
+                flagSuspectedSpam(this, cleanNum)
+                allowCall(callDetails)
+            }
+            SpamAction.ALLOW -> allowCall(callDetails)
         }
-
-        // Allow legitimate incoming calls
-        allowCall(callDetails)
     }
 
     private fun allowCall(callDetails: Call.Details) {
