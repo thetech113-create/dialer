@@ -28,6 +28,7 @@ private const val KEY_TOKEN = "token"
 private const val KEY_NUMBER = "verified_number"
 private const val KEY_PENDING_CODE = "pending_code"
 private const val KEY_PENDING_NUMBER = "pending_number"
+private const val KEY_UPLOADED_NAME = "uploaded_name"
 const val P2P_VERIFY_PREFIX = "VERIFY|"
 private const val SERVER_TIMEOUT_MS = 8000
 
@@ -211,6 +212,9 @@ fun uploadP2PServerProfileName(context: Context, name: String) {
         runCatching {
             val (status, _) = serverRequest("POST", "/profile", JSONObject().put("name", name), token)
             Log.w(P2P_FORENSIC_TAG, "p2p_server_profile action=upload status=$status")
+            if (status == 200) {
+                serverPrefs(appContext).edit().putString(KEY_UPLOADED_NAME, sanitizeP2PDisplayName(name)).apply()
+            }
         }.onFailure { e ->
             Log.e(P2P_FORENSIC_TAG, "p2p_server_profile action=upload result=failed error=${e.message}")
         }
@@ -219,15 +223,23 @@ fun uploadP2PServerProfileName(context: Context, name: String) {
 
 /**
  * During a call: asks the server for the other person's name and stores it in the same P2P cache the
- * silent SMS fills, so the call screen and Recents show it exactly as before. Silent SMS still runs as
- * the backup (no internet, or the other phone not on the server yet).
+ * silent SMS fills, so the call screen and Recents show it exactly as before. Silent SMS is the backup
+ * (no internet, or the other phone not on the server yet).
+ *
+ * [onDone] runs on the main thread with true when the server swapped the names: the other phone is on the server
+ * with a name, and so is mine. Then the silent SMS is not needed (Google's rule: no SMS the user did not ask for).
  */
-fun requestP2PServerCallerName(context: Context, remoteNumber: String) {
-    if (!isP2PServerEnabled()) return
+fun requestP2PServerCallerName(context: Context, remoteNumber: String, onDone: (namesSharedByServer: Boolean) -> Unit = {}) {
+    val main = Handler(Looper.getMainLooper())
+    if (!isP2PServerEnabled()) {
+        main.post { onDone(false) }
+        return
+    }
     val appContext = context.applicationContext
     serverExecutor.execute {
-        val token = serverPrefs(appContext).getString(KEY_TOKEN, null) ?: return@execute
-        runCatching {
+        var namesShared = false
+        val token = serverPrefs(appContext).getString(KEY_TOKEN, null)
+        if (token != null) runCatching {
             val number = buildP2PNumberSnapshot(remoteNumber).digits
             if (number.length < 10) return@runCatching
             val (status, json) = serverRequest(
@@ -235,6 +247,9 @@ fun requestP2PServerCallerName(context: Context, remoteNumber: String) {
             )
             Log.w(P2P_FORENSIC_TAG, "p2p_server_lookup status=$status")
             val name = json.optString("name")
+            namesShared = serverSharedNames(
+                status, name, serverPrefs(appContext).getString(KEY_UPLOADED_NAME, null), resolveLocalP2PProfile(appContext)?.name
+            )
             if (status == 200 && name.isNotBlank()) {
                 val saved = storeP2PProfile(
                     context = appContext,
@@ -246,7 +261,7 @@ fun requestP2PServerCallerName(context: Context, remoteNumber: String) {
                     trigger = "P2PServer.lookup"
                 )
                 if (saved) {
-                    Handler(Looper.getMainLooper()).post {
+                    main.post {
                         MyInCallService.getInstance()?.refreshCallerIdentityAfterP2P()
                     }
                 }
@@ -254,8 +269,16 @@ fun requestP2PServerCallerName(context: Context, remoteNumber: String) {
         }.onFailure { e ->
             Log.e(P2P_FORENSIC_TAG, "p2p_server_lookup result=failed error=${e.message}")
         }
+        main.post { onDone(namesShared) }
     }
 }
+
+/**
+ * The server swapped both names: it knew the other phone's name, and my current profile name is the one it last
+ * accepted from me, so the other phone gets mine from it too.
+ */
+internal fun serverSharedNames(lookupStatus: Int, otherName: String, myUploadedName: String?, myName: String?): Boolean =
+    lookupStatus == 200 && otherName.isNotBlank() && !myUploadedName.isNullOrBlank() && myUploadedName == myName
 
 /**
  * Business name from Google Maps for a number with no other name, through our server (it holds the Places key). Runs

@@ -2542,11 +2542,30 @@ class MyInCallService : InCallService() {
                     return
                 }
 
-                // Server first (once per call); the silent SMS below stays as the backup.
-                requestP2PServerCallerName(this, remoteNumber)
+                // Server first (once per call). The silent SMS is only the backup: skipped when the server already
+                // gave both phones each other's names (Google's rule: no SMS the user did not ask for).
+                requestP2PServerCallerName(this, remoteNumber) { namesSharedByServer ->
+                    if (namesSharedByServer) {
+                        Log.w(
+                            P2P_FORENSIC_TAG,
+                            "exchange_sms_skip trigger=$trigger callId=$callId direction=$direction reason=server_shared_names"
+                        )
+                    } else {
+                        sendP2PSmsBackup(callId, trigger, direction, messageType, numberSnapshot, remoteNumber)
+                    }
+                }
                 // Not saved and no P2P name: other contact lists, then Google Maps (Google Phone's order).
                 lookUpUnsavedCaller(this, remoteNumber, call.details?.callerDisplayName.orEmpty().trim())
+            }
 
+            private fun sendP2PSmsBackup(
+                callId: String,
+                trigger: String,
+                direction: String,
+                messageType: P2PMessageType,
+                numberSnapshot: P2PNumberSnapshot,
+                remoteNumber: String
+            ) {
                 val reverseTargetKey = if (messageType == P2PMessageType.REPLY) {
                     "replyTarget:${numberSnapshot.normalized.ifBlank { numberSnapshot.last10 }}"
                 } else {

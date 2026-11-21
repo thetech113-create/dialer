@@ -1,16 +1,25 @@
 package com.caller
 
 import android.app.Notification
+import android.content.ComponentName
+import android.content.Context
 import android.content.pm.PackageManager
 import android.service.notification.NotificationListenerService
 import android.service.notification.StatusBarNotification
 import org.json.JSONObject
 
-/** Mirrors the phone's notifications to the PC once the user grants notification access. */
+/**
+ * Mirrors the phone's notifications to the PC once the user grants notification access, and only while PC Link is
+ * on: with PC Link off the app unbinds, so it receives no other app's notifications (see [follow]).
+ */
 class NotifListener : NotificationListenerService() {
     private val lastSent = HashMap<String, Int>()
 
     override fun onListenerConnected() {
+        if (!LinkState.running) {
+            requestUnbind()
+            return
+        }
         instance = this
         sendActive()
     }
@@ -89,5 +98,14 @@ class NotifListener : NotificationListenerService() {
         @Volatile
         var instance: NotifListener? = null
             private set
+
+        /** PC Link started or stopped: receive notifications only while it runs. */
+        fun follow(context: Context, linkRunning: Boolean) {
+            if (linkRunning) {
+                runCatching { requestRebind(ComponentName(context, NotifListener::class.java)) }
+            } else {
+                runCatching { instance?.requestUnbind() }
+            }
+        }
     }
 }

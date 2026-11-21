@@ -699,6 +699,8 @@ object AppUpdateManager {
 
             // Use ACTION_INSTALL_PACKAGE with read-only URI permission so Android opens
             // the official system Package Installer directly without offering third-party apps.
+            // No "not unknown source" / installer-name extras: those claim a store or system install, which this
+            // app is not, and Play Protect watches for apps that do (8.10.100).
             @Suppress("DEPRECATION")
             val installIntent = Intent(Intent.ACTION_INSTALL_PACKAGE).apply {
                 data = uri
@@ -706,8 +708,6 @@ object AppUpdateManager {
                 if (activeContext !is Activity) {
                     addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
                 }
-                putExtra(Intent.EXTRA_NOT_UNKNOWN_SOURCE, true)
-                putExtra(Intent.EXTRA_INSTALLER_PACKAGE_NAME, activeContext.packageName)
             }
 
             if (installIntent.resolveActivity(activeContext.packageManager) != null) {
@@ -719,7 +719,6 @@ object AppUpdateManager {
                     if (activeContext !is Activity) {
                         addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
                     }
-                    putExtra(Intent.EXTRA_NOT_UNKNOWN_SOURCE, true)
                 }
                 activeContext.startActivity(viewIntent)
             }

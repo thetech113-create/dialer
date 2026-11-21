@@ -178,6 +178,7 @@ class LinkService : Service(), LinkServer.Listener {
         LinkState.running = false
         LinkState.connectedPc = null
         LinkState.connectedPcId = null
+        NotifListener.follow(this, linkRunning = false)
         if (stopping != null) thread { stopping.stop() }
         multicastLock?.let { if (it.isHeld) it.release() }
         ringtone?.stop()
@@ -199,6 +200,7 @@ class LinkService : Service(), LinkServer.Listener {
         LinkState.server = created
         LinkState.running = true
         LinkState.error = null
+        NotifListener.follow(this, linkRunning = true)
 
         val wifi = applicationContext.getSystemService(Context.WIFI_SERVICE) as WifiManager
         multicastLock = wifi.createMulticastLock("phon-discovery").apply {
