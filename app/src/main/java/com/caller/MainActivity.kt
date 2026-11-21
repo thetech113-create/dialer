@@ -3798,9 +3798,11 @@ class MainActivity : ComponentActivity() {
             if (hasCallPhonePermission()) {
                 val dispatchedAtMs = SystemClock.elapsedRealtime()
                 telecomManager.placeCall(finalUri, extras)
-                // Telecom never gives the call service a number with "#" (a USSD or MMI code) when it is dialled, so
-                // those are not checked: the carrier's reply would otherwise get a false "Call not sent".
-                if (!finalUri.schemeSpecificPart.orEmpty().contains('#')) {
+                // Telecom never gives the call service a number with "#" (a USSD or MMI code) when it is dialled, and
+                // the phone can take over an emergency call with its own screen (seen for 100 on OPPO, 8.10.95), so
+                // neither is checked: they would otherwise get a false "Call not sent".
+                val dialledNumber = finalUri.schemeSpecificPart.orEmpty()
+                if (!dialledNumber.contains('#') && !PhoneNumberUtils.isEmergencyNumber(dialledNumber)) {
                     checkCallWasAdded(telecomManager, dispatchedAtMs)
                 }
             } else {
