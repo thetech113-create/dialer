@@ -24,6 +24,8 @@ import android.content.res.Configuration
 import android.database.ContentObserver
 import android.graphics.Bitmap
 import android.graphics.BitmapFactory
+import android.net.ConnectivityManager
+import android.net.NetworkCapabilities
 import android.net.Uri
 import android.os.Build
 import android.os.Bundle
@@ -31,12 +33,14 @@ import android.os.Handler
 import android.os.Looper
 import android.os.PowerManager
 import android.os.Process
+import android.os.SystemClock
 import android.provider.CallLog.Calls
 import android.provider.ContactsContract
 import android.provider.Settings
 import android.provider.Telephony
 import android.telecom.TelecomManager
 import android.telecom.VideoProfile
+import android.telephony.PhoneNumberUtils
 import android.telephony.TelephonyManager
 import android.util.Log
 import android.view.KeyEvent
@@ -478,6 +482,7 @@ private const val LAST_SELECTED_TAB_PREF_KEY = "last_selected_tab"
 private const val STATE_RECENT_SEARCH_QUERY_KEY = "main_recent_search_query"
 private const val STATE_RECENT_DIALPAD_VISIBLE_KEY = "main_recent_dialpad_visible"
 private const val STATE_RECENT_DIALPAD_DIGITS_KEY = "main_recent_dialpad_digits"
+private const val CALL_ADDED_WAIT_MS = 4_000L
 
 enum class CallType {
     OUTGOING,
@@ -3664,6 +3669,11 @@ class MainActivity : ComponentActivity() {
             return
         }
 
+        if (isAirplaneModeBlockingCall(dialableNumber)) {
+            showAirplaneModeDialog()
+            return
+        }
+
         var effectiveIsVideoCall = isVideoCall
         if (effectiveIsVideoCall && !isNumberVideoCallCapable(dialableNumber)) {
             effectiveIsVideoCall = false
@@ -3786,7 +3796,13 @@ class MainActivity : ComponentActivity() {
     ) {
         try {
             if (hasCallPhonePermission()) {
+                val dispatchedAtMs = SystemClock.elapsedRealtime()
                 telecomManager.placeCall(finalUri, extras)
+                // Telecom never gives the call service a number with "#" (a USSD or MMI code) when it is dialled, so
+                // those are not checked: the carrier's reply would otherwise get a false "Call not sent".
+                if (!finalUri.schemeSpecificPart.orEmpty().contains('#')) {
+                    checkCallWasAdded(telecomManager, dispatchedAtMs)
+                }
             } else {
                 deferredKeypadClear.cancel()
             }
@@ -3797,6 +3813,51 @@ class MainActivity : ComponentActivity() {
             deferredKeypadClear.cancel()
             showError("Failed to start call")
         }
+    }
+
+    // Telecom starts a call by adding it to the call service. If no call is added within the wait and Telecom reports
+    // no call either, the dial did not start: show the app's message instead of the system's "Call not sent".
+    private fun checkCallWasAdded(telecomManager: TelecomManager, dispatchedAtMs: Long) {
+        Handler(Looper.getMainLooper()).postDelayed({
+            val addedSinceDispatch = MyInCallService.peekLastCallAddedElapsedMs() >= dispatchedAtMs
+            val telecomHasCall = runCatching { telecomManager.isInCall }.getOrDefault(false)
+            if (!addedSinceDispatch && !telecomHasCall && !isFinishing && !isDestroyed) {
+                deferredKeypadClear.cancel()
+                showCallNotSentDialog()
+            }
+        }, CALL_ADDED_WAIT_MS)
+    }
+
+    // Airplane mode makes the system refuse the call with its own pop-up, so the app checks first. Emergency numbers still go through.
+    // With Wi-Fi connected the phone may place the call over Wi-Fi calling, so the system decides.
+    private fun isAirplaneModeBlockingCall(dialableNumber: String): Boolean {
+        val airplaneModeOn = Settings.Global.getInt(contentResolver, Settings.Global.AIRPLANE_MODE_ON, 0) == 1
+        return airplaneModeOn && !isWifiConnected() && !PhoneNumberUtils.isEmergencyNumber(dialableNumber)
+    }
+
+    private fun isWifiConnected(): Boolean {
+        val connectivity = getSystemService(ConnectivityManager::class.java) ?: return false
+        return runCatching {
+            connectivity.getNetworkCapabilities(connectivity.activeNetwork)?.hasTransport(NetworkCapabilities.TRANSPORT_WIFI) == true
+        }.getOrDefault(false)
+    }
+
+    private fun showAirplaneModeDialog() {
+        android.app.AlertDialog.Builder(this)
+            .setMessage("Turn off Aeroplane mode to make a call")
+            .setNegativeButton("Cancel", null)
+            .setPositiveButton("Settings") { _, _ ->
+                runCatching { startActivity(Intent(Settings.ACTION_AIRPLANE_MODE_SETTINGS)) }
+            }
+            .show()
+    }
+
+    private fun showCallNotSentDialog() {
+        android.app.AlertDialog.Builder(this)
+            .setTitle("Call not sent")
+            .setMessage("The phone did not start this call. Check the network signal and try again.")
+            .setPositiveButton("OK", null)
+            .show()
     }
 
     private var avatarLookupSource: List<Contact>? = null
