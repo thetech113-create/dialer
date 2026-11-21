@@ -2759,7 +2759,7 @@ class MainActivity : ComponentActivity() {
         val miuiIntent = Intent("miui.intent.action.APP_PERM_EDITOR").apply {
             component = ComponentName(
                 "com.miui.securitycenter",
-                "com.miui.permcenter.permissions.PermissionsEditorAct.ivity"
+                "com.miui.permcenter.permissions.PermissionsEditorActivity"
             )
             putExtra("extra_pkgname", packageName)
             addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
