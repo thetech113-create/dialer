@@ -6848,10 +6848,16 @@ class MainActivity : ComponentActivity() {
                     }
                     // Saved names always show the number too; unsaved rows already show it as the title.
                     val showRowNumber = rowBucket.name != "Unknown" && titleText != formatPhoneNumberForDisplay(rowPhoneNumber)
-                    val subtitleText = remember(lastCall.formattedTime, lastCall.formattedDuration, showRowNumber, rowPhoneNumber) {
+                    // Unsaved rows say where the number is from ("India", "Bangalore, Karnataka"), like Google Phone.
+                    val rowLocation = rememberNumberLocation(if (rowBucket.name == "Unknown") rowPhoneNumber else "")
+                    val subtitleText = remember(lastCall.formattedTime, lastCall.formattedDuration, showRowNumber, rowPhoneNumber, rowLocation) {
                         val base = "${lastCall.formattedTime} - ${lastCall.formattedDuration}"
                         // Same person on two rows (two numbers): show which number this row is.
-                        if (showRowNumber) "${formatPhoneNumberForDisplay(rowPhoneNumber)} · $base" else base
+                        when {
+                            showRowNumber -> "${formatPhoneNumberForDisplay(rowPhoneNumber)} · $base"
+                            rowLocation.isNotBlank() -> "$rowLocation · $base"
+                            else -> base
+                        }
                     }
                     val cardShape = RoundedCornerShape(28.dp)
                     val canExpandHistory = bucketSize > 1
@@ -8562,6 +8568,7 @@ fun SettingsScreen(
 
     var blockUnknownNumbers by remember { mutableStateOf(prefs.getBoolean("block_unknown_numbers", false)) }
     var spamProtectionEnabled by remember { mutableStateOf(prefs.getBoolean("spam_protection_enabled", true)) }
+    var businessCallerIdEnabled by remember { mutableStateOf(prefs.getBoolean(BUSINESS_CALLER_ID_PREF, true)) }
     var showLogDialog by remember { mutableStateOf(false) }
 
     val lifecycleOwner = androidx.compose.ui.platform.LocalLifecycleOwner.current
@@ -8782,6 +8789,26 @@ fun SettingsScreen(
                         onCheckedChange = { checked ->
                             spamProtectionEnabled = checked
                             prefs.edit().putBoolean("spam_protection_enabled", checked).apply()
+                        }
+                    )
+                }
+
+                Divider(color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.5f))
+
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Column(modifier = Modifier.weight(1f)) {
+                        Text(text = "Business Caller ID", fontWeight = FontWeight.SemiBold)
+                        Text(text = "Show the Google Maps name of a business that calls you from a number you have not saved. The number is sent to the app's server and Google.", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                    }
+                    Switch(
+                        checked = businessCallerIdEnabled,
+                        onCheckedChange = { checked ->
+                            businessCallerIdEnabled = checked
+                            prefs.edit().putBoolean(BUSINESS_CALLER_ID_PREF, checked).apply()
                         }
                     )
                 }

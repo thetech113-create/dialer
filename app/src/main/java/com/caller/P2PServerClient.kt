@@ -258,6 +258,37 @@ fun requestP2PServerCallerName(context: Context, remoteNumber: String) {
 }
 
 /**
+ * Business name from Google Maps for a number with no other name, through our server (it holds the Places key). Runs
+ * on the same queue as [requestP2PServerCallerName], so a P2P name that just arrived wins and costs no Places call.
+ * The name is kept in memory only ([UnsavedCallerNames]): Google Maps terms do not allow storing it.
+ */
+internal fun requestGoogleMapsBusinessName(context: Context, remoteNumber: String) {
+    if (!isP2PServerEnabled()) return
+    val appContext = context.applicationContext
+    serverExecutor.execute {
+        val token = p2pServerToken(appContext) ?: return@execute
+        runCatching {
+            if (hasKnownName(appContext, remoteNumber)) return@runCatching
+            val number = internationalNumber(remoteNumber, phoneRegion(appContext)) ?: return@runCatching
+            val (status, json) = serverRequest(
+                "GET",
+                "/business?number=" + URLEncoder.encode(number.e164, "UTF-8") +
+                    "&cc=" + number.countryCode + "&region=" + number.region,
+                token = token
+            )
+            Log.w(P2P_FORENSIC_TAG, "google_maps_lookup status=$status")
+            val name = json.optString("name").trim()
+            if (status == 200 && name.isNotEmpty()) {
+                UnsavedCallerNames.put(remoteNumber, name, fromGoogleMaps = true)
+                refreshCallScreenName()
+            }
+        }.onFailure { e ->
+            Log.e(P2P_FORENSIC_TAG, "google_maps_lookup result=failed error=${e.message}")
+        }
+    }
+}
+
+/**
  * Shares this phone's sender reports (hashed sender ids and counts, never message text) with the phones paired through
  * [accountKey] and returns theirs. The status is -1 when nothing was sent because the server is off or this phone is
  * not verified on it. Blocking: call it from a background thread.

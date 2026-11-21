@@ -12,8 +12,8 @@ android {
         applicationId = "com.caller"
         minSdk = 26
         targetSdk = 35
-        versionCode = 236
-        versionName = "8.10.98"
+        versionCode = 237
+        versionName = "8.10.99"
     }
 
     buildTypes {
@@ -79,6 +79,8 @@ dependencies {
     // DNS-over-HTTPS (Cloudflare/Google) when the normal lookup fails.
     implementation("com.squareup.okhttp3:okhttp:4.12.0")
     implementation("com.squareup.okhttp3:okhttp-dnsoverhttps:4.12.0")
+    // Where an unsaved number is from ("Bangalore, Karnataka", "India", "United States"), offline, like Google Phone.
+    implementation("com.googlecode.libphonenumber:geocoder:3.44")
 
     // AndroidX SplashScreen library for WhatsApp-style animation
     implementation("androidx.core:core-splashscreen:1.0.1")

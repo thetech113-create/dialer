@@ -2544,6 +2544,8 @@ class MyInCallService : InCallService() {
 
                 // Server first (once per call); the silent SMS below stays as the backup.
                 requestP2PServerCallerName(this, remoteNumber)
+                // Not saved and no P2P name: other contact lists, then Google Maps (Google Phone's order).
+                lookUpUnsavedCaller(this, remoteNumber, call.details?.callerDisplayName.orEmpty().trim())
 
                 val reverseTargetKey = if (messageType == P2PMessageType.REPLY) {
                     "replyTarget:${numberSnapshot.normalized.ifBlank { numberSnapshot.last10 }}"
@@ -4190,14 +4192,21 @@ class MyInCallService : InCallService() {
                 lookupSources.add("p2p_cache")
                 Log.w("P2P_FORENSIC", "Checking unverified remote caller ID for ${maskPhoneNumber(phoneNumber)}")
                 val p2pName = DirectBootCallManager.getDpsContactName(this, phoneNumber)
+                // A work/email directory or Google Maps name found during this call (lookUpUnsavedCaller).
+                val unsavedName = UnsavedCallerNames.nameFor(phoneNumber)
                 val finalName = if (p2pName != "Unknown" && p2pName.isNotEmpty()) {
                     p2pName
                 } else {
-                    "Unknown"
+                    unsavedName ?: "Unknown"
+                }
+                val finalSource = when {
+                    p2pName != "Unknown" && p2pName.isNotEmpty() -> "p2p_cache"
+                    unsavedName != null -> "unsaved_lookup"
+                    else -> "unknown"
                 }
                 Log.w(
                     P2P_FORENSIC_TAG,
-                    "lookup_final flow=MyInCallService raw=${maskP2PNumberForLog(phoneNumber)} normalized=${maskP2PNumberForLog(numberSnapshot.normalized)} sources=$lookupSources finalSource=${if (finalName != "Unknown") "p2p_cache" else "unknown"} finalName=${maskP2PDisplayValueForLog(finalName)}"
+                    "lookup_final flow=MyInCallService raw=${maskP2PNumberForLog(phoneNumber)} normalized=${maskP2PNumberForLog(numberSnapshot.normalized)} sources=$lookupSources finalSource=$finalSource finalName=${maskP2PDisplayValueForLog(finalName)}"
                 )
                 return finalName
             }

@@ -901,6 +901,16 @@ private fun ModernCallingScreenLayout(
         isUnknown && callState.phoneNumber.isNotEmpty() -> formatPhoneNumberForDisplay(callState.phoneNumber)
         else -> callState.contactName
     }
+    // Under the caller, as Google Phone shows it: where an unknown number is from, or the Google Maps credit for a
+    // business name (Google Maps terms ask for it wherever a Places name is shown).
+    val isGoogleMapsName = !isUnknown && UnsavedCallerNames.isGoogleMapsName(callState.phoneNumber, callState.contactName)
+    val numberLocation = rememberNumberLocation(if (callState.isConference) "" else callState.phoneNumber)
+    val identityDetailText = when {
+        callState.isSpam -> ""
+        isGoogleMapsName -> "Google Maps"
+        isUnknown -> numberLocation
+        else -> ""
+    }
     val baseSupportingText = when {
         callState.isSpam -> "Potential spam"
         !callState.isConference &&
@@ -1257,6 +1267,17 @@ private fun ModernCallingScreenLayout(
                         maxLines = 3,
                         overflow = TextOverflow.Ellipsis
                     )
+                    if (identityDetailText.isNotBlank()) {
+                        Spacer(modifier = Modifier.height(6.dp))
+                        Text(
+                            text = identityDetailText,
+                            color = palette.textSecondary,
+                            fontSize = 14.sp,
+                            textAlign = TextAlign.Center,
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis
+                        )
+                    }
                     if (supportingText.isNotBlank()) {
                         Spacer(modifier = Modifier.height(10.dp))
                         Text(

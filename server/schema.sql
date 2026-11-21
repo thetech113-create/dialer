@@ -62,3 +62,16 @@ CREATE TABLE IF NOT EXISTS spam_reports (
   updated_at  INTEGER NOT NULL,
   PRIMARY KEY (account_key, device_id, sender)
 );
+
+-- Numbers Google Maps has no business for (asked again after 30 days). Business names themselves are never stored:
+-- Google Maps terms allow showing them, not keeping them.
+CREATE TABLE IF NOT EXISTS business_misses (
+  number     TEXT PRIMARY KEY,
+  checked_at INTEGER NOT NULL
+);
+
+-- Places API calls per month ("2026-11"), kept within Google's free amount.
+CREATE TABLE IF NOT EXISTS places_usage (
+  month TEXT PRIMARY KEY,
+  count INTEGER NOT NULL DEFAULT 0
+);
