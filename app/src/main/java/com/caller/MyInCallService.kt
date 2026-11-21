@@ -214,8 +214,6 @@ class MyInCallService : InCallService() {
                 @Volatile private var lastTerminalUiSnapshot: UnifiedCallState? = null
                 // Set when the first live call of a session is added: every call that overlaps it shares this id.
                 @Volatile private var callUiSessionId: String = ""
-                // When Telecom last added any call to this service (SystemClock.elapsedRealtime), so a dial can tell it started.
-                @Volatile private var lastCallAddedElapsedMs: Long = 0L
                 private const val TRANSIENT_CALL_GAP_MS: Long = 5000L
                 private const val TAG_CALL_FORENSIC = "CallForensic"
                 private const val ACTION_DISCONNECT_CALL = "DISCONNECT_CALL"
@@ -230,7 +228,6 @@ class MyInCallService : InCallService() {
                 fun getInstance(): MyInCallService? = instance
                 fun peekLastCallUiSnapshot(): UnifiedCallState? = lastCallUiSnapshot
                 fun currentCallUiSessionId(): String = callUiSessionId
-                fun peekLastCallAddedElapsedMs(): Long = lastCallAddedElapsedMs
 
                 fun setCallStateListener(listener: ((UnifiedCallState) -> Unit)?) {
                     callStateListener = listener
@@ -2745,7 +2742,6 @@ class MyInCallService : InCallService() {
             @SuppressLint("FullScreenIntentPolicy")
             @Suppress("UseFullScreenIntent")
             override fun onCallAdded(call: Call) {
-                lastCallAddedElapsedMs = SystemClock.elapsedRealtime()
                 // A newly added Telecom call begins a new session and may use the bubble again.
                 bubbleSuppressedForTermination = false
                 CallBubbleOverlay.allowForNewOngoingCall()

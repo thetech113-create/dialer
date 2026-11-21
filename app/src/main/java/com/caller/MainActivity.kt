@@ -33,7 +33,6 @@ import android.os.Handler
 import android.os.Looper
 import android.os.PowerManager
 import android.os.Process
-import android.os.SystemClock
 import android.provider.CallLog.Calls
 import android.provider.ContactsContract
 import android.provider.Settings
@@ -482,7 +481,6 @@ private const val LAST_SELECTED_TAB_PREF_KEY = "last_selected_tab"
 private const val STATE_RECENT_SEARCH_QUERY_KEY = "main_recent_search_query"
 private const val STATE_RECENT_DIALPAD_VISIBLE_KEY = "main_recent_dialpad_visible"
 private const val STATE_RECENT_DIALPAD_DIGITS_KEY = "main_recent_dialpad_digits"
-private const val CALL_ADDED_WAIT_MS = 4_000L
 
 enum class CallType {
     OUTGOING,
@@ -3796,15 +3794,7 @@ class MainActivity : ComponentActivity() {
     ) {
         try {
             if (hasCallPhonePermission()) {
-                val dispatchedAtMs = SystemClock.elapsedRealtime()
                 telecomManager.placeCall(finalUri, extras)
-                // Telecom never gives the call service a number with "#" (a USSD or MMI code) when it is dialled, and
-                // the phone can take over an emergency call with its own screen (seen for 100 on OPPO, 8.10.95), so
-                // neither is checked: they would otherwise get a false "Call not sent".
-                val dialledNumber = finalUri.schemeSpecificPart.orEmpty()
-                if (!dialledNumber.contains('#') && !PhoneNumberUtils.isEmergencyNumber(dialledNumber)) {
-                    checkCallWasAdded(telecomManager, dispatchedAtMs)
-                }
             } else {
                 deferredKeypadClear.cancel()
             }
@@ -3815,19 +3805,6 @@ class MainActivity : ComponentActivity() {
             deferredKeypadClear.cancel()
             showError("Failed to start call")
         }
-    }
-
-    // Telecom starts a call by adding it to the call service. If no call is added within the wait and Telecom reports
-    // no call either, the dial did not start: show the app's message instead of the system's "Call not sent".
-    private fun checkCallWasAdded(telecomManager: TelecomManager, dispatchedAtMs: Long) {
-        Handler(Looper.getMainLooper()).postDelayed({
-            val addedSinceDispatch = MyInCallService.peekLastCallAddedElapsedMs() >= dispatchedAtMs
-            val telecomHasCall = runCatching { telecomManager.isInCall }.getOrDefault(false)
-            if (!addedSinceDispatch && !telecomHasCall && !isFinishing && !isDestroyed) {
-                deferredKeypadClear.cancel()
-                showCallNotSentDialog()
-            }
-        }, CALL_ADDED_WAIT_MS)
     }
 
     // Airplane mode makes the system refuse the call with its own pop-up, so the app checks first. Emergency numbers still go through.
@@ -3851,14 +3828,6 @@ class MainActivity : ComponentActivity() {
             .setPositiveButton("Settings") { _, _ ->
                 runCatching { startActivity(Intent(Settings.ACTION_AIRPLANE_MODE_SETTINGS)) }
             }
-            .show()
-    }
-
-    private fun showCallNotSentDialog() {
-        android.app.AlertDialog.Builder(this)
-            .setTitle("Call not sent")
-            .setMessage("The phone did not start this call. Check the network signal and try again.")
-            .setPositiveButton("OK", null)
             .show()
     }
 
