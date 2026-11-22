@@ -2097,6 +2097,17 @@ class MainActivity : ComponentActivity() {
         }
     }
 
+    /**
+     * A code that is not dialled (or a secret code sent to the phone) opens no call screen, so the keypad is never hidden
+     * and the deferred clear never runs. The keypad is emptied straight away instead, as after a call.
+     */
+    private fun clearKeypadAfterCode(code: String) {
+        if (keypadShowsDialedNumber(uiState.recentDialpadDigits, code)) {
+            uiState = uiState.copy(recentDialpadDigits = "")
+            Log.w(P2P_FORENSIC_TAG, "keypad_clear action=cleared source=code_not_dialled")
+        }
+    }
+
     override fun onTrimMemory(level: Int) {
         super.onTrimMemory(level)
         Log.w(
@@ -3657,6 +3668,7 @@ class MainActivity : ComponentActivity() {
         when (val code = dialCodeOf(dialableNumber)) {
             DialCode.NotDialable -> {
                 showError("$dialableNumber was not dialled: it is not a phone number or a USSD code (USSD codes end with #)")
+                clearKeypadAfterCode(dialableNumber)
                 return
             }
             is DialCode.Secret -> {
@@ -3665,6 +3677,7 @@ class MainActivity : ComponentActivity() {
                 } catch (e: SecurityException) {
                     showError("This code can only be sent by the default phone app")
                 }
+                clearKeypadAfterCode(dialableNumber)
                 return
             }
             DialCode.Call -> Unit
