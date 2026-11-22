@@ -1046,11 +1046,20 @@ fun sendP2PTextFallbackMessage(
 }
 
 @Suppress("DEPRECATION")
+/**
+ * Whether a caller-ID SMS may go to this number (user rule 2026-11-22): only to a phone known to have this app, i.e.
+ * confirmed by an earlier exchange, or known now ([peerKnownToHaveApp]: it just sent us a caller-ID message, or the
+ * server says the number is a verified app user). A number marked "no app" never gets one.
+ */
+internal fun p2pSmsAllowedToPeer(capability: P2PPeerCapability, peerKnownToHaveApp: Boolean): Boolean =
+    capability == P2PPeerCapability.HAS_APP_CONFIRMED || (capability != P2PPeerCapability.NO_APP && peerKnownToHaveApp)
+
 fun sendP2PProfileMessage(
     context: Context,
     destinationNumberRaw: String,
     messageType: P2PMessageType,
-    trigger: String
+    trigger: String,
+    peerKnownToHaveApp: Boolean = false
 ): P2PSendResult {
     val destinationSnapshot = buildP2PNumberSnapshot(destinationNumberRaw)
     logP2PNumberTrace("send:$trigger:${messageType.name}", destinationSnapshot)
@@ -1123,6 +1132,22 @@ fun sendP2PProfileMessage(
         return P2PSendResult(
             requested = false,
             blockedReason = "capability_blocked:${capabilityResult.capability.name}",
+            destination = destinationSnapshot
+        )
+    }
+
+    if (!p2pSmsAllowedToPeer(capabilityResult.capability, peerKnownToHaveApp)) {
+        logP2PSmsDecision(
+            destinationSnapshot = destinationSnapshot,
+            messageType = messageType,
+            trigger = trigger,
+            capabilityResult = capabilityResult,
+            action = "BLOCKED",
+            reason = "PEER_APP_NOT_CONFIRMED"
+        )
+        return P2PSendResult(
+            requested = false,
+            blockedReason = "peer_app_not_confirmed",
             destination = destinationSnapshot
         )
     }
@@ -1262,7 +1287,7 @@ fun sendP2PProfileMessage(
     val allowReason = if (capabilityResult.capability == P2PPeerCapability.HAS_APP_CONFIRMED) {
         "CONFIRMED_APP_USER"
     } else {
-        "UNKNOWN_BOOTSTRAP_ALLOWED"
+        "APP_USER_KNOWN_NOW"
     }
     logP2PSmsDecision(
         destinationSnapshot = destinationSnapshot,

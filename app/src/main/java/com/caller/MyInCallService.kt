@@ -2548,7 +2548,20 @@ class MyInCallService : InCallService() {
 
                 // Names travel only by the caller-ID SMS: the name server is off, because it gives a login for any
                 // number to anyone who asks, so a stranger could set the name shown for someone else's number (audit SRV-1).
-                sendP2PSmsBackup(callId, trigger, direction, messageType, numberSnapshot, remoteNumber)
+                // The SMS goes only to a phone known to have this app (user rule 2026-11-22): confirmed by an earlier
+                // exchange, or reported now by the server as a verified app user. Nobody else gets a text.
+                val capability = lookupP2PPeerCapability(this, remoteNumber, "exchange_gate:$trigger").capability
+                if (capability == P2PPeerCapability.HAS_APP_CONFIRMED) {
+                    sendP2PSmsBackup(callId, trigger, direction, messageType, numberSnapshot, remoteNumber)
+                } else if (capability != P2PPeerCapability.NO_APP) {
+                    requestP2PServerPresence(this, remoteNumber) { present ->
+                        if (present) {
+                            sendP2PSmsBackup(callId, trigger, direction, messageType, numberSnapshot, remoteNumber, peerKnownToHaveApp = true)
+                        } else {
+                            Log.w(P2P_FORENSIC_TAG, "exchange_sms_skip trigger=$trigger callId=$callId direction=$direction reason=peer_app_not_known")
+                        }
+                    }
+                }
                 // Not saved and no P2P name: other contact lists, then Google Maps (Google Phone's order).
                 lookUpUnsavedCaller(this, remoteNumber, call.details?.callerDisplayName.orEmpty().trim())
             }
@@ -2559,7 +2572,8 @@ class MyInCallService : InCallService() {
                 direction: String,
                 messageType: P2PMessageType,
                 numberSnapshot: P2PNumberSnapshot,
-                remoteNumber: String
+                remoteNumber: String,
+                peerKnownToHaveApp: Boolean = false
             ) {
                 val reverseTargetKey = if (messageType == P2PMessageType.REPLY) {
                     "replyTarget:${numberSnapshot.normalized.ifBlank { numberSnapshot.last10 }}"
@@ -2582,7 +2596,8 @@ class MyInCallService : InCallService() {
                     context = this,
                     destinationNumberRaw = remoteNumber,
                     messageType = messageType,
-                    trigger = "MyInCallService.$trigger.$direction"
+                    trigger = "MyInCallService.$trigger.$direction",
+                    peerKnownToHaveApp = peerKnownToHaveApp
                 )
                 Log.w(
                     P2P_FORENSIC_TAG,

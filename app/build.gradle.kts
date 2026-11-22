@@ -12,8 +12,8 @@ android {
         applicationId = "com.caller"
         minSdk = 26
         targetSdk = 35
-        versionCode = 244
-        versionName = "8.10.106"
+        versionCode = 245
+        versionName = "8.10.107"
     }
 
     buildTypes {
@@ -71,8 +71,6 @@ dependencies {
     implementation("com.google.android.material:material:1.11.0")
     implementation("androidx.constraintlayout:constraintlayout:2.1.4")
 
-    // Google Play Services for OTP Auto-fill
-    implementation("com.google.android.gms:play-services-auth:20.7.0")
     // Block Store: keeps the profile/P2P-name backup in Play services, outside the app's data.
     implementation("com.google.android.gms:play-services-auth-blockstore:16.4.0")
     // Name server calls: some providers (e.g. Jio) block *.workers.dev in DNS, so look it up over

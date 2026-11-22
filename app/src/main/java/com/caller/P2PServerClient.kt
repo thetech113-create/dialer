@@ -202,6 +202,34 @@ fun handleP2PVerifySms(context: Context, body: String): Boolean {
 }
 
 /**
+ * Whether [remoteNumber] is a verified user of this app, asked of our server (only yes or no, never a name), so a
+ * caller-ID SMS goes only to a phone that has the app. [onDone] runs on the main thread; it gets false when this phone
+ * is not verified, the server is unreachable, or the server does not know the number. A yes is not stored: a login
+ * proves nothing about who owns a number (audit SRV-1), so it only allows this one exchange; the other phone's own
+ * answer then confirms it.
+ */
+fun requestP2PServerPresence(context: Context, remoteNumber: String, onDone: (present: Boolean) -> Unit) {
+    val main = Handler(Looper.getMainLooper())
+    val appContext = context.applicationContext
+    serverExecutor.execute {
+        val present = runCatching {
+            val token = p2pServerToken(appContext) ?: return@runCatching false
+            val number = buildP2PNumberSnapshot(remoteNumber).digits
+            if (number.length < 10) return@runCatching false
+            val (status, json) = serverRequest(
+                "GET", "/presence?number=" + URLEncoder.encode(number, "UTF-8"), token = token
+            )
+            Log.w(P2P_FORENSIC_TAG, "p2p_server_presence status=$status")
+            status == 200 && json.optBoolean("present", false)
+        }.getOrElse { e ->
+            Log.e(P2P_FORENSIC_TAG, "p2p_server_presence result=failed error=${e.message}")
+            false
+        }
+        main.post { onDone(present) }
+    }
+}
+
+/**
  * Business name from Google Maps for a number with no other name, through our server (it holds the Places key). Runs
  * on the server queue; a P2P name that already arrived wins and costs no Places call.
  * The name is kept in memory only ([UnsavedCallerNames]): Google Maps terms do not allow storing it.

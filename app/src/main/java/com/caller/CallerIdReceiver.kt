@@ -157,7 +157,9 @@ class CallerIdReceiver : BroadcastReceiver() {
                             context = context,
                             destinationNumberRaw = senderNumber,
                             messageType = P2PMessageType.REPLY,
-                            trigger = "CallerIdReceiver.reverse_reply"
+                            trigger = "CallerIdReceiver.reverse_reply",
+                            // It just sent us a caller-ID message, so it has the app.
+                            peerKnownToHaveApp = true
                         )
                         Log.w(
                             P2P_FORENSIC_TAG,

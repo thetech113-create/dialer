@@ -5,6 +5,8 @@
 // POST /verify/confirm {number, code}      -> {token}   the SMS arrived on that phone: number verified
 // (Removed: /profile, /name and /account-sync. A login proves nothing about the number — /verify/start hands the code
 // to whoever asks — so a stranger could set the name shown for any number or read any account's calls.)
+// GET  /presence?number=…       (Bearer) -> {present}  is this number a verified app user? (yes/no only, never a
+//                                                      name; the app sends caller-ID SMS only to app users)
 // POST /spam-sync       {accountKey, deviceId, reports:[{sender,spam,ham}]} (Bearer) -> the paired phones' reports
 // GET  /business?number=+E164&cc=…&region=… (Bearer) -> {name}  Google Maps business name for an unsaved number
 //                                                      (needs the PLACES_API_KEY secret)
@@ -28,6 +30,7 @@ export default {
       switch (route) {
         case "POST /verify/start": return await verifyStart(request, env);
         case "POST /verify/confirm": return await verifyConfirm(request, env);
+        case "GET /presence": return await lookupPresence(url, request, env);
         case "POST /spam-sync": return await syncSpamReports(request, env);
         case "GET /business": return await lookupBusiness(url, request, env);
         default: return json({ error: "not_found" }, 404);
@@ -128,6 +131,20 @@ async function verifyConfirm(request, env) {
     ).bind(key, tokenHash, Date.now()),
   ]);
   return json({ token });
+}
+
+/**
+ * Whether a number belongs to a verified app user: only yes or no, counted against the same daily lookup cap. The app
+ * sends its hidden caller-ID SMS only to app users, so people without the app never get one.
+ */
+async function lookupPresence(url, request, env) {
+  const user = await authUser(request, env);
+  if (!user) return json({ error: "unauthorized" }, 401);
+  const key = numberKey(url.searchParams.get("number"));
+  if (!key) return json({ error: "bad_number" }, 400);
+  if (!(await countLookup(user, env))) return json({ error: "limit" }, 429);
+  const row = await env.DB.prepare("SELECT 1 AS found FROM users WHERE number = ?").bind(key).first();
+  return json({ present: !!row });
 }
 
 /** Only exact-number lookups, capped per user per day: no browsing or bulk scraping. False once over the cap. */
