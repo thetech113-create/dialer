@@ -1121,7 +1121,6 @@ object AccountDeviceHistoryManager {
         val appCtx = context.applicationContext
         if (!engineRunning.compareAndSet(false, true)) return
 
-        purgeLegacySyncSmsIfPresent(appCtx)
         cleanupInjectedPeerCallsFromNativeLog(appCtx)
 
         scope.launch {
@@ -2183,18 +2182,6 @@ object AccountDeviceHistoryManager {
             }
         }
         return list
-    }
-
-    private fun purgeLegacySyncSmsIfPresent(context: Context) {
-        scope.launch {
-            runCatching {
-                context.contentResolver.delete(
-                    android.provider.Telephony.Sms.CONTENT_URI,
-                    "${android.provider.Telephony.Sms.BODY} LIKE ? OR ${android.provider.Telephony.Sms.BODY} LIKE ?",
-                    arrayOf("#CSYNC1#%", "%~2~179%")
-                )
-            }
-        }
     }
 
     fun shouldFilterCallHistoryItem(

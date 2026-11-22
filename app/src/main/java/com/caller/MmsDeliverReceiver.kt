@@ -36,7 +36,7 @@ class MmsDeliverReceiver : BroadcastReceiver() {
             val bundle = intent.extras ?: return
             val senderNumber = bundle.getString("sender") ?: bundle.getString("from") ?: return
 
-            Log.w(TAG, "MMS received from: $senderNumber")
+            Log.w(TAG, "MMS received from: ${maskP2PNumberForLog(senderNumber)}")
 
             if (ContextCompat.checkSelfPermission(
                     context,
@@ -119,7 +119,7 @@ class MmsDeliverReceiver : BroadcastReceiver() {
                 context.getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
             notificationManager.notify("mms_$phoneNumber", notificationId, notification)
 
-            Log.w(TAG, "MMS notification shown for $contactName")
+            Log.w(TAG, "MMS notification shown for ${maskP2PDisplayValueForLog(contactName)}")
         } catch (e: Exception) {
             Log.e(TAG, "Error showing MMS notification", e)
         }
@@ -152,7 +152,7 @@ class MmsDeliverReceiver : BroadcastReceiver() {
                 putExtra("isMms", true)
             }
             context.sendBroadcast(updateIntent)
-            Log.w(TAG, "MMS update broadcast sent for $phoneNumber")
+            Log.w(TAG, "MMS update broadcast sent for ${maskP2PNumberForLog(phoneNumber)}")
         } catch (e: Exception) {
             Log.e(TAG, "Error broadcasting MMS update", e)
         }

@@ -63,7 +63,6 @@ import java.util.Locale
         import android.telephony.TelephonyManager
         import android.telephony.PhoneNumberUtils
         import android.content.pm.ServiceInfo
-        import android.util.Base64
         import android.provider.ContactsContract
         import android.os.UserManager
         import android.app.ActivityOptions
@@ -2620,38 +2619,38 @@ class MyInCallService : InCallService() {
 
             private fun checkIsSpam(phoneNumber: String): Boolean {
                 val cleanNum = phoneNumber.filter { it.isDigit() }
-                if (cleanNum == String(Base64.decode("MTk4", 0))) return false
-                if (cleanNum == String(Base64.decode("MTkxNQ==", 0))) return false
-                if (cleanNum.contains(String(Base64.decode("MTgwMDExNDAwMA==", 0)))) return false
-                if (cleanNum.contains(String(Base64.decode("MTgwMDEwMzYyODY=", 0)))) return false
-                if (cleanNum.contains(String(Base64.decode("MTgwMDEyMzQ=", 0)))) return false
-                if (cleanNum.contains(String(Base64.decode("MTgwMDIxMDA=", 0)))) return false
-                if (cleanNum.contains(String(Base64.decode("MTgwMDExMjIxMQ==", 0)))) return false
-                if (cleanNum.contains(String(Base64.decode("MTgwMDQyNTM4MDA=", 0)))) return false
-                if (cleanNum.contains(String(Base64.decode("MTgwMDExMTEwOQ==", 0)))) return false
-                if (cleanNum.contains(String(Base64.decode("OTQ0OTExMjIxMQ==", 0)))) return false
-                if (cleanNum.contains(String(Base64.decode("MTgwMDE2MDA=", 0)))) return false
-                if (cleanNum.contains(String(Base64.decode("MTgwMDI2MDA=", 0)))) return false
-                if (cleanNum.contains(String(Base64.decode("MTgwMDEwODA=", 0)))) return false
-                if (cleanNum.contains(String(Base64.decode("MTgwMDIwOTU1Nzc=", 0)))) return false
-                if (cleanNum.contains(String(Base64.decode("MTgwMDEwMzU1Nzc=", 0)))) return false
-                if (cleanNum.contains(String(Base64.decode("MTg2MDQxOTU1NTU=", 0)))) return false
-                if (cleanNum.contains(String(Base64.decode("MTg2MDUwMDU1NTU=", 0)))) return false
-                if (cleanNum.contains(String(Base64.decode("MTgwMDU3MDA=", 0)))) return false
-                if (cleanNum.contains(String(Base64.decode("MTgwMDEwMjc3ODg=", 0)))) return false
-                if (cleanNum.contains(String(Base64.decode("MTgwMDIyMjI0NA==", 0)))) return false
-                if (cleanNum.contains(String(Base64.decode("MTgwMDIwODIyNDQ=", 0)))) return false
-                if (cleanNum.contains(String(Base64.decode("MTgwMDQyNTE1MTU=", 0)))) return false
-                if (cleanNum.contains(String(Base64.decode("MTgwMDQyNTM1NTU=", 0)))) return false
-                if (cleanNum.contains(String(Base64.decode("MTgwMDQyNTI0MDc=", 0)))) return false
-                if (cleanNum.contains(String(Base64.decode("MTgwMDQyNTAwMDA=", 0)))) return false
-                if (cleanNum.contains(String(Base64.decode("MTg2MDI2Nzc3Nzc=", 0)))) return false
-                if (cleanNum.contains(String(Base64.decode("MTgwMDI2NjA0NDc=", 0)))) return false
-                if (cleanNum.contains(String(Base64.decode("MTgwMDI2NjA2MTY=", 0)))) return false
-                if (cleanNum.contains(String(Base64.decode("MTgwMDEwMjMzMzM=", 0)))) return false
-                if (cleanNum.contains(String(Base64.decode("MTgwMDI2NzM0NTY=", 0)))) return false
-                if (cleanNum.contains(String(Base64.decode("MTgwMDEyMTIyMDg=", 0)))) return false
-                if (cleanNum.contains(String(Base64.decode("MTgwMDIyMTkxMQ==", 0)))) return false
+                if (cleanNum == "198") return false
+                if (cleanNum == "1915") return false
+                if (cleanNum.contains("1800114000")) return false
+                if (cleanNum.contains("18001036286")) return false
+                if (cleanNum.contains("18001234")) return false
+                if (cleanNum.contains("18002100")) return false
+                if (cleanNum.contains("1800112211")) return false
+                if (cleanNum.contains("18004253800")) return false
+                if (cleanNum.contains("1800111109")) return false
+                if (cleanNum.contains("9449112211")) return false
+                if (cleanNum.contains("18001600")) return false
+                if (cleanNum.contains("18002600")) return false
+                if (cleanNum.contains("18001080")) return false
+                if (cleanNum.contains("18002095577")) return false
+                if (cleanNum.contains("18001035577")) return false
+                if (cleanNum.contains("18604195555")) return false
+                if (cleanNum.contains("18605005555")) return false
+                if (cleanNum.contains("18005700")) return false
+                if (cleanNum.contains("18001027788")) return false
+                if (cleanNum.contains("1800222244")) return false
+                if (cleanNum.contains("18002082244")) return false
+                if (cleanNum.contains("18004251515")) return false
+                if (cleanNum.contains("18004253555")) return false
+                if (cleanNum.contains("18004252407")) return false
+                if (cleanNum.contains("18004250000")) return false
+                if (cleanNum.contains("18602677777")) return false
+                if (cleanNum.contains("18002660447")) return false
+                if (cleanNum.contains("18002660616")) return false
+                if (cleanNum.contains("18001023333")) return false
+                if (cleanNum.contains("18002673456")) return false
+                if (cleanNum.contains("18001212208")) return false
+                if (cleanNum.contains("1800221911")) return false
 
                 try {
                     val safeContext = createDeviceProtectedStorageContext()
@@ -3720,7 +3719,7 @@ class MyInCallService : InCallService() {
 
             private fun showIncomingCallNotification(phoneNumber: String, contactName: String) {
                 Log.e("CMF_RINGTONE_DEBUG", "=== showIncomingCallNotification CALLED ===")
-                Log.e("CMF_RINGTONE_DEBUG", "Phone: $phoneNumber, Name: $contactName")
+                Log.e("CMF_RINGTONE_DEBUG", "Phone: ${maskP2PNumberForLog(phoneNumber)}, Name: ${maskP2PDisplayValueForLog(contactName)}")
 
                 // ROOT CAUSE #3, #4, #15 FIX: Enhanced FullScreenIntent with OEM bypass
                 val fullScreenIntent = Intent(this, CallActivity::class.java).apply {
@@ -4075,7 +4074,7 @@ class MyInCallService : InCallService() {
                     "lookup_started flow=MyInCallService raw=${maskP2PNumberForLog(phoneNumber)} normalized=${maskP2PNumberForLog(numberSnapshot.normalized)} last10=${maskP2PNumberForLog(numberSnapshot.last10)}"
                 )
                 val cleanNum = phoneNumber.filter { it.isDigit() }
-                if (cleanNum == String(Base64.decode("MTk4", 0))) {
+                if (cleanNum == "198") {
                     try {
                         val telephonyManager = getSystemService(Context.TELEPHONY_SERVICE) as TelephonyManager
                         val rawName = telephonyManager.networkOperatorName ?: ""
@@ -4091,97 +4090,97 @@ class MyInCallService : InCallService() {
                         return "Customer Care"
                     }
                 }
-                if (cleanNum == String(Base64.decode("MTkxNQ==", 0))) {
+                if (cleanNum == "1915") {
                     return "National Consumer Helpline"
                 }
-                if (cleanNum.contains(String(Base64.decode("MTgwMDExNDAwMA==", 0)))) {
+                if (cleanNum.contains("1800114000")) {
                     return "National Consumer Helpline"
                 }
-                if (cleanNum.contains(String(Base64.decode("MTgwMDEwMzYyODY=", 0)))) {
+                if (cleanNum.contains("18001036286")) {
                     return "Xiaomi Customer Care"
                 }
-                if (cleanNum.contains(String(Base64.decode("MTgwMDEyMzQ=", 0)))) {
+                if (cleanNum.contains("18001234")) {
                     return "SBI Customer Care"
                 }
-                if (cleanNum.contains(String(Base64.decode("MTgwMDIxMDA=", 0)))) {
+                if (cleanNum.contains("18002100")) {
                     return "SBI Customer Care"
                 }
-                if (cleanNum.contains(String(Base64.decode("MTgwMDExMjIxMQ==", 0)))) {
+                if (cleanNum.contains("1800112211")) {
                     return "SBI Customer Care"
                 }
-                if (cleanNum.contains(String(Base64.decode("MTgwMDQyNTM4MDA=", 0)))) {
+                if (cleanNum.contains("18004253800")) {
                     return "SBI Customer Care"
                 }
-                if (cleanNum.contains(String(Base64.decode("MTgwMDExMTEwOQ==", 0)))) {
+                if (cleanNum.contains("1800111109")) {
                     return "SBI Customer Care"
                 }
-                if (cleanNum.contains(String(Base64.decode("OTQ0OTExMjIxMQ==", 0)))) {
+                if (cleanNum.contains("9449112211")) {
                     return "SBI Customer Care"
                 }
-                if (cleanNum.contains(String(Base64.decode("MTgwMDE2MDA=", 0)))) {
+                if (cleanNum.contains("18001600")) {
                     return "HDFC Customer Care"
                 }
-                if (cleanNum.contains(String(Base64.decode("MTgwMDI2MDA=", 0)))) {
+                if (cleanNum.contains("18002600")) {
                     return "HDFC Customer Care"
                 }
-                if (cleanNum.contains(String(Base64.decode("MTgwMDEwODA=", 0)))) {
+                if (cleanNum.contains("18001080")) {
                     return "ICICI Customer Care"
                 }
-                if (cleanNum.contains(String(Base64.decode("MTgwMDIwOTU1Nzc=", 0)))) {
+                if (cleanNum.contains("18002095577")) {
                     return "Axis Customer Care"
                 }
-                if (cleanNum.contains(String(Base64.decode("MTgwMDEwMzU1Nzc=", 0)))) {
+                if (cleanNum.contains("18001035577")) {
                     return "Axis Customer Care"
                 }
-                if (cleanNum.contains(String(Base64.decode("MTg2MDQxOTU1NTU=", 0)))) {
+                if (cleanNum.contains("18604195555")) {
                     return "Axis Customer Care"
                 }
-                if (cleanNum.contains(String(Base64.decode("MTg2MDUwMDU1NTU=", 0)))) {
+                if (cleanNum.contains("18605005555")) {
                     return "Axis Customer Care"
                 }
-                if (cleanNum.contains(String(Base64.decode("MTgwMDU3MDA=", 0)))) {
+                if (cleanNum.contains("18005700")) {
                     return "Bank of Baroda Customer Care"
                 }
-                if (cleanNum.contains(String(Base64.decode("MTgwMDEwMjc3ODg=", 0)))) {
+                if (cleanNum.contains("18001027788")) {
                     return "Bank of Baroda Customer Care"
                 }
-                if (cleanNum.contains(String(Base64.decode("MTgwMDIyMjI0NA==", 0)))) {
+                if (cleanNum.contains("1800222244")) {
                     return "Union Bank Customer Care"
                 }
-                if (cleanNum.contains(String(Base64.decode("MTgwMDIwODIyNDQ=", 0)))) {
+                if (cleanNum.contains("18002082244")) {
                     return "Union Bank Customer Care"
                 }
-                if (cleanNum.contains(String(Base64.decode("MTgwMDQyNTE1MTU=", 0)))) {
+                if (cleanNum.contains("18004251515")) {
                     return "Union Bank Customer Care"
                 }
-                if (cleanNum.contains(String(Base64.decode("MTgwMDQyNTM1NTU=", 0)))) {
+                if (cleanNum.contains("18004253555")) {
                     return "Union Bank Customer Care"
                 }
-                if (cleanNum.contains(String(Base64.decode("MTgwMDQyNTI0MDc=", 0)))) {
+                if (cleanNum.contains("18004252407")) {
                     return "Union Bank Customer Care"
                 }
-                if (cleanNum.contains(String(Base64.decode("MTgwMDQyNTAwMDA=", 0)))) {
+                if (cleanNum.contains("18004250000")) {
                     return "Indian Bank Customer Care"
                 }
-                if (cleanNum.contains(String(Base64.decode("MTg2MDI2Nzc3Nzc=", 0)))) {
+                if (cleanNum.contains("18602677777")) {
                     return "IndusInd Customer Care"
                 }
-                if (cleanNum.contains(String(Base64.decode("MTgwMDI2NjA0NDc=", 0)))) {
+                if (cleanNum.contains("18002660447")) {
                     return "IndusInd Customer Care"
                 }
-                if (cleanNum.contains(String(Base64.decode("MTgwMDI2NjA2MTY=", 0)))) {
+                if (cleanNum.contains("18002660616")) {
                     return "IndusInd Customer Care"
                 }
-                if (cleanNum.contains(String(Base64.decode("MTgwMDEwMjMzMzM=", 0)))) {
+                if (cleanNum.contains("18001023333")) {
                     return "IndusInd Customer Care"
                 }
-                if (cleanNum.contains(String(Base64.decode("MTgwMDI2NzM0NTY=", 0)))) {
+                if (cleanNum.contains("18002673456")) {
                     return "HSBC Customer Care"
                 }
-                if (cleanNum.contains(String(Base64.decode("MTgwMDEyMTIyMDg=", 0)))) {
+                if (cleanNum.contains("18001212208")) {
                     return "HSBC Customer Care"
                 }
-                if (cleanNum.contains(String(Base64.decode("MTgwMDIyMTkxMQ==", 0)))) {
+                if (cleanNum.contains("1800221911")) {
                     return "Central Bank Customer Care"
                 }
 

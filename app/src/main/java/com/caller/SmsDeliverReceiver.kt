@@ -60,7 +60,7 @@ class SmsDeliverReceiver : BroadcastReceiver() {
         val signature = "${sender.trim().uppercase()}|${fullBody.hashCode()}"
         val previousTime = recentSmsCache[signature]
         if (previousTime != null && (now - previousTime) < DEDUP_WINDOW_MS) {
-            Log.w(TAG, "Blocked duplicate in-memory SMS from $sender")
+            Log.w(TAG, "Blocked duplicate in-memory SMS from ${maskP2PNumberForLog(sender)}")
             return
         }
         recentSmsCache[signature] = now
@@ -228,7 +228,7 @@ class SmsDeliverReceiver : BroadcastReceiver() {
                 context.getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
             notificationManager.notify("sms_$phoneNumber", notificationId, notification)
 
-            Log.w(TAG, "SMS notification shown for $contactName")
+            Log.w(TAG, "SMS notification shown for ${maskP2PDisplayValueForLog(contactName)}")
         } catch (e: Exception) {
             Log.e(TAG, "Error showing SMS notification", e)
         }
@@ -290,7 +290,7 @@ class SmsDeliverReceiver : BroadcastReceiver() {
                 putExtra("timestamp", System.currentTimeMillis())
             }
             context.sendBroadcast(updateIntent)
-            Log.w(TAG, "SMS update broadcast sent for $phoneNumber")
+            Log.w(TAG, "SMS update broadcast sent for ${maskP2PNumberForLog(phoneNumber)}")
         } catch (e: Exception) {
             Log.e(TAG, "Error broadcasting SMS update", e)
         }

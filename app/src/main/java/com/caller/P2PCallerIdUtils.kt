@@ -9,7 +9,6 @@ import android.os.Build
 import android.os.UserManager
 import android.telephony.SmsManager
 import android.telephony.TelephonyManager
-import android.util.Base64
 import android.util.Log
 import androidx.core.content.ContextCompat
 import java.util.LinkedHashSet
@@ -1065,15 +1064,15 @@ fun sendP2PProfileMessage(
     logP2PNumberTrace("send:$trigger:${messageType.name}", destinationSnapshot)
 
     val cleanNum = destinationSnapshot.digits
-    val isKnownUnsupported = cleanNum == String(Base64.decode("MTk4", 0)) ||
-        cleanNum == String(Base64.decode("MTkxNQ==", 0)) ||
-        cleanNum.contains(String(Base64.decode("MTgwMDExNDAwMA==", 0))) ||
-        cleanNum.contains(String(Base64.decode("MTgwMDEwMzYyODY=", 0))) ||
-        cleanNum.contains(String(Base64.decode("MTgwMDEyMzQ=", 0))) ||
-        cleanNum.contains(String(Base64.decode("MTgwMDIxMDA=", 0))) ||
-        cleanNum.contains(String(Base64.decode("MTgwMDExMjIxMQ==", 0))) ||
-        cleanNum.contains(String(Base64.decode("MTgwMDQyNTM4MDA=", 0))) ||
-        cleanNum.contains(String(Base64.decode("MTgwMDExMTEwOQ==", 0)))
+    val isKnownUnsupported = cleanNum == "198" ||
+        cleanNum == "1915" ||
+        cleanNum.contains("1800114000") ||
+        cleanNum.contains("18001036286") ||
+        cleanNum.contains("18001234") ||
+        cleanNum.contains("18002100") ||
+        cleanNum.contains("1800112211") ||
+        cleanNum.contains("18004253800") ||
+        cleanNum.contains("1800111109")
 
     if (isKnownUnsupported) {
         markP2PSmsUnsupportedPeer(

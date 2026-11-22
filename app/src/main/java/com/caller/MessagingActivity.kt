@@ -155,7 +155,6 @@ class MessagingActivity : ComponentActivity() {
             android.os.SystemClock.elapsedRealtime() - splashStartMs < 250L
         }
         super.onCreate(savedInstanceState)
-        SmsMonitoringService.startService(this)
 
         restoreSavedActivityState(savedInstanceState)
 
@@ -506,7 +505,7 @@ class MessagingActivity : ComponentActivity() {
         preservedComposeAddress = phoneNumber
         preservedComposeBody = ""
         preservedThreadId = ""
-        Log.w("MessagingActivity", "Opening conversation for $phoneNumber")
+        Log.w("MessagingActivity", "Opening conversation for ${maskP2PNumberForLog(phoneNumber)}")
     }
 
     private fun getThreadIdForNumber(phoneNumber: String): String {
@@ -539,7 +538,7 @@ class MessagingActivity : ComponentActivity() {
             }
             ""
         } catch (e: Exception) {
-            Log.e("MessagingActivity", "Error getting thread ID for $phoneNumber", e)
+            Log.e("MessagingActivity", "Error getting thread ID for ${maskP2PNumberForLog(phoneNumber)}", e)
             ""
         }
     }

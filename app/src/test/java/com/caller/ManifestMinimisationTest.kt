@@ -12,6 +12,8 @@ import javax.xml.parsers.DocumentBuilderFactory
  * - MyConnectionService: the app registers no phone account for it (and removes its own), so Telecom never used it.
  * - OtpSmsReceiver: Google's SMS Retriever only delivers texts carrying this app's hash, which no text does; it was
  *   exported behind RECEIVE_SMS, so any app holding that permission could make it copy a fake "OTP" to the clipboard.
+ * - SmsMonitoringService: a sticky background service started on every launch that did nothing (it registered no
+ *   receiver) yet was declared as a phone-call foreground service.
  */
 class ManifestMinimisationTest {
     private val androidNs = "http://schemas.android.com/apk/res/android"
@@ -32,7 +34,9 @@ class ManifestMinimisationTest {
             "android.permission.REORDER_TASKS",
             "android.permission.DISABLE_KEYGUARD",
             "android.permission.MANAGE_OWN_CALLS",
-            "android.permission.WRITE_EXTERNAL_STORAGE"
+            "android.permission.WRITE_EXTERNAL_STORAGE",
+            // Marked permissionFlags="removed" in Android itself; writing SMS is granted by the default-SMS role.
+            "android.permission.WRITE_SMS"
         ).filter { it in declared }
         assertTrue("unused permissions still declared: $unused", unused.isEmpty())
     }
@@ -40,7 +44,7 @@ class ManifestMinimisationTest {
     @Test
     fun deadComponentsAreGone() {
         val components = names("service") + names("receiver")
-        val dead = listOf(".MyConnectionService", ".OtpSmsReceiver").filter { it in components }
+        val dead = listOf(".MyConnectionService", ".OtpSmsReceiver", ".SmsMonitoringService").filter { it in components }
         assertTrue("dead components still declared: $dead", dead.isEmpty())
     }
 }

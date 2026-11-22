@@ -658,7 +658,7 @@ object CallerAnnouncementManager {
         UltraForensicLogger.info(
             FORENSIC_COMP,
             "ANNOUNCE_RESOLVED",
-            "hasCustomAlias=${customAlias.isNotBlank()} hasContact=${!resolvedContactName.isNullOrBlank()} spokenIdentity=$spokenIdentity"
+            "hasCustomAlias=${customAlias.isNotBlank()} hasContact=${!resolvedContactName.isNullOrBlank()} spokenIdentity=${maskP2PDisplayValueForLog(spokenIdentity)}"
         )
         announce(appCtx, spokenIdentity, repeatWhileRinging = true)
     }
@@ -721,7 +721,7 @@ object CallerAnnouncementManager {
 
         mainHandler.post {
             if (!isTtsInitialized || tts == null) {
-                UltraForensicLogger.info(FORENSIC_COMP, "QUEUE_PENDING_INIT", "text=$fullText")
+                UltraForensicLogger.info(FORENSIC_COMP, "QUEUE_PENDING_INIT", "text=${maskP2PDisplayValueForLog(fullText)}")
                 init(appCtx)
                 return@post
             }
@@ -769,7 +769,7 @@ object CallerAnnouncementManager {
         UltraForensicLogger.info(
             FORENSIC_COMP,
             "SPEAK_DISPATCHED",
-            "result=$speakResult stream=$targetStream text=$text utteranceId=$utteranceId"
+            "result=$speakResult stream=$targetStream text=${maskP2PDisplayValueForLog(text)} utteranceId=$utteranceId"
         )
 
         if (speakResult == TextToSpeech.ERROR) {

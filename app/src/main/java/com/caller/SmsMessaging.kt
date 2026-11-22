@@ -12,7 +12,6 @@ import android.os.Build
 import android.provider.Telephony
 import android.telephony.SmsManager
 import android.telephony.SmsMessage
-import android.util.Base64
 import android.util.Log
 import androidx.core.content.ContextCompat
 import java.util.Locale
@@ -421,7 +420,7 @@ fun isAlreadyInSystemSmsDb(
 
 private fun persistInboxSms(context: Context, sender: String, body: String, timestamp: Long) {
     if (isAlreadyInSystemSmsDb(context, sender, body, timestamp)) {
-        android.util.Log.w("SmsMessaging", "Blocked duplicate DB SMS from $sender")
+        android.util.Log.w("SmsMessaging", "Blocked duplicate DB SMS from ${maskP2PNumberForLog(sender)}")
         return
     }
     val values = ContentValues().apply {
@@ -470,7 +469,7 @@ private fun buildSmsThreadGroupKey(address: String, threadId: String): String {
 
 fun getSystemContactName(phoneNumber: String, context: Context?): String? {
     val cleanNum = phoneNumber.filter { it.isDigit() }
-    if (cleanNum == String(Base64.decode("MTk4", 0))) {
+    if (cleanNum == "198") {
         return try {
             val telephonyManager = context?.getSystemService(Context.TELEPHONY_SERVICE) as android.telephony.TelephonyManager
             val rawName = telephonyManager.networkOperatorName ?: ""

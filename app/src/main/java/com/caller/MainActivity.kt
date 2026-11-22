@@ -1311,7 +1311,6 @@ class MainActivity : ComponentActivity() {
 
         handleIncomingCallIntent()
 
-        SmsMonitoringService.startService(this)
         CallerAnnouncementManager.init(this)
         AccountDeviceHistoryManager.startSyncEngine(this)
         AccountDeviceHistoryManager.addStateListener(accountHistoryListener)
