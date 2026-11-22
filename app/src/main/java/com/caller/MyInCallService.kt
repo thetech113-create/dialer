@@ -2127,8 +2127,12 @@ class MyInCallService : InCallService() {
                 btCallFocus.release()
                 btCallSilence.restore()
 
-                val destroyedDuringLiveCall = !bubbleSuppressedForTermination &&
-                    (getLiveCalls().isNotEmpty() || isTelecomFrameworkInCall())
+                // Only a call this service still holds counts: when Telecom has moved the call to another call screen
+                // (liveCalls=0, telecomInCall=true) a restart cannot get it back and only looped (F-CALL-3).
+                val destroyedDuringLiveCall = shouldRestartInCallServiceOnDestroy(
+                    terminationRequested = bubbleSuppressedForTermination,
+                    ownLiveCalls = getLiveCalls().size
+                )
                 if (destroyedDuringLiveCall) {
                     val sticky = lastCallUiSnapshot
                     if (sticky?.isInCall == true && sticky.primaryNumber.isNotBlank()) {
@@ -4295,3 +4299,10 @@ class MyInCallService : InCallService() {
             }
 
             }
+
+/**
+ * Whether onDestroy restarts the call service. Only a service that still holds a call of its own restarts: when Telecom
+ * has given the call to another call screen it no longer binds this one, and a restart only looped (audit F-CALL-3).
+ */
+internal fun shouldRestartInCallServiceOnDestroy(terminationRequested: Boolean, ownLiveCalls: Int): Boolean =
+    !terminationRequested && ownLiveCalls > 0
