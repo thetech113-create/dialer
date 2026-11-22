@@ -9042,7 +9042,13 @@ fun SettingsScreen(
                     horizontalArrangement = Arrangement.SpaceBetween,
                     verticalAlignment = Alignment.CenterVertically
                 ) {
-                    Row(verticalAlignment = Alignment.CenterVertically) {
+                    @OptIn(ExperimentalLayoutApi::class)
+                    FlowRow {
+                        TextButton(onClick = {
+                            com.caller.logging.UltraForensicLogger.copyLogHistory(context)
+                        }) {
+                            Text("Copy Logs")
+                        }
                         TextButton(onClick = {
                             com.caller.logging.UltraForensicLogger.shareLogHistory(context)
                         }) {

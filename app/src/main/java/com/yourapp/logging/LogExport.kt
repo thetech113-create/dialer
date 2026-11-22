@@ -11,6 +11,7 @@ import java.io.RandomAccessFile
  */
 internal object LogExport {
     const val MAX_EXPORT_BYTES = 15L * 1024 * 1024
+    const val RECENT_KEY_LINES_TITLE = "=== RECENT KEY LINES (the app's call and error lines, newest part, oldest first) ==="
     private const val RESERVE_BYTES = 1024L
     private const val BLOCK_BYTES = 64 * 1024
 
@@ -55,6 +56,18 @@ internal object LogExport {
         AppLogRecorder.keepTail(appLog.lineSequence().filter { isKeyLine(it) }.joinToString("\n"), maxChars)
 
     /**
+     * What "Copy Logs" puts on the clipboard: [header] and [recentKeyLines], or [screenText] when there are no key lines
+     * yet. The whole log can be 15 MB, too big for the clipboard, so only these lines are copied.
+     */
+    fun copyText(header: String, recentKeyLines: String, screenText: () -> String): String =
+        if (recentKeyLines.isNotBlank()) {
+            header + "Copied with Copy Logs: only the newest call and error lines. Share Logs sends the full file.\n\n" +
+                RECENT_KEY_LINES_TITLE + "\n" + recentKeyLines + "\n"
+        } else {
+            header + "\n" + screenText()
+        }
+
+    /**
      * Writes [header], then [recentAppLog] (the newest key lines, first so that a text cut short, such as a paste into a
      * chat, still holds the newest evidence), then the forensic session files and the app's own log files, all oldest
      * first. The app log gets at most half of [maxBytes]; the sessions get the rest.
@@ -73,7 +86,7 @@ internal object LogExport {
         val sessionBudget = (maxBytes - headerBytes.size - recentBytes.size - appBudget - RESERVE_BYTES).coerceAtLeast(0L)
         out.write(headerBytes)
         if (recentBytes.isNotEmpty()) {
-            out.write("\n=== RECENT KEY LINES (the app's call and error lines, newest part, oldest first) ===\n".toByteArray(Charsets.UTF_8))
+            out.write("\n$RECENT_KEY_LINES_TITLE\n".toByteArray(Charsets.UTF_8))
             out.write(recentBytes)
             out.write('\n'.code)
         }

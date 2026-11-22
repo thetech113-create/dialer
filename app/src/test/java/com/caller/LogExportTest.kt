@@ -117,4 +117,21 @@ class LogExportTest {
         val text = export(emptyList(), emptyList(), 100_000)
         assertFalse(text.contains("RECENT KEY LINES"))
     }
+
+    @Test
+    fun copyLogsCopiesTheHeaderAndTheNewestKeyLines() {
+        val text = LogExport.copyText("H\n", "key line 1\nkey line 2") { "screen text" }
+        assertTrue(text.startsWith("H\n"))
+        assertTrue(text.indexOf(LogExport.RECENT_KEY_LINES_TITLE) < text.indexOf("key line 1"))
+        assertTrue(text.contains("key line 2"))
+        assertFalse(text.contains("screen text"))
+    }
+
+    @Test
+    fun copyLogsCopiesTheScreenTextWhenThereAreNoKeyLines() {
+        val text = LogExport.copyText("H\n", "") { "screen text" }
+        assertTrue(text.startsWith("H\n"))
+        assertTrue(text.contains("screen text"))
+        assertFalse(text.contains("RECENT KEY LINES"))
+    }
 }
