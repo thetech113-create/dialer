@@ -3654,6 +3654,21 @@ class MainActivity : ComponentActivity() {
             showError("Invalid phone number")
             return
         }
+        when (val code = dialCodeOf(dialableNumber)) {
+            DialCode.NotDialable -> {
+                showError("$dialableNumber was not dialled: it is not a phone number or a USSD code (USSD codes end with #)")
+                return
+            }
+            is DialCode.Secret -> {
+                try {
+                    (getSystemService(TELEPHONY_SERVICE) as TelephonyManager).sendDialerSpecialCode(code.code)
+                } catch (e: SecurityException) {
+                    showError("This code can only be sent by the default phone app")
+                }
+                return
+            }
+            DialCode.Call -> Unit
+        }
         if (!hasCallPhonePermission()) {
             showError("Call permission is required to place calls")
             return
