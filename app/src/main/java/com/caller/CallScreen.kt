@@ -2007,13 +2007,13 @@ class CallActivity : ComponentActivity() {
                         )
                         endCallJob = scope.launch {
                             kotlinx.coroutines.delay(delayMs)
-                            val hasLiveCall = hasLiveCall()
-                            if (hasLiveCall) {
-                                logCall("cleanup blocked inside Compose debounce because live call still exists")
-                                endCallJob = null
-                            } else {
-                                finishCallUiAfterCall("call_ended")
+                            if (hasLiveCall()) {
+                                logCall("cleanup waiting inside Compose debounce because live call still exists")
+                                Log.w(CALL_UI_FORENSIC_TAG, "call_ui_finish_debounce action=wait_live_call reason=$reason")
+                                awaitNoLiveCall(::hasLiveCall)
+                                Log.w(CALL_UI_FORENSIC_TAG, "call_ui_finish_debounce action=live_call_cleared reason=$reason")
                             }
+                            finishCallUiAfterCall("call_ended")
                         }
                     }
                 }
