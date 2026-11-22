@@ -24,7 +24,6 @@ package com.caller
 import android.content.BroadcastReceiver
 import android.content.Context
 import android.content.Intent
-import android.telecom.CallAudioState
 import android.util.Log
 import com.caller.logging.UltraForensicLogger
 
@@ -51,7 +50,7 @@ class NotificationRepostReceiver : BroadcastReceiver() {
             }
             Constants.ACTION_SPEAKER_CALL -> {
                 val currentSpeaker = inCallService?.getCurrentCallStateFromSync()?.isSpeakerOn == true
-                val nextRoute = if (currentSpeaker) CallAudioState.ROUTE_EARPIECE else CallAudioState.ROUTE_SPEAKER
+                val nextRoute = speakerToggleRoute(speakerOn = !currentSpeaker)
                 inCallService?.setCallAudioRoute(nextRoute)
             }
             Constants.ACTION_NOTIFICATION_DISMISSED -> {

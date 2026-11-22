@@ -2350,7 +2350,7 @@ class MyInCallService : InCallService() {
                     }
                     Constants.ACTION_SPEAKER_CALL -> {
                         val currentSpeaker = getCurrentCallStateFromSync().isSpeakerOn
-                        val nextRoute = if (currentSpeaker) CallAudioState.ROUTE_EARPIECE else CallAudioState.ROUTE_SPEAKER
+                        val nextRoute = speakerToggleRoute(speakerOn = !currentSpeaker)
                         setCallAudioRoute(nextRoute)
                         startNotificationRepost(forceRefresh = true)
                     }

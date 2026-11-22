@@ -2187,7 +2187,7 @@ class CallActivity : ComponentActivity() {
                             MyInCallService.getInstance()?.setMuted(newMuteState)
                         }},
                         onToggleSpeaker = { toggleSpeaker(this, renderState.isSpeakerOn) { newSpeakerState ->
-                            val route = if (newSpeakerState) android.telecom.CallAudioState.ROUTE_SPEAKER else android.telecom.CallAudioState.ROUTE_EARPIECE
+                            val route = speakerToggleRoute(newSpeakerState)
                             MyInCallService.getInstance()?.setCallAudioRoute(route)
                         }},
                         onSelectAudioRoute = { route ->
@@ -2332,12 +2332,19 @@ fun toggleSpeaker(context: Context, currentSpeakerState: Boolean, onSpeakerChang
     val newSpeakerState = !currentSpeakerState
     onSpeakerChanged(newSpeakerState)
     try {
-        val route = if (newSpeakerState) android.telecom.CallAudioState.ROUTE_SPEAKER else android.telecom.CallAudioState.ROUTE_EARPIECE
+        val route = speakerToggleRoute(newSpeakerState)
         MyInCallService.getInstance()?.setCallAudioRoute(route)
     } catch (e: Exception) {
         onSpeakerChanged(currentSpeakerState)
     }
 }
+
+/**
+ * The route the speaker button asks for. Off is ROUTE_WIRED_OR_EARPIECE, not ROUTE_EARPIECE: with a wired headset
+ * plugged in Telecom has no earpiece route and ignores an earpiece request, which left the call on the speaker.
+ */
+internal fun speakerToggleRoute(speakerOn: Boolean): Int =
+    if (speakerOn) android.telecom.CallAudioState.ROUTE_SPEAKER else android.telecom.CallAudioState.ROUTE_WIRED_OR_EARPIECE
 
 fun selectAudioRoute(route: Int) {
     try {
