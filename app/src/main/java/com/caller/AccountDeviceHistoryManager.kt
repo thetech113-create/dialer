@@ -1397,11 +1397,16 @@ object AccountDeviceHistoryManager {
         }
         remoteRoster?.let { ingestAccountSnapshotJson(context, it, accountId) }
 
+        // The topics are public and the shared account's name comes from this phone's number: upload nothing on an
+        // account that no phone is paired on (audit F-PRIV-1).
+        val hasReader = cloudAccountHasReader(accountId.startsWith(LINK_ACCOUNT_PREFIX), peersInAccount(context, accountId).isNotEmpty())
+        if (!hasReader) notes += "nothing uploaded: no phone is linked on this account"
+
         // The source's roster names only itself: a receiver's entry in a roster it read would list the receiver as a peer.
         val rosterJson = buildRosterJson(context, if (role == LinkRole.SOURCE) null else remoteRoster, accountId)
         val rosterSig = computeRosterSignature(rosterJson)
         val rosterSigKey = publishSigKey(KEY_LAST_PUBLISHED_ROSTER_SIG, accountKey, isPrimary)
-        val shouldPostRoster = mayPostRoster(role) && isPublishNeeded(context, rosterSigKey, rosterSig)
+        val shouldPostRoster = hasReader && mayPostRoster(role) && isPublishNeeded(context, rosterSigKey, rosterSig)
 
         if (shouldPostRoster) {
             if (isRateLimitActive()) {
@@ -1416,7 +1421,7 @@ object AccountDeviceHistoryManager {
                     if (rosterPost.code == 429) markRateLimited()
                 }
             }
-        } else {
+        } else if (hasReader) {
             notes += "roster unchanged"
         }
 
@@ -1424,7 +1429,7 @@ object AccountDeviceHistoryManager {
         val ownCalls = queryLocalDeviceCallLog(context, maxCount = CLOUD_MAX_OWN_CALLS)
         val ownCallsSig = computeOwnCallsSignature(ownCalls)
         val callsSigKey = publishSigKey(KEY_LAST_PUBLISHED_CALLS_SIG, accountKey, isPrimary)
-        val shouldPostCalls = mayPublishOwnCalls(role) && isPublishNeeded(context, callsSigKey, ownCallsSig)
+        val shouldPostCalls = hasReader && mayPublishOwnCalls(role) && isPublishNeeded(context, callsSigKey, ownCallsSig)
 
         val ownBody = buildOwnCallsJson(context, ownCalls, accountId)
         if (shouldPostCalls) {
@@ -1454,7 +1459,7 @@ object AccountDeviceHistoryManager {
                     if (ownPost.code == 429) markRateLimited()
                 }
             }
-        } else {
+        } else if (hasReader) {
             notes += "own calls unchanged"
         }
 
@@ -1859,8 +1864,11 @@ object AccountDeviceHistoryManager {
         runCatching {
             val myDeviceId = getCurrentDeviceId(context)
             val tsIp = getOwnTailscaleIp()
-            // One beacon per account (the shared one and every private link), so each link syncs on its own key.
-            val payloads = getAllAccountIds(context).map { canonicalKeyFor(it) }.distinct().map { accountKey ->
+            // One beacon per account (the shared one and every private link), so each link syncs on its own key. The key
+            // of the shared account is a hash of this phone's number: never announce it when no phone is linked on it.
+            val payloads = getAllAccountIds(context).filter {
+                cloudAccountHasReader(it.startsWith(LINK_ACCOUNT_PREFIX), peersInAccount(context, it).isNotEmpty())
+            }.map { canonicalKeyFor(it) }.distinct().map { accountKey ->
                 ("CALLER_ACCT_SYNC|$accountKey|$myDeviceId|$TCP_SYNC_PORT" +
                         if (tsIp.isNotBlank()) "|$tsIp" else "").toByteArray(Charsets.UTF_8)
             }
@@ -3166,6 +3174,13 @@ internal fun mayIngestFrom(role: LinkRole, senderDeviceId: String, linkPeerIds: 
     LinkRole.RECEIVER -> senderDeviceId.isBlank() || senderDeviceId in linkPeerIds
     LinkRole.MUTUAL -> true
 }
+
+/**
+ * Whether anyone can legitimately read what this phone uploads or announces for an account. A private link always has
+ * a reader (its receiver is not listed as a peer). The shared account has one only when a phone is paired on it; its
+ * public topic name and LAN key come from this phone's own number, so with no reader nothing may be sent (F-PRIV-1).
+ */
+internal fun cloudAccountHasReader(isPrivateLink: Boolean, hasPairedPeer: Boolean): Boolean = isPrivateLink || hasPairedPeer
 
 /** A link is dropped when no phone uses it, except one this phone generated: its receiver is not listed as a peer. */
 internal fun keepLinkWhenPruning(role: LinkRole, hasPeer: Boolean): Boolean = hasPeer || role == LinkRole.SOURCE
