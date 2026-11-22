@@ -774,6 +774,45 @@ fun lookupRecentP2PName(context: Context, phoneNumber: String, maxAgeMs: Long): 
     return name.takeIf { System.currentTimeMillis() - receivedAt <= maxAgeMs }
 }
 
+/**
+ * Whether the number a caller-ID SMS claims may be named too (audit P2P-1). Anyone can send the SMS, so the claimed
+ * number counts only when it is the sender's own number or a number on a call with this phone (a dual-SIM caller
+ * calls from one SIM and texts from the other).
+ */
+internal fun p2pDeclaredNumberTrusted(transportKeys: Set<String>, declaredKeys: Set<String>, callKeys: Set<String>): Boolean =
+    declaredKeys.isEmpty() || declaredKeys.any { it in transportKeys || it in callKeys }
+
+/** Whether a caller-ID SMS is answered with this phone's name (audit P2P-2): only from a number on a call with us. */
+internal fun p2pReplyAllowed(senderKeys: Set<String>, trustedDeclaredKeys: Set<String>, callKeys: Set<String>): Boolean =
+    (senderKeys + trustedDeclaredKeys).any { it in callKeys }
+
+private const val P2P_RECENT_CALL_WINDOW_MS = 10 * 60 * 1000L
+
+/**
+ * Lookup keys of the numbers of the live call and of the calls that ended in the last 10 minutes: a caller-ID SMS can
+ * arrive after a short call was already rejected or missed.
+ */
+internal fun p2pCallNumberKeys(context: Context, activeNumber: String): Set<String> {
+    val keys = buildP2PNumberSnapshot(activeNumber).lookupKeys.toMutableSet()
+    if (ContextCompat.checkSelfPermission(context, Manifest.permission.READ_CALL_LOG) != PackageManager.PERMISSION_GRANTED) {
+        return keys
+    }
+    runCatching {
+        context.contentResolver.query(
+            android.provider.CallLog.Calls.CONTENT_URI,
+            arrayOf(android.provider.CallLog.Calls.NUMBER),
+            "${android.provider.CallLog.Calls.DATE} > ?",
+            arrayOf((System.currentTimeMillis() - P2P_RECENT_CALL_WINDOW_MS).toString()),
+            "${android.provider.CallLog.Calls.DATE} DESC"
+        )?.use { cursor ->
+            while (cursor.moveToNext()) {
+                keys += buildP2PNumberSnapshot(cursor.getString(0).orEmpty()).lookupKeys
+            }
+        }
+    }
+    return keys
+}
+
 fun storeP2PProfile(
     context: Context,
     transportNumberRaw: String,
@@ -1156,9 +1195,9 @@ fun sendP2PProfileMessage(
         "send_prepare trigger=$trigger type=${messageType.name} profileSource=${finalProfile.source} destRaw=${maskP2PNumberForLog(destinationSnapshot.raw)} destNormalized=${maskP2PNumberForLog(destinationSnapshot.normalized)} destLast10=${maskP2PNumberForLog(destinationSnapshot.last10)} transportPref=${transportPreference.transportMode.name} transportSource=${transportPreference.source} payload=${maskP2PPayloadForLog(payload)}"
     )
     val dedupeKey = buildP2PSendDedupeKey(destinationSnapshot, messageType)
-    // REPLY messages ALWAYS go through - they're responses and shouldn't be deduplicated
-    val shouldCheckDedup = messageType != P2PMessageType.REPLY
-    if (shouldCheckDedup && P2PSendDedupeRegistry.shouldSuppress(dedupeKey, P2P_SEND_DEDUPE_WINDOW_MS)) {
+    // Replies are limited too: one per number per window, so repeated caller-ID SMS cannot make this phone send many
+    // texts (audit P2P-2).
+    if (P2PSendDedupeRegistry.shouldSuppress(dedupeKey, P2P_SEND_DEDUPE_WINDOW_MS)) {
         logP2PSmsDecision(
             destinationSnapshot = destinationSnapshot,
             messageType = messageType,

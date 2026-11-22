@@ -2546,18 +2546,9 @@ class MyInCallService : InCallService() {
                     return
                 }
 
-                // Server first (once per call). The silent SMS is only the backup: skipped when the server already
-                // gave both phones each other's names (Google's rule: no SMS the user did not ask for).
-                requestP2PServerCallerName(this, remoteNumber) { namesSharedByServer ->
-                    if (namesSharedByServer) {
-                        Log.w(
-                            P2P_FORENSIC_TAG,
-                            "exchange_sms_skip trigger=$trigger callId=$callId direction=$direction reason=server_shared_names"
-                        )
-                    } else {
-                        sendP2PSmsBackup(callId, trigger, direction, messageType, numberSnapshot, remoteNumber)
-                    }
-                }
+                // Names travel only by the caller-ID SMS: the name server is off, because it gives a login for any
+                // number to anyone who asks, so a stranger could set the name shown for someone else's number (audit SRV-1).
+                sendP2PSmsBackup(callId, trigger, direction, messageType, numberSnapshot, remoteNumber)
                 // Not saved and no P2P name: other contact lists, then Google Maps (Google Phone's order).
                 lookUpUnsavedCaller(this, remoteNumber, call.details?.callerDisplayName.orEmpty().trim())
             }

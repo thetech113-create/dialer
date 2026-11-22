@@ -7,13 +7,14 @@ import android.os.Build
 internal enum class SpamAction { ALLOW, FLAG, DROP }
 
 /**
- * Smart Spam Protection flags suspected spam and drops only clear spam: an international fraud prefix (Wangiri), a
- * caller ID the network reports as faked (STIR/SHAKEN failed), or a score of 100 or more (machine-timed repeat calls
- * plus a burst). A flagged call rings and its call screen says "Potential spam".
+ * Smart Spam Protection flags suspected spam and drops only clear spam: a caller ID the network reports as faked
+ * (STIR/SHAKEN failed) or a score of 100 or more (machine-timed repeat calls plus a burst). An international fraud
+ * prefix (Wangiri) alone is flagged, not dropped: real people call from those countries too (audit SPAM-1). A flagged
+ * call rings and its call screen says "Potential spam".
  */
 internal fun spamDecision(score: Float, isWangiri: Boolean, stirFailed: Boolean): SpamAction = when {
-    stirFailed || isWangiri || score >= 100f -> SpamAction.DROP
-    score >= 50f -> SpamAction.FLAG
+    stirFailed || score >= 100f -> SpamAction.DROP
+    isWangiri || score >= 50f -> SpamAction.FLAG
     else -> SpamAction.ALLOW
 }
 

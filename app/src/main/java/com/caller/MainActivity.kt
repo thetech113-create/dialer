@@ -7870,7 +7870,6 @@ class MainActivity : ComponentActivity() {
                                 if (currentName.isEmpty()) {
                                     prefs.edit().putString("my_name", tempName).commit()
                                     saveP2PBackupFile(context)
-                                    uploadP2PServerProfileName(context, tempName)
                                     isEditing = false
                                     Toast.makeText(context, "Profile Saved Locally!", Toast.LENGTH_SHORT).show()
                                 } else {
@@ -8210,8 +8209,6 @@ class MainActivity : ComponentActivity() {
         }
         // Also into the Download/CallerApp file, which survives Clear data.
         saveP2PBackupFile(this)
-        // And to the name server (does nothing until this phone is verified there).
-        uploadP2PServerProfileName(this, getSharedPreferences("local_user_profile", MODE_PRIVATE).getString("my_name", "").orEmpty())
     }
 
     /**

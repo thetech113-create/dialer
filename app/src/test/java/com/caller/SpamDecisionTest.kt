@@ -23,8 +23,16 @@ class SpamDecisionTest {
     @Test
     fun clearSpamIsDropped() {
         assertEquals(SpamAction.DROP, spamDecision(score = 100f, isWangiri = false, stirFailed = false))
-        assertEquals(SpamAction.DROP, spamDecision(score = 0f, isWangiri = true, stirFailed = false))
         assertEquals(SpamAction.DROP, spamDecision(score = 0f, isWangiri = false, stirFailed = true))
+    }
+
+    /** Audit SPAM-1: a prefix alone (Latvia, Serbia, Belarus, ...) is no proof; real calls from there must ring. */
+    @Test
+    fun aCallFromAFraudPronePrefixRingsWithAFlag() {
+        assertEquals(SpamAction.FLAG, spamDecision(score = 80f, isWangiri = true, stirFailed = false))
+        assertEquals(SpamAction.FLAG, spamDecision(score = 0f, isWangiri = true, stirFailed = false))
+        // The same prefix plus machine-timed repeat calls is still clear spam.
+        assertEquals(SpamAction.DROP, spamDecision(score = 100f, isWangiri = true, stirFailed = false))
     }
 
     @Test

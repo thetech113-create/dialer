@@ -102,10 +102,24 @@ class CallerIdReceiver : BroadcastReceiver() {
                     "receive_parsed type=${parsedPayload.type.name} parsedName=${maskP2PDisplayValueForLog(parsedPayload.profileName)} parsedNumber=${maskP2PNumberForLog(parsedPayload.declaredNumber)} timestamp=${parsedPayload.timestamp}"
                 )
 
+                // Anyone can send this SMS: the number it claims is named only when it is the sender's own number or a
+                // number on a call with this phone (audit P2P-1).
+                val activeNumber = MyInCallService.getInstance()?.getActivePrimaryNumberForP2P().orEmpty()
+                val callKeys = p2pCallNumberKeys(context, activeNumber)
+                val declaredTrusted = p2pDeclaredNumberTrusted(
+                    senderSnapshot.lookupKeys.toSet(), declaredSnapshot.lookupKeys.toSet(), callKeys
+                )
+                if (!declaredTrusted) {
+                    Log.w(
+                        P2P_FORENSIC_TAG,
+                        "receive_declared_ignored reason=not_sender_and_not_on_call declared=${maskP2PNumberForLog(parsedPayload.declaredNumber)} sender=${maskP2PNumberForLog(senderSnapshot.raw)}"
+                    )
+                }
+
                 val saveResult = storeP2PProfile(
                     context = context,
                     transportNumberRaw = senderNumber,
-                    declaredNumberRaw = parsedPayload.declaredNumber,
+                    declaredNumberRaw = if (declaredTrusted) parsedPayload.declaredNumber else "",
                     profileNameRaw = parsedPayload.profileName,
                     transportMode = transportMode,
                     payloadType = parsedPayload.type,
@@ -116,7 +130,6 @@ class CallerIdReceiver : BroadcastReceiver() {
                     "receive_save_result type=${parsedPayload.type.name} transport=${transportMode.name} validationResult=${parsedPayload.profileName.isNotBlank()} saveResult=$saveResult transportKeys=${maskP2PKeysForLog(senderSnapshot.lookupKeys)} declaredKeys=${maskP2PKeysForLog(declaredSnapshot.lookupKeys)}"
                 )
 
-                val activeNumber = MyInCallService.getInstance()?.getActivePrimaryNumberForP2P().orEmpty()
                 val activeSnapshot = buildP2PNumberSnapshot(activeNumber)
                 val activeMatch = activeSnapshot.lookupKeys.intersect(
                     (senderSnapshot.lookupKeys + declaredSnapshot.lookupKeys).toSet()
@@ -126,7 +139,15 @@ class CallerIdReceiver : BroadcastReceiver() {
                     "receive_active_match activeRaw=${maskP2PNumberForLog(activeNumber)} activeNormalized=${maskP2PNumberForLog(activeSnapshot.normalized)} activeLast10=${maskP2PNumberForLog(activeSnapshot.last10)} incomingKeys=${maskP2PKeysForLog(senderSnapshot.lookupKeys + declaredSnapshot.lookupKeys)} matched=$activeMatch"
                 )
 
-                if (parsedPayload.type == P2PMessageType.CALLER) {
+                val replyAllowed = p2pReplyAllowed(
+                    senderKeys = senderSnapshot.lookupKeys.toSet(),
+                    trustedDeclaredKeys = if (declaredTrusted) declaredSnapshot.lookupKeys.toSet() else emptySet(),
+                    callKeys = callKeys
+                )
+                if (parsedPayload.type == P2PMessageType.CALLER && !replyAllowed) {
+                    // No name goes to a number that is not on (or just off) a call with this phone (audit P2P-2).
+                    Log.w(P2P_FORENSIC_TAG, "reverse_reply_blocked reason=not_on_call sender=${maskP2PNumberForLog(senderSnapshot.raw)}")
+                } else if (parsedPayload.type == P2PMessageType.CALLER) {
                     Log.w(
                         P2P_FORENSIC_TAG,
                         "reverse_reply_attempt sender=${maskP2PNumberForLog(senderSnapshot.raw)} senderDigits=${maskP2PNumberForLog(senderSnapshot.digits)}"

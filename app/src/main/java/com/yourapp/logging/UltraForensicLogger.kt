@@ -70,6 +70,7 @@
                                                                                                                                                                                                 log(Level.INFO, "Lifecycle", "INIT", "Logger initialized in Deepest/Forensic Mode", isCritical = true)
                                                                                                                                                                                                 logProcessInfo()
                                                                                                                                                                                                 logPreviousProcessExits(safeContext)
+                                                                                                                                                                                                runCatching { pruneOldForensicSessions(java.io.File(safeContext.filesDir, "logs"), System.currentTimeMillis()) }
                                                                                                                                                                                                 logMemoryState("INITIALIZATION")
                                                                                                                                                                                                 logDeviceFingerprint()
                                                                                                                                                                                                 logApplicationContext()
@@ -593,3 +594,12 @@
                                                                                                                                                                                             } catch (_: Exception) {}
                                                                                                                                                                                         }
                                                                                                                                                                                     }
+
+/** Forensic session files older than this are deleted at start-up; before, they were kept forever (audit F-LOG-1). */
+internal const val FORENSIC_LOG_MAX_AGE_MS = 14L * 24 * 60 * 60 * 1000
+
+/** Deletes the forensic session files in [logsDir] last written more than [maxAgeMs] ago. Returns how many it deleted. */
+internal fun pruneOldForensicSessions(logsDir: File, nowMs: Long, maxAgeMs: Long = FORENSIC_LOG_MAX_AGE_MS): Int =
+    logsDir.listFiles { file -> file.isFile && file.name.startsWith("Caller_Session_") && nowMs - file.lastModified() > maxAgeMs }
+        .orEmpty()
+        .count { it.delete() }
