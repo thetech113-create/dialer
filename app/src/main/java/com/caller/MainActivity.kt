@@ -1520,7 +1520,12 @@ class MainActivity : ComponentActivity() {
                                     onRecentSearchQueryChange = { query -> uiState = uiState.copy(recentSearchQuery = query) },
                                     onRecentDialpadVisibilityChange = { visible -> uiState = uiState.copy(recentDialpadVisible = visible) },
                                     onRecentDialpadDigitsChange = { digits ->
-                                        uiState = uiState.copy(recentDialpadDigits = sanitizeDialableClipboardText(digits))
+                                        val typed = sanitizeDialableClipboardText(digits)
+                                        // As the system dialer: a secret code *#*#code#*#* runs as soon as it is typed,
+                                        // without the call button, and the keypad is emptied.
+                                        val secret = dialCodeOf(typed) as? DialCode.Secret
+                                        uiState = uiState.copy(recentDialpadDigits = if (secret != null) "" else typed)
+                                        if (secret != null) sendSecretCode(secret.code)
                                     },
                                     onContactClick = { phoneNumber -> startCall(phoneNumber) },
                                     onContactEntryClick = { entry ->
@@ -2094,6 +2099,16 @@ class MainActivity : ComponentActivity() {
         if (keypadDigits != uiState.recentDialpadDigits) {
             uiState = uiState.copy(recentDialpadDigits = keypadDigits)
             Log.w(P2P_FORENSIC_TAG, "keypad_clear action=cleared source=$source")
+        }
+    }
+
+    /** Sends an Android secret code (the part between *#*# and #*#*) to the phone's own apps, as the system dialer. */
+    private fun sendSecretCode(code: String) {
+        try {
+            (getSystemService(TELEPHONY_SERVICE) as TelephonyManager).sendDialerSpecialCode(code)
+            Log.w(P2P_FORENSIC_TAG, "secret_code_sent")
+        } catch (e: SecurityException) {
+            showError("This code can only be sent by the default phone app")
         }
     }
 
@@ -3672,11 +3687,7 @@ class MainActivity : ComponentActivity() {
                 return
             }
             is DialCode.Secret -> {
-                try {
-                    (getSystemService(TELEPHONY_SERVICE) as TelephonyManager).sendDialerSpecialCode(code.code)
-                } catch (e: SecurityException) {
-                    showError("This code can only be sent by the default phone app")
-                }
+                sendSecretCode(code.code)
                 clearKeypadAfterCode(dialableNumber)
                 return
             }
