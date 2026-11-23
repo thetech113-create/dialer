@@ -1,3 +1,6 @@
+import java.io.FileInputStream
+import java.util.Properties
+
 plugins {
     id("com.android.application")
     id("org.jetbrains.kotlin.android")
@@ -12,14 +15,50 @@ android {
         applicationId = "com.caller"
         minSdk = 26
         targetSdk = 35
-        versionCode = 251
-        versionName = "8.10.113"
+        versionCode = 252
+        versionName = "8.10.114"
+    }
+
+    // Release signing key. Play Protect treats a sensitive app (SMS / call log / contacts /
+    // install-packages) signed with the shared public Android debug certificate as a strong
+    // "harmful app" signal, because that same key ships with every Android Studio and is reused
+    // by throwaway builds and malware alike. A release build must be signed with a stable, private
+    // key that is ours alone. The key is never committed: it is read from keystore.properties at
+    // the repo root (see RELEASE_SIGNING.md) or from environment variables for CI. When neither is
+    // configured, the build falls back to the debug key so a fresh checkout still assembles, and
+    // prints a warning so a release is never shipped debug-signed by accident.
+    val keystorePropsFile = rootProject.file("keystore.properties")
+    val releaseSigningConfig = when {
+        keystorePropsFile.exists() -> {
+            val props = Properties().apply { FileInputStream(keystorePropsFile).use { load(it) } }
+            signingConfigs.create("release") {
+                storeFile = rootProject.file(props.getProperty("storeFile"))
+                storePassword = props.getProperty("storePassword")
+                keyAlias = props.getProperty("keyAlias")
+                keyPassword = props.getProperty("keyPassword")
+            }
+        }
+        System.getenv("CALLER_KEYSTORE") != null -> {
+            signingConfigs.create("release") {
+                storeFile = rootProject.file(System.getenv("CALLER_KEYSTORE"))
+                storePassword = System.getenv("CALLER_KEYSTORE_PASSWORD")
+                keyAlias = System.getenv("CALLER_KEY_ALIAS")
+                keyPassword = System.getenv("CALLER_KEY_PASSWORD")
+            }
+        }
+        else -> null
     }
 
     buildTypes {
         release {
             isMinifyEnabled = false
-            signingConfig = signingConfigs.getByName("debug")
+            signingConfig = releaseSigningConfig ?: signingConfigs.getByName("debug").also {
+                project.logger.warn(
+                    "WARNING: no release keystore configured (keystore.properties / CALLER_KEYSTORE) - " +
+                    "falling back to the DEBUG key. Do not publish this APK: a debug-signed build is what " +
+                    "Play Protect flags as harmful. See RELEASE_SIGNING.md."
+                )
+            }
         }
     }
 

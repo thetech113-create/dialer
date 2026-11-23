@@ -27,3 +27,8 @@ tmp_video_frames/
 # had grown .git to 400 MB. Older APKs already in history stay tracked.
 release/*.apk
 /Caller-*.apk
+
+# Release signing material — never commit the private key or its passwords.
+/keystore.properties
+*.jks
+*.keystore
