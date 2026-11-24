@@ -5299,6 +5299,13 @@ class MainActivity : ComponentActivity() {
         LaunchedEffect(listState.isScrollInProgress) {
             if (listState.isScrollInProgress && digitQuery.isNotBlank()) keypadVisible = false
         }
+        // When the digits are cleared there are no results to scroll, so the keypad must come back on
+        // its own. Otherwise, once it was hidden by scrolling, it stays hidden after the digits empty
+        // (e.g. the deferred clear when a call ends) and the Keypad tab shows the empty state with no
+        // usable keypad until the round button is found and tapped.
+        LaunchedEffect(digitQuery) {
+            if (digitQuery.isBlank()) keypadVisible = true
+        }
 
         Column(
             modifier = Modifier
