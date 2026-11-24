@@ -88,11 +88,11 @@ To cut a release:
 ```bash
 # 1. bump versionCode + versionName in app/build.gradle.kts, commit
 # 2. tag the commit (tag must equal versionName) and push the tag:
-git tag v8.10.115
-git push origin v8.10.115
+git tag v8.10.114
+git push origin v8.10.114
 ```
 
-The workflow then creates release `v8.10.115` with `Caller-8.10.115.apk` + `update.json`. The in-app
+The workflow then creates release `v8.10.114` with `Caller-8.10.114.apk` + `update.json`. The in-app
 updater reads **only** that release asset; the app's release history must stay contiguous (each
 version published in order) or the updater's chain check refuses to cross a gap.
 

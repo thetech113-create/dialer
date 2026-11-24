@@ -8,7 +8,7 @@ name: Publish release
 # How to cut a release:
 #   1. Bump versionCode + versionName in app/build.gradle.kts and commit.
 #   2. Tag that commit and push the tag, e.g.:
-#        git tag v8.10.115 && git push origin v8.10.115
+#        git tag v8.10.114 && git push origin v8.10.114
 #      (or run this workflow by hand from the Actions tab - it then tags the current commit).
 #   The tag must match versionName in app/build.gradle.kts, and the commit must contain the
 #   release-signing setup (v8.10.114+). Needs the same four signing secrets as build-apk.yml.
