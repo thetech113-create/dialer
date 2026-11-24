@@ -72,6 +72,34 @@ the old debug-signed app to the first release-signed build is:
 Since Play Protect has already been disabling/revoking the app, a clean reinstall is the expected
 path anyway. After this, every future release-signed update installs over the top normally.
 
+## Publishing a release (GitHub Actions)
+
+Two workflows are set up (both need the four signing secrets listed above, added under
+Settings -> Secrets and variables -> Actions):
+
+- **`.github/workflows/build-apk.yml`** - on every push to the work branch / `main`, or run by hand,
+  builds and signs the APK and uploads it as a downloadable artifact. Use this to grab a test build.
+- **`.github/workflows/release.yml`** - publishes a GitHub Release. It builds + signs, generates the
+  `update.json` the in-app updater reads (with the real APK sha256), and attaches both the APK and
+  `update.json` to the release. It also best-effort syncs the repo's `release/update.json`.
+
+To cut a release:
+
+```bash
+# 1. bump versionCode + versionName in app/build.gradle.kts, commit
+# 2. tag the commit (tag must equal versionName) and push the tag:
+git tag v8.10.115
+git push origin v8.10.115
+```
+
+The workflow then creates release `v8.10.115` with `Caller-8.10.115.apk` + `update.json`. The in-app
+updater reads **only** that release asset; the app's release history must stay contiguous (each
+version published in order) or the updater's chain check refuses to cross a gap.
+
+Reminder: devices still on a debug-signed build (<= v8.10.113) must uninstall + reinstall once to
+reach the first release-signed build - the updater cannot change signing keys. Release-signed builds
+auto-update normally after that.
+
 ## Still flagged after signing?
 
 Signing is the biggest single signal but not the only one. If a device still blocks the signed
