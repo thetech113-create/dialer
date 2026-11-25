@@ -224,6 +224,13 @@ class MyInCallService : InCallService() {
                 /** Whether the app's main screen was visible when the current call session began. */
                 @Volatile var appWasOnScreenAtCallStart = false
 
+                /**
+                 * elapsedRealtime of the most recent onCallAdded. A dial that never reaches Telecom (the OEM
+                 * refuses placeCall and shows its own "Call not sent") never updates this, so the dialer can tell
+                 * its own "Call not sent" apart from a call that really started.
+                 */
+                @Volatile var lastCallAddedElapsedRealtime: Long = 0L
+
                 fun getInstance(): MyInCallService? = instance
                 fun peekLastCallUiSnapshot(): UnifiedCallState? = lastCallUiSnapshot
                 fun currentCallUiSessionId(): String = callUiSessionId
@@ -515,6 +522,8 @@ class MyInCallService : InCallService() {
             private val callTimerKeyAliases = java.util.concurrent.ConcurrentHashMap<String, String>()
             private val callDisplayResolutionCache = java.util.concurrent.ConcurrentHashMap<String, CallerDisplayResolution>()
             private val missedNotificationTracker = java.util.concurrent.ConcurrentHashMap.newKeySet<String>()
+            // Calls that already showed our "Call not sent" message, so it is shown at most once per call.
+            private val callNotSentTracker = java.util.concurrent.ConcurrentHashMap.newKeySet<String>()
             private val p2pCallSendTracker = java.util.concurrent.ConcurrentHashMap.newKeySet<String>()
             private var lastUiLaunchAt = 0L
             private var lastUiLaunchKey = ""
@@ -2772,6 +2781,8 @@ class MyInCallService : InCallService() {
             @SuppressLint("FullScreenIntentPolicy")
             @Suppress("UseFullScreenIntent")
             override fun onCallAdded(call: Call) {
+                // A real call reached Telecom: record it so a dialed call that never starts can be told apart.
+                lastCallAddedElapsedRealtime = SystemClock.elapsedRealtime()
                 // A newly added Telecom call begins a new session and may use the bubble again.
                 bubbleSuppressedForTermination = false
                 CallBubbleOverlay.allowForNewOngoingCall()
@@ -2999,6 +3010,32 @@ class MyInCallService : InCallService() {
                                 UltraForensicLogger.forensic(
                                     "CallStateMachine", "GHOST_BLOCKED", "Call $callId was OUTGOING. Suppressing false missed call notification."
                                 )
+                                // Our own "Call not sent" for an outgoing call that failed before it ever connected.
+                                // Only for clear failures (not LOCAL/CANCELED, which usually mean the user ended the
+                                // dial), and once per call.
+                                val connectedMillis = call.details?.connectTimeMillis ?: 0L
+                                val failureCause = disconnectCause
+                                val isClearFailure = failureCause == DisconnectCause.ERROR ||
+                                    failureCause == DisconnectCause.BUSY ||
+                                    failureCause == DisconnectCause.REJECTED ||
+                                    failureCause == DisconnectCause.RESTRICTED ||
+                                    failureCause == DisconnectCause.OTHER
+                                if (!wasAnswered && connectedMillis == 0L && isClearFailure && callNotSentTracker.add(callId)) {
+                                    val reason = call.details?.disconnectCause?.label?.toString()?.takeIf { it.isNotBlank() }
+                                        ?: when (failureCause) {
+                                            DisconnectCause.BUSY -> "the line was busy"
+                                            DisconnectCause.REJECTED -> "the call was rejected"
+                                            else -> "the call could not be completed"
+                                        }
+                                    Log.w(P2P_FORENSIC_TAG, "call_not_sent reason=disconnect_before_connect cause=$failureCause callId=$callId")
+                                    Handler(Looper.getMainLooper()).post {
+                                        android.widget.Toast.makeText(
+                                            this@MyInCallService,
+                                            "Call not sent — $reason",
+                                            android.widget.Toast.LENGTH_LONG
+                                        ).show()
+                                    }
+                                }
                             }
 
 
@@ -3211,6 +3248,7 @@ class MyInCallService : InCallService() {
                     cancelPendingDisconnectCleanup("onCallRemoved_live_calls_remaining")
                 }
                 missedNotificationTracker.remove(callId)
+                callNotSentTracker.remove(callId)
             }
 
             @Deprecated("Deprecated in Java")
@@ -3895,6 +3933,15 @@ class MyInCallService : InCallService() {
                     .setOnlyAlertOnce(!popAsBanner)
                     .setAutoCancel(false)
                     .applyOngoingCallExtras(phoneNumber, callState)
+
+                // While an outgoing call is still dialing, a background startActivity (guaranteeUiDisplay) is
+                // blocked on some OEMs (e.g. ColorOS), so the call connects with no call screen. A full-screen
+                // intent on the dialing notification lets the system bring the call screen up the same way an
+                // incoming call does. Only while DIALING and only when the screen is not already showing, so it
+                // never yanks the user back during an active call.
+                if (callState == "DIALING" && !CallBubbleOverlay.isCallActivityVisible) {
+                    builder.setFullScreenIntent(pendingIntent, true)
+                }
 
                 val muteIntent = Intent(this, NotificationRepostReceiver::class.java).apply {
                     action = Constants.ACTION_MUTE_CALL

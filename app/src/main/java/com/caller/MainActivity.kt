@@ -3831,7 +3831,20 @@ class MainActivity : ComponentActivity() {
     ) {
         try {
             if (hasCallPhonePermission()) {
+                val dispatchAtElapsed = android.os.SystemClock.elapsedRealtime()
                 telecomManager.placeCall(finalUri, extras)
+                // Some OEMs (e.g. ColorOS) silently refuse placeCall while a previous call is still tearing down
+                // and show their own "Call not sent" with no reason, and placeCall does not throw. If no call has
+                // reached Telecom shortly after, show our own message so the user knows the dial did not start.
+                Handler(Looper.getMainLooper()).postDelayed({
+                    val callStartedAfterDispatch =
+                        MyInCallService.lastCallAddedElapsedRealtime >= dispatchAtElapsed
+                    val telecomBusy = runCatching { telecomManager.isInCall }.getOrDefault(false)
+                    if (!callStartedAfterDispatch && !telecomBusy) {
+                        Log.w(P2P_FORENSIC_TAG, "call_not_sent reason=no_call_created_after_place_call")
+                        showError("Call not sent — the phone didn't start the call. Please try again in a moment.")
+                    }
+                }, 2500L)
             } else {
                 deferredKeypadClear.cancel()
             }
