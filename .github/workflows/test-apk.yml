@@ -1,0 +1,64 @@
+name: Build test APK (debug-signed)
+
+# A quick, debug-signed build for testing app behaviour (e.g. the keypad fix). Needs NO signing
+# secrets. It is NOT the Play Protect fix: a debug-signed APK is still flagged by Play Protect, and
+# because its key differs from any existing install you must uninstall the current app first.
+# For the real, release-signed build use release.yml (which needs the signing secrets).
+
+on:
+  push:
+    branches:
+      - ccr-7a21bc3e-i91bll
+      - main
+    paths:
+      - 'app/**'
+      - '.github/workflows/test-apk.yml'
+  workflow_dispatch: {}
+
+permissions:
+  contents: read
+
+concurrency:
+  group: test-apk-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test-build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out
+        uses: actions/checkout@v4
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+          cache: gradle
+
+      - name: Set up Android SDK
+        uses: android-actions/setup-android@v3
+
+      - name: Install SDK platform 36
+        run: sdkmanager "platform-tools" "platforms;android-36"
+
+      - name: Read version name
+        id: ver
+        run: echo "name=$(grep -m1 'versionName' app/build.gradle.kts | sed -E 's/.*"([^"]+)".*/\1/')" >> "$GITHUB_OUTPUT"
+
+      - name: Build debug APK
+        run: |
+          chmod +x ./gradlew
+          ./gradlew --no-daemon assembleDebug
+
+      - name: Stage named APK
+        run: |
+          mkdir -p out
+          cp app/build/outputs/apk/debug/app-debug.apk "out/Caller-${{ steps.ver.outputs.name }}-test.apk"
+
+      - name: Upload test APK artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: Caller-${{ steps.ver.outputs.name }}-test
+          path: out/Caller-${{ steps.ver.outputs.name }}-test.apk
+          if-no-files-found: error
