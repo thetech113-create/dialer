@@ -16,7 +16,7 @@ on:
   workflow_dispatch: {}
 
 permissions:
-  contents: read
+  contents: write
 
 concurrency:
   group: test-apk-${{ github.ref }}
@@ -25,6 +25,8 @@ concurrency:
 jobs:
   test-build:
     runs-on: ubuntu-latest
+    env:
+      GH_TOKEN: ${{ github.token }}
     steps:
       - name: Check out
         uses: actions/checkout@v4
@@ -62,3 +64,20 @@ jobs:
           name: Caller-${{ steps.ver.outputs.name }}-test
           path: out/Caller-${{ steps.ver.outputs.name }}-test.apk
           if-no-files-found: error
+
+      - name: Publish to the 'test-build' prerelease (direct download link)
+        run: |
+          APK="out/Caller-${{ steps.ver.outputs.name }}-test.apk"
+          NOTES="Debug-signed TEST build of v${{ steps.ver.outputs.name }}. Not the Play Protect fix (still debug-signed, Play Protect will warn). Different key from any existing install, so uninstall the current app first, then install this. For the real signed build see the normal releases."
+          if ! gh release view test-build --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            gh release create test-build \
+              --repo "$GITHUB_REPOSITORY" \
+              --prerelease \
+              --target "$GITHUB_SHA" \
+              --title "Test build (debug-signed)" \
+              --notes "$NOTES"
+          else
+            gh release edit test-build --repo "$GITHUB_REPOSITORY" --notes "$NOTES" --prerelease
+          fi
+          gh release upload test-build "$APK" --repo "$GITHUB_REPOSITORY" --clobber
+          echo "Download: https://github.com/$GITHUB_REPOSITORY/releases/download/test-build/Caller-${{ steps.ver.outputs.name }}-test.apk" >> "$GITHUB_STEP_SUMMARY"
