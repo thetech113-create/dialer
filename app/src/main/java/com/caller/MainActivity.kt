@@ -897,6 +897,19 @@ internal fun buildRecentCallsSnapshot(context: Context, contacts: List<Contact>)
     return RecentCallsSnapshot(calls, groupedCalls, queryFailed)
 }
 
+/**
+ * Whether the dialer should show its own "Call not sent" after dialing. It must stay silent whenever a
+ * call is actually up: reconcileFrameworkCall adopted a live call (reconciledLiveCall), our InCallService
+ * saw onCallAdded (callStartedAfterDispatch), or Telecom reports any live call (telecomInCall). Both
+ * rapid-retry scenarios (same and different number) connect, so telecomInCall is true and this returns
+ * false — no false "Call not sent" after a successful connection.
+ */
+internal fun shouldReportCallNotSent(
+    reconciledLiveCall: Boolean,
+    callStartedAfterDispatch: Boolean,
+    telecomInCall: Boolean
+): Boolean = !reconciledLiveCall && !callStartedAfterDispatch && !telecomInCall
+
 @OptIn(ExperimentalFoundationApi::class, ExperimentalMaterial3Api::class)
 @Suppress("HandlerLeak")
 class MainActivity : ComponentActivity() {
@@ -1198,6 +1211,12 @@ class MainActivity : ComponentActivity() {
             UltraForensicLogger.ultra("MainActivity", "OEM_DIALER_FALLBACK_SUSPECTED", message)
         } else {
             Log.w(P2P_FORENSIC_TAG, message)
+        }
+
+        // Telecom has a live call that the app is not showing (missed/incomplete onCallAdded on a rapid
+        // redial): reconcile against this.calls so the call screen, bubble and notification are recovered.
+        if (liveFrameworkCall && !uiState.callState.isInCall && inCallServiceBound && isDefaultDialer) {
+            MyInCallService.getInstance()?.reconcileFrameworkCall("main_probe_${trigger}_$stage")
         }
     }
 
@@ -3837,10 +3856,16 @@ class MainActivity : ComponentActivity() {
                 // and show their own "Call not sent" with no reason, and placeCall does not throw. If no call has
                 // reached Telecom shortly after, show our own message so the user knows the dial did not start.
                 Handler(Looper.getMainLooper()).postDelayed({
+                    // The framework may have delivered the call to our InCallService without our
+                    // onCallAdded completing (seen on rapid back-to-back redials): reconcile against
+                    // this.calls first, so a connected call is adopted and shown instead of being
+                    // mistaken for "not sent".
+                    val reconciledLiveCall =
+                        MyInCallService.getInstance()?.reconcileFrameworkCall("post_place_call") ?: false
                     val callStartedAfterDispatch =
                         MyInCallService.lastCallAddedElapsedRealtime >= dispatchAtElapsed
                     val telecomBusy = runCatching { telecomManager.isInCall }.getOrDefault(false)
-                    if (!callStartedAfterDispatch && !telecomBusy) {
+                    if (shouldReportCallNotSent(reconciledLiveCall, callStartedAfterDispatch, telecomBusy)) {
                         Log.w(P2P_FORENSIC_TAG, "call_not_sent reason=no_call_created_after_place_call")
                         showError("Call not sent — the phone didn't start the call. Please try again in a moment.")
                     }

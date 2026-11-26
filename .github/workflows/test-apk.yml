@@ -48,10 +48,13 @@ jobs:
         id: ver
         run: echo "name=$(grep -m1 'versionName' app/build.gradle.kts | sed -E 's/.*"([^"]+)".*/\1/')" >> "$GITHUB_OUTPUT"
 
-      - name: Build debug APK
+      - name: Run unit tests
         run: |
           chmod +x ./gradlew
-          ./gradlew --no-daemon assembleDebug
+          ./gradlew --no-daemon testDebugUnitTest
+
+      - name: Build debug APK
+        run: ./gradlew --no-daemon assembleDebug
 
       - name: Stage named APK
         run: |

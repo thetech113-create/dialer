@@ -2778,6 +2778,52 @@ class MyInCallService : InCallService() {
                 }
             }
 
+            /**
+             * Reconcile the app's call surfaces against the framework's own call list (this.calls).
+             *
+             * Root cause of the rapid-retry failure: every call surface (full-screen UI, bubble,
+             * ongoing notification, in-app state) is driven only by the onCallAdded callback. During a
+             * fast back-to-back redial the framework delivers MSG_ADD_CALL to our InCallService (the call
+             * is in this.calls) but our onCallAdded body does not complete, so the call is never adopted
+             * and stays invisible — and the dialer can wrongly report "Call not sent" for a call that is
+             * actually connected. getSafeCalls()/this.calls is the authoritative source, so reading it
+             * directly and re-driving the surfaces recovers the call without depending on the callback.
+             *
+             * Safe to call repeatedly: syncCalls, launchCallUI and the notification are idempotent, and
+             * when this.calls holds no live call (e.g. a genuine OEM hand-off) it is a no-op. Returns true
+             * when a live call was present.
+             */
+            fun reconcileFrameworkCall(source: String): Boolean {
+                val live = getLiveTopLevelCalls().firstOrNull() ?: return false
+                Log.w(
+                    P2P_FORENSIC_TAG,
+                    "call_recovery action=reconcile source=$source callId=${stableCallId(live)} state=${live.state} safeCalls=${getSafeCalls().size}"
+                )
+                // Rebuild app state from the framework list (updates in-app state + ongoing notification).
+                syncCalls()
+                val state = getCurrentCallStateFromSync()
+                if (state.isInCall) {
+                    showOngoingCallNotification(
+                        state.primaryNumber,
+                        state.primaryName,
+                        state.isConference,
+                        state.primaryState.ifBlank { "ACTIVE" }
+                    )
+                    if (state.primaryState != "RINGING") {
+                        launchCallUI(
+                            reason = "reconcile:$source",
+                            showDialpad = false,
+                            rawNumber = state.primaryNumber,
+                            initialStateHint = state.primaryState,
+                            initialNameHint = state.primaryName,
+                            isConferenceHint = state.isConference
+                        )
+                    }
+                    showCallBubbleIfNeeded(launchFullScreenWhenOverlayUnavailable = false)
+                }
+                return state.isInCall
+            }
+
             @SuppressLint("FullScreenIntentPolicy")
             @Suppress("UseFullScreenIntent")
             override fun onCallAdded(call: Call) {
