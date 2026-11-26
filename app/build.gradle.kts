@@ -61,6 +61,14 @@ android {
     }
 
     buildTypes {
+        debug {
+            // Install test builds as a SEPARATE app (com.caller.test) next to the released com.caller,
+            // so a differently-signed test APK never collides ("conflicting package") and no uninstall
+            // is needed. Cross-app identifiers that would clash when both are installed (the backup
+            // account type) are made applicationId-specific so the two coexist.
+            applicationIdSuffix = ".test"
+            versionNameSuffix = "-test"
+        }
         release {
             isMinifyEnabled = false
             signingConfig = releaseSigningConfig ?: signingConfigs.getByName("debug").also {

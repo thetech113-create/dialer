@@ -1298,6 +1298,21 @@ class MainActivity : ComponentActivity() {
     }
 
     override fun onCreate(savedInstanceState: Bundle?) {
+        // Debug/test builds only: if the app crashes, write the stack trace to a file the user can
+        // retrieve without a computer (Android/data/<package>/files/last_crash.txt), so a blind test
+        // build can be diagnosed. No effect on release builds.
+        if (BuildConfig.DEBUG) {
+            val previousHandler = Thread.getDefaultUncaughtExceptionHandler()
+            Thread.setDefaultUncaughtExceptionHandler { thread, error ->
+                runCatching {
+                    java.io.File(getExternalFilesDir(null), "last_crash.txt").writeText(
+                        "${java.util.Date()}\n$packageName ${BuildConfig.VERSION_NAME}\n\n" +
+                            android.util.Log.getStackTraceString(error)
+                    )
+                }
+                previousHandler?.uncaughtException(thread, error)
+            }
+        }
         val splashScreen = installSplashScreen()
         val splashStartMs = android.os.SystemClock.elapsedRealtime()
         splashScreen.setKeepOnScreenCondition {

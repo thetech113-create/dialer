@@ -1543,7 +1543,10 @@ private fun writeBlockStoreP2PBackup(context: Context, bytes: ByteArray) {
 }
 
 // App-owned Android account: the system keeps its data in the accounts database, outside the app's data.
-private const val P2P_BACKUP_ACCOUNT_TYPE = "com.caller.backup"
+// Derived from the applicationId so a .test build uses com.caller.test.backup and does not collide
+// with the released com.caller.backup authenticator when both apps are installed (that collision makes
+// AccountManager operations fail across uids). Release is unchanged: com.caller -> com.caller.backup.
+private val P2P_BACKUP_ACCOUNT_TYPE = BuildConfig.APPLICATION_ID + ".backup"
 private const val P2P_BACKUP_ACCOUNT_KEY = "p2p_backup"
 
 private fun p2pBackupAccount(context: Context, create: Boolean): android.accounts.Account? {

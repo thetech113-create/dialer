@@ -1,0 +1,7 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Debug/test build only: distinct names so the test app is easy to tell apart from the release app. -->
+<resources>
+    <string name="app_name">Phone &amp; Messages (Test)</string>
+    <string name="launcher_phone_label">Phone (Test)</string>
+    <string name="launcher_messages_label">Messages (Test)</string>
+</resources>
