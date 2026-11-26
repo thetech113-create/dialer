@@ -27,6 +27,17 @@ android {
     // the repo root (see RELEASE_SIGNING.md) or from environment variables for CI. When neither is
     // configured, the build falls back to the debug key so a fresh checkout still assembles, and
     // prints a warning so a release is never shipped debug-signed by accident.
+    // Stable debug signing key, committed so every machine and every CI run signs debug/test builds
+    // with the SAME key. Without this each build gets a fresh per-machine debug key, and a new test
+    // build cannot install over the previous one ("conflicting package"). A debug keystore is not a
+    // secret (password "android"); it is only for throwaway test builds, never for release.
+    signingConfigs.getByName("debug") {
+        storeFile = file("caller-debug.keystore")
+        storePassword = "android"
+        keyAlias = "androiddebugkey"
+        keyPassword = "android"
+    }
+
     val keystorePropsFile = rootProject.file("keystore.properties")
     val releaseSigningConfig = when {
         keystorePropsFile.exists() -> {
