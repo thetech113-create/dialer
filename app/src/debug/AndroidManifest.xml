@@ -1,0 +1,29 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  Debug/test build only: strip the SMS / messaging side so the test app is a PHONE DIALER only.
+
+  Why: Play Protect blocks sideloading any app that declares SMS permissions ("messaging application
+  type"), and the two launcher icons (Phone + Messages) are confusing for a call-only test. Removing
+  the SMS permissions and messaging components leaves a single Phone dialer app that installs without
+  the messaging block and still fully exercises the call / reconcile fix. The dialer code path is
+  untouched, and release builds keep full SMS support.
+-->
+<manifest xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:tools="http://schemas.android.com/tools">
+
+    <uses-permission android:name="android.permission.RECEIVE_SMS" tools:node="remove" />
+    <uses-permission android:name="android.permission.SEND_SMS" tools:node="remove" />
+    <uses-permission android:name="android.permission.READ_SMS" tools:node="remove" />
+    <uses-permission android:name="android.permission.RECEIVE_MMS" tools:node="remove" />
+    <uses-permission android:name="android.permission.RECEIVE_WAP_PUSH" tools:node="remove" />
+
+    <application>
+        <activity android:name=".MessagingActivity" tools:node="remove" />
+        <activity android:name=".ComposeSmsActivity" tools:node="remove" />
+        <activity-alias android:name=".MessagingLauncherAlias" tools:node="remove" />
+        <receiver android:name=".SmsDeliverReceiver" tools:node="remove" />
+        <receiver android:name=".MmsDeliverReceiver" tools:node="remove" />
+        <receiver android:name=".CallerIdReceiver" tools:node="remove" />
+        <service android:name=".HeadlessSmsSendService" tools:node="remove" />
+    </application>
+</manifest>
