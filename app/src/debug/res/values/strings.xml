@@ -1,0 +1,8 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Debug/test build only: distinct names so the test app (com.caller.test) is easy to tell apart
+     from the installed release app in the launcher and in Settings. -->
+<resources>
+    <string name="app_name">Phone &amp; Messages (Test)</string>
+    <string name="launcher_phone_label">Phone (Test)</string>
+    <string name="launcher_messages_label">Messages (Test)</string>
+</resources>

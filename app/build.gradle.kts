@@ -61,6 +61,13 @@ android {
     }
 
     buildTypes {
+        debug {
+            // Install test builds as a SEPARATE app (com.caller.test) alongside the released
+            // com.caller, so a differently-signed test APK never collides with the installed app
+            // ("conflicting package") and no uninstall is needed to try a build.
+            applicationIdSuffix = ".test"
+            versionNameSuffix = "-test"
+        }
         release {
             isMinifyEnabled = false
             signingConfig = releaseSigningConfig ?: signingConfigs.getByName("debug").also {
