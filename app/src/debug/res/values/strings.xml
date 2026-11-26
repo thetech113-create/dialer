@@ -1,9 +1,0 @@
-<?xml version="1.0" encoding="utf-8"?>
-<!-- Debug/test build only: dialer-only test app, distinct name so it is easy to tell apart from the
-     installed release app in the launcher and in Settings. The SMS side is removed in the debug
-     AndroidManifest, so this build shows a single Phone launcher icon. -->
-<resources>
-    <string name="app_name">Phone Dialer (Test)</string>
-    <string name="launcher_phone_label">Phone (Test)</string>
-    <string name="launcher_messages_label">Messages (Test)</string>
-</resources>
