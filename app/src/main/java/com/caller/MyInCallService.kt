@@ -127,6 +127,16 @@ import kotlinx.coroutines.flow.MutableStateFlow
 
 private const val OPEN_UI_AFTER_ANSWER_EXTRA = "OPEN_UI_AFTER_ANSWER_EXTRA"
 
+/**
+ * Whether the disconnected call's async cleanup may tear the service down (drop foreground, stop self,
+ * clear notifications/UI). It may do so only when there is NO call left anywhere: not in this
+ * InCallService's own list, and not in the Telecom framework globally. The framework check is what
+ * protects an immediate redial - Call B may already be live in Telecom before it is delivered into this
+ * service's list, and the previous call's cleanup must not drop the service out from under it.
+ */
+internal fun shouldTearDownAfterDisconnect(ownLiveCallCount: Int, telecomFrameworkInCall: Boolean): Boolean =
+    ownLiveCallCount == 0 && !telecomFrameworkInCall
+
 @SuppressLint("MissingPermission", "UseFullScreenIntent")
 class MyInCallService : InCallService() {
 
@@ -1492,12 +1502,22 @@ class MyInCallService : InCallService() {
                     pendingDisconnect = false
                     pendingDisconnectCleanup = null
                     val liveCalls = getLiveCalls()
+                    val frameworkInCall = isTelecomFrameworkInCall()
                     Log.w(
                         P2P_FORENSIC_TAG,
-                        "call_cleanup action=execute source=$source liveCalls=${liveCalls.size} terminalCallId=${lastTerminalUiSnapshot?.primaryCallId.orEmpty()}"
+                        "call_cleanup action=execute source=$source liveCalls=${liveCalls.size} frameworkInCall=$frameworkInCall terminalCallId=${lastTerminalUiSnapshot?.primaryCallId.orEmpty()}"
                     )
                     if (liveCalls.isNotEmpty()) {
                         syncCalls()
+                        return@Runnable
+                    }
+                    if (!shouldTearDownAfterDisconnect(liveCalls.size, frameworkInCall)) {
+                        // Telecom still reports a call this service has not adopted yet - typically an
+                        // immediate redial (Call B) that the framework has not delivered into this.calls.
+                        // The previous call's cleanup must NOT tear the service down under the new call:
+                        // keep it alive and reconcile so Call B is adopted and shown.
+                        Log.w(P2P_FORENSIC_TAG, "call_cleanup action=skip_teardown reason=framework_in_call source=$source")
+                        reconcileFrameworkCall("disconnect_cleanup_framework_in_call")
                         return@Runnable
                     }
                     notificationReposterActive.set(false)
@@ -2776,6 +2796,28 @@ class MyInCallService : InCallService() {
                 if (CallBubbleOverlay.isShowing()) {
                     showCallBubbleIfNeeded(launchFullScreenWhenOverlayUnavailable = false)
                 }
+            }
+
+            /**
+             * The user is placing a NEW outgoing call. Scope the previous call's cleanup to that call so
+             * it cannot affect this one: cancel its pending disconnect cleanup / transient-gap recovery
+             * (which would otherwise drop foreground, stopSelf and clear notifications/UI ~350 ms after
+             * the previous call ended), clear the termination-suppress flag, and re-assert the service as
+             * explicitly started so the new call is delivered into a live, prioritized InCallService
+             * instead of one mid-teardown. This is the lifecycle fix for immediate redial; reconciliation
+             * remains only as the recovery net.
+             */
+            fun prepareForNewOutgoingCall(source: String) {
+                cancelPendingDisconnectCleanup("new_outgoing_call:$source")
+                cancelTransientCallGapRecovery("new_outgoing_call:$source")
+                bubbleSuppressedForTermination = false
+                // Keep the process/service warm and high-priority for the imminent call WITHOUT posting a
+                // foreground notification (there is no call yet, and the ended call's notification must not
+                // reappear): a BIND_IMPORTANT self-binding and the survival wake lock. The real foreground
+                // notification follows from onCallAdded (or the post-dial reconcile) once Call B is live.
+                acquireSurvivalWakeLockIfNeeded()
+                ensureSelfKeepAliveBound()
+                Log.w(P2P_FORENSIC_TAG, "call_cleanup action=guard_new_outgoing_call source=$source")
             }
 
             /**

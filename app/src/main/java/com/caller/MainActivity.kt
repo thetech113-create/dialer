@@ -3835,6 +3835,11 @@ class MainActivity : ComponentActivity() {
         )
 
         InCallServiceEnhancements.warmUpProcess(this)
+        // Immediate-redial fix: tell the InCallService a new outgoing call is starting, so the PREVIOUS
+        // call's async disconnect cleanup is cancelled and the service is re-armed. Without this, Call A's
+        // cleanup (fired ~350 ms after it ended) can drop foreground / stopSelf / clear the UI just as
+        // Call B is placed, and Call B arrives into a torn-down, deprioritized service.
+        MyInCallService.getInstance()?.prepareForNewOutgoingCall("main_activity_place")
         // The call screen opens when Telecom adds the call (MyInCallService.onCallAdded), not before, as in Google's
         // Dialer. A dial that never reaches Telecom leaves no "Dialling" screen behind; the system reports why.
 
