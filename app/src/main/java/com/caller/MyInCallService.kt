@@ -1538,14 +1538,18 @@ class MyInCallService : InCallService() {
                     }
 
                     isServiceExplicitlyStarted = false
-                    releaseSelfKeepAliveBinding()
                     syncCallTasksInRecents()
 
-                    // Drop foreground status to allow normal process priority
-                    stopForeground(STOP_FOREGROUND_REMOVE)
-                    android.util.Log.e("OEM_FALLBACK_TRACE", "MyInCallService: Foreground service released. Process priority normalized.")
-                    
-                    stopSelf()
+                    // Drop the ended call's foreground notification, but KEEP the service bound and alive
+                    // (self keep-alive retained, NO stopSelf). On this OEM, tearing the InCallService down
+                    // here - while Telecom still has it BOUND - leaves the reused instance unable to receive
+                    // the next call: an immediate redial's MSG_ADD_CALL arrives but onCallAdded never fires
+                    // and this.calls stays empty, so the app can never show the real contact's call screen
+                    // (only the system's generic "outgoing call"). The full teardown is deferred to onUnbind,
+                    // when Telecom actually releases the service; the next call then gets a fresh bind that
+                    // this OEM delivers correctly. This is the immediate-redial root fix.
+                    runCatching { stopForeground(STOP_FOREGROUND_REMOVE) }
+                    android.util.Log.e("OEM_FALLBACK_TRACE", "MyInCallService: notification cleared; service kept alive for an immediate redial.")
                 }
                 pendingDisconnectCleanup = cleanupRunnable
                 bgHandler.postDelayed(cleanupRunnable, 350L)
@@ -2090,10 +2094,27 @@ class MyInCallService : InCallService() {
             override fun onUnbind(intent: Intent?): Boolean {
                 // onUnbind runs for every binding of this service: Telecom's and its own keep-alive binding. The action tells
                 // them apart, and the live-call count shows whether a call was still running.
+                val isSelfKeepAlive = intent?.action == ACTION_START_INCALL_KEEPALIVE
                 Log.w(
                     P2P_FORENSIC_TAG,
-                    "incall_service_onUnbind action=${intent?.action ?: "none"} selfKeepAlive=${intent?.action == ACTION_START_INCALL_KEEPALIVE} liveCalls=${getLiveCalls().size} — allowing clean framework teardown"
+                    "incall_service_onUnbind action=${intent?.action ?: "none"} selfKeepAlive=$isSelfKeepAlive liveCalls=${getLiveCalls().size} — allowing clean framework teardown"
                 )
+                // Telecom (not our own keep-alive) has released this InCallService. The post-call cleanup now
+                // keeps the service alive for an immediate redial, so the real teardown happens here, once
+                // Telecom is actually done - when there is no live call and nothing in the framework. A later
+                // call then starts from a fresh bind, which this OEM delivers correctly.
+                if (!isSelfKeepAlive) {
+                    bgHandler.post {
+                        if (getLiveCalls().isEmpty() && !isTelecomFrameworkInCall()) {
+                            Log.w(P2P_FORENSIC_TAG, "incall_service_final_teardown source=telecom_unbind")
+                            releaseSelfKeepAliveBinding()
+                            runCatching { stopForeground(STOP_FOREGROUND_REMOVE) }
+                            stopSelf()
+                        } else {
+                            Log.w(P2P_FORENSIC_TAG, "incall_service_final_teardown skipped: a call is still live")
+                        }
+                    }
+                }
                 return super.onUnbind(intent)
             }
 
