@@ -1,0 +1,13 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  Debug/test build only: the app ships two launcher icons (Messages, declared first, and Phone). For
+  call testing we want opening the app to land on the PHONE dialer, so remove the Messages launcher
+  icon in the test build. MessagingActivity itself is kept (still reachable via SMS intents), only its
+  separate launcher entry is dropped. Release builds keep both icons.
+-->
+<manifest xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:tools="http://schemas.android.com/tools">
+    <application>
+        <activity-alias android:name=".MessagingLauncherAlias" tools:node="remove" />
+    </application>
+</manifest>
