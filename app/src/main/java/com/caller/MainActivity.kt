@@ -937,7 +937,11 @@ class MainActivity : ComponentActivity() {
     }
 
     private fun isPhoneLauncherIntent(intent: Intent?): Boolean {
-        return intent?.component?.className == "$packageName.PhoneLauncherAlias"
+        // The alias class is namespace-based (com.caller.PhoneLauncherAlias) and does NOT carry the
+        // applicationId suffix, so comparing against "$packageName.PhoneLauncherAlias" fails whenever the
+        // applicationId differs from the namespace (e.g. the .test build), which routed the Phone icon to
+        // the messaging screen. Match the component's simple name instead, independent of applicationId.
+        return intent?.component?.className?.endsWith(".PhoneLauncherAlias") == true
     }
 
     private lateinit var sharedPreferences: SharedPreferences
