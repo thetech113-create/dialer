@@ -12,6 +12,9 @@ import android.util.Log
 import androidx.core.content.ContextCompat
 
 class WidgetCallActivity : Activity() {
+    // The widget's dial attempt (shared outgoing-dial guard), while it has not been handed to Telecom yet.
+    private var attemptId: Long? = null
+
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
 
@@ -29,6 +32,14 @@ class WidgetCallActivity : Activity() {
             return
         }
 
+        // Same guard as the app's keypad: a widget tap while another dial is still being set up dials nothing.
+        val id = DialAttempts.tryAcquire(this, source = "widget")
+        if (id == null) {
+            finishTask()
+            return
+        }
+        attemptId = id
+
         try {
             val dialableNumber = sanitizePhoneNumberForCall(phoneNumber)
             val finalUri = Uri.fromParts("tel", dialableNumber, null)
@@ -38,19 +49,23 @@ class WidgetCallActivity : Activity() {
             when {
                 simOptions.isEmpty() -> {
                     Log.e("OutgoingCallAudit", "widget_sim_detection_failed reason=no_sim_detected")
+                    releaseAttempt("no_sim")
                     finishTask()
                 }
                 simOptions.size == 1 -> {
-                    placeWidgetCall(phoneNumber, dialableNumber, finalUri, telecomManager, simOptions.first())
+                    placeWidgetCall(id, phoneNumber, dialableNumber, finalUri, telecomManager, simOptions.first())
                 }
                 else -> {
+                    DialAttempts.guard.awaitUserChoice(id)
                     DualSimFixes.showSimSelectionDialog(
                         activity = this,
                         options = simOptions,
                         onSelected = { selectedSim ->
-                            placeWidgetCall(phoneNumber, dialableNumber, finalUri, telecomManager, selectedSim)
+                            DialAttempts.guard.userChoiceMade(id)
+                            placeWidgetCall(id, phoneNumber, dialableNumber, finalUri, telecomManager, selectedSim)
                         },
                         onCancelled = {
+                            releaseAttempt("sim_choice_cancelled")
                             finishTask()
                         }
                     )
@@ -58,17 +73,33 @@ class WidgetCallActivity : Activity() {
             }
         } catch (e: SecurityException) {
             Log.w("OutgoingCallAudit", "widget_sim_detection_failed reason=security_exception error=${e.message}")
+            releaseAttempt("security_exception")
             routeToMainActivity()
         } catch (e: IllegalStateException) {
             Log.e("OutgoingCallAudit", "widget_sim_detection_failed reason=illegal_state error=${e.message}", e)
+            releaseAttempt("illegal_state")
             finishTask()
         } catch (e: Exception) {
             Log.e("OutgoingCallAudit", "widget_call_failed reason=unexpected error=${e.message}", e)
+            releaseAttempt("unexpected_error")
             routeToMainActivity()
         }
     }
 
+    override fun onDestroy() {
+        // Closed before the call was handed to Telecom (e.g. the SIM picker went away with the screen): release it.
+        releaseAttempt("widget_closed_before_dispatch")
+        super.onDestroy()
+    }
+
+    private fun releaseAttempt(reason: String) {
+        val id = attemptId ?: return
+        attemptId = null
+        DialAttempts.guard.fail(id, reason)
+    }
+
     private fun placeWidgetCall(
+        id: Long,
         phoneNumber: String,
         dialableNumber: String,
         finalUri: Uri,
@@ -81,7 +112,12 @@ class WidgetCallActivity : Activity() {
         )
 
         val extras = DualSimFixes.buildCallExtras(selectedSim)
-        telecomManager.placeCall(finalUri, extras)
+        // Handed to Telecom: from here the attempt is resolved by Telecom's callbacks, not by this screen closing.
+        attemptId = null
+        if (!DialAttempts.guard.dispatch(id, "widget") { telecomManager.placeCall(finalUri, extras) }) {
+            finishTask()
+            return
+        }
 
         startActivity(Intent(this, CallActivity::class.java).apply {
             action = CALL_UI_ACTION_WAKE

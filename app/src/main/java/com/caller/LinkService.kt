@@ -299,8 +299,17 @@ class LinkService : Service(), LinkServer.Listener {
                     }
                 }
                 "dial" -> {
-                    telecom().placeCall(Uri.fromParts("tel", msg.getString("number"), null), Bundle())
-                    result(op, true)
+                    val number = msg.getString("number")
+                    // Same outgoing-dial guard as the phone's keypad: nothing is dialled while a dial is still being set up.
+                    val attemptId = DialAttempts.tryAcquire(this, source = "pc_link")
+                    if (attemptId == null) {
+                        result(op, false, "A call is already being set up on the phone")
+                    } else {
+                        DialAttempts.guard.dispatch(attemptId, "pc_link") {
+                            telecom().placeCall(Uri.fromParts("tel", number, null), Bundle())
+                        }
+                        result(op, true)
+                    }
                 }
                 "dtmf" -> {
                     // A keypad press on the PC's call card: the tone goes into the phone's active call.

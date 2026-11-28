@@ -2863,16 +2863,22 @@ class MyInCallService : InCallService() {
             fun liveCallIds(): Set<String> = getLiveCalls().map { stableCallId(it) }.toSet()
 
             /**
-             * Outgoing calls still being set up - not yet answered, not ended. Telecom refuses a second outgoing call
-             * while one of these exists (the OEM then shows its own "Call not sent"), so the dialer must not send one.
-             * ACTIVE / HOLDING calls are not counted (hold-then-place stays possible), and ended calls are not live.
+             * What a call means for the outgoing-dial guard. An outgoing call still being set up (NEW / CONNECTING /
+             * DIALING / SELECT_PHONE_ACCOUNT) is what Telecom refuses a second outgoing call for (the OEM then shows its
+             * own "Call not sent"); ACTIVE / HOLDING calls do not block, so hold-then-place stays possible.
              */
-            fun outgoingCallsBeingSetUpCount(): Int = getLiveCalls().count {
-                it.state == Call.STATE_NEW ||
-                    it.state == Call.STATE_CONNECTING ||
-                    it.state == Call.STATE_DIALING ||
-                    it.state == Call.STATE_SELECT_PHONE_ACCOUNT
+            private fun dialGuardPhase(call: Call): LiveCallPhase = when (call.state) {
+                Call.STATE_ACTIVE, Call.STATE_HOLDING -> LiveCallPhase.ESTABLISHED
+                Call.STATE_RINGING -> LiveCallPhase.RINGING_INCOMING
+                Call.STATE_NEW, Call.STATE_CONNECTING, Call.STATE_DIALING, Call.STATE_SELECT_PHONE_ACCOUNT ->
+                    if (callDirectionTracker[stableCallId(call)] == "INCOMING") LiveCallPhase.RINGING_INCOMING
+                    else LiveCallPhase.OUTGOING_SETTING_UP
+                else -> LiveCallPhase.OTHER
             }
+
+            /** The calls live in this service now (ended / disconnecting ones excluded), for the outgoing-dial guard. */
+            fun dialGuardCallPhases(): Map<String, LiveCallPhase> =
+                getLiveCalls().associate { stableCallId(it) to dialGuardPhase(it) }
 
             /**
              * The user is placing a NEW outgoing call. Scope the previous call's cleanup to that call so
@@ -3090,6 +3096,8 @@ class MyInCallService : InCallService() {
                         "CallStateMachine", callId, "NONE", "OUTGOING", "Registered OUTGOING call. Missed Call logic locked out."
                     )
                 }
+                // Outgoing-dial guard: Telecom added a call; if a dial attempt is waiting for its call, this is it.
+                DialAttempts.guard.onTelecomCallAdded(callId, dialGuardPhase(call))
 
                 if (callDirectionTracker[callId] == "OUTGOING" && (isConference || seedRawNumber.isNotBlank() || immediateName.isNotBlank())) {
                     startImmediateCallForeground(
@@ -3114,6 +3122,11 @@ class MyInCallService : InCallService() {
                     }
 
                     override fun onStateChanged(call: Call, state: Int) {
+                        // Outgoing-dial guard: only the attempt that owns this call is moved (established / ended).
+                        DialAttempts.guard.onCallUpdate(
+                            callId,
+                            if (state == Call.STATE_DISCONNECTED || state == Call.STATE_DISCONNECTING) null else dialGuardPhase(call)
+                        )
                         val effectiveState = getEffectiveCallState(call)
                         updateCallTimerStateStrict(call, effectiveState)
                         call.children?.forEach { child ->
@@ -3309,6 +3322,8 @@ class MyInCallService : InCallService() {
                 logCall("onCallRemoved call=${System.identityHashCode(call)} state=${call.state}")
                 // The retracted-banner state belongs to this call only; drop it with the call.
                 if (stableCallId(call) == quietIncomingCallId) quietIncomingCallId = null
+                // Outgoing-dial guard: a call that is gone has ended for the attempt that owns it.
+                DialAttempts.guard.onCallUpdate(stableCallId(call), null)
                 android.util.Log.e("OEM_FALLBACK_TRACE", "=====================================================================")
         android.util.Log.e("OEM_FALLBACK_TRACE", "ULTRA SUPREME FORENSIC INFLOP PROFESSION LOGGING")
                 android.util.Log.e("OEM_FALLBACK_TRACE", "MyInCallService: onCallRemoved TRIGGERED!")

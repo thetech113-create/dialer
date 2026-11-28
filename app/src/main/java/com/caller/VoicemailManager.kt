@@ -156,10 +156,13 @@ object VoicemailManager {
 
     /** Dials the carrier voicemail box of the default SIM through Telecom (voicemail: scheme). */
     fun callCarrierVoicemail(context: Context): Boolean {
+        // Same outgoing-dial guard as the keypad: nothing is dialled while another dial is still being set up.
+        val attemptId = DialAttempts.tryAcquire(context, source = "voicemail") ?: return false
         return try {
             val telecom = context.getSystemService(Context.TELECOM_SERVICE) as TelecomManager
-            telecom.placeCall(Uri.fromParts("voicemail", "", null), null)
-            true
+            DialAttempts.guard.dispatch(attemptId, "voicemail") {
+                telecom.placeCall(Uri.fromParts("voicemail", "", null), null)
+            }
         } catch (e: SecurityException) {
             Log.e(TAG, "voicemail call not permitted: ${e.message}")
             false

@@ -919,27 +919,6 @@ internal fun shouldReportCallNotSent(
 internal fun isTelecomInCallAttributableToDial(telecomInCall: Boolean, callsLiveBeforeDial: Int): Boolean =
     telecomInCall && callsLiveBeforeDial == 0
 
-/**
- * Whether a new outgoing dial must be ignored because an earlier dial is still being set up. Telecom refuses a
- * second outgoing call while one is dialling and the OEM shows its own "Call not sent" for it (seen when the green
- * button was pressed again before the call screen had appeared, since the number stays on the keypad until then).
- *
- * [lastDialDispatchedAt]: elapsedRealtime of the last dial this screen sent, 0 once it has been resolved.
- * [lastCallAddedAt]: elapsedRealtime of the last onCallAdded. A dial newer than that has not reached Telecom yet.
- * [outgoingCallsBeingSetUp]: live calls still NEW / CONNECTING / DIALING / SELECT_PHONE_ACCOUNT.
- *
- * An ACTIVE or HOLDING call does not block (hold-then-place still works) and an ended call is not live, so an
- * immediate redial after a call ends is never blocked.
- */
-internal fun shouldIgnoreNewDial(
-    lastDialDispatchedAt: Long,
-    lastCallAddedAt: Long,
-    outgoingCallsBeingSetUp: Int
-): Boolean {
-    val dialNotYetInTelecom = lastDialDispatchedAt > 0L && lastCallAddedAt < lastDialDispatchedAt
-    return dialNotYetInTelecom || outgoingCallsBeingSetUp > 0
-}
-
 @OptIn(ExperimentalFoundationApi::class, ExperimentalMaterial3Api::class)
 @Suppress("HandlerLeak")
 class MainActivity : ComponentActivity() {
@@ -996,10 +975,9 @@ class MainActivity : ComponentActivity() {
     private var activeMergedContactEntry by mutableStateOf<ContactDisplayEntry?>(null)
     private var isMainActivityVisible = false
     private val deferredKeypadClear = DeferredKeypadClear()
-    // elapsedRealtime of the last outgoing dial this screen sent; 0 once that dial is resolved (it reached Telecom,
-    // or the post-dial check found it never started). Used with shouldIgnoreNewDial to drop a second dial while the
-    // first is still being set up.
-    private var pendingDialDispatchedAtElapsed = 0L
+    // The dial attempt whose SIM picker this screen is showing, so it is released if the screen goes away with the
+    // picker still open (the picker's cancel callback does not run then).
+    private var simChoiceAttemptId: Long? = null
     private val callScreenDrawnListener: () -> Unit = { applyDeferredKeypadClear("call_screen_drawn") }
     private var inCallStateListenerRef: ((UnifiedCallState) -> Unit)? = null
     private var showBatteryOptimizationPrompt by mutableStateOf(false)
@@ -1299,6 +1277,9 @@ class MainActivity : ComponentActivity() {
         isMainActivityVisible = true
         incomingUiGateMainVisible = true
         applyDeferredKeypadClear("onResume")
+        // Back in front: the keypad's call button reflects the real state of the current dial attempt (released if it
+        // was established, ended or timed out while the app was in the background).
+        DialAttempts.revalidate(this)
         // Android does not restart the PC link after a force stop or an update. If the user left it on, bring it back
         // whenever the app comes to the front, so the PC Link switch matches what the user chose.
         if (LinkPrefs(this).autoStart && !LinkState.running) LinkService.start(this)
@@ -2125,6 +2106,9 @@ class MainActivity : ComponentActivity() {
 
     override fun onDestroy() {
         CallScreenShown.remove(callScreenDrawnListener)
+        // The SIM picker goes away with this screen without calling its cancel callback: release its attempt.
+        simChoiceAttemptId?.let { DialAttempts.guard.fail(it, "sim_choice_abandoned") }
+        simChoiceAttemptId = null
         isMainActivityVisible = false
         incomingUiGateMainVisible = false
         AccountDeviceHistoryManager.removeStateListener(accountHistoryListener)
@@ -3765,23 +3749,20 @@ class MainActivity : ComponentActivity() {
             }
             DialCode.Call -> Unit
         }
-        // A dial is already being set up (sent but not yet in Telecom, or still dialling): Telecom would refuse this
-        // one and the OEM would show its own "Call not sent" while the first call goes on normally. Drop it; the
-        // first call's screen is on its way. Ended calls are not live, so an immediate redial is never blocked.
-        if (shouldIgnoreNewDial(
-                lastDialDispatchedAt = pendingDialDispatchedAtElapsed,
-                lastCallAddedAt = MyInCallService.lastCallAddedElapsedRealtime,
-                outgoingCallsBeingSetUp = MyInCallService.getInstance()?.outgoingCallsBeingSetUpCount() ?: 0
-            )
-        ) {
-            Log.w(P2P_FORENSIC_TAG, "outgoing_call_ignored reason=previous_dial_still_being_set_up")
-            return
-        }
+        // One unresolved dial attempt permits exactly one outgoing dial. Acquired atomically, synchronously in the tap
+        // handler, before any asynchronous work: a second tap (or any other entry point) while this dial is still being
+        // set up is refused here and dials nothing; the keypad button is disabled from the same state. The guard is
+        // re-checked against live call state first, so an attempt that failed, ended or timed out never blocks a new
+        // dial, and an established (ACTIVE / HOLDING) call does not block hold-then-place.
+        val attemptId = DialAttempts.tryAcquire(this, source = "main_activity") ?: return
+        val guard = DialAttempts.guard
         if (!hasCallPhonePermission()) {
+            guard.fail(attemptId, "no_call_permission")
             showError("Call permission is required to place calls")
             return
         }
         if (!DualSimFixes.hasRequiredSubscriptionPermissions(this)) {
+            guard.fail(attemptId, "no_phone_state_permission")
             Log.w(P2P_FORENSIC_TAG, "sim_detection_missing_permissions missing=${DualSimFixes.missingSubscriptionPermissions(this).joinToString(",")}")
             requestPermissions()
             showError("Phone state permission is required to detect installed SIM cards")
@@ -3789,6 +3770,7 @@ class MainActivity : ComponentActivity() {
         }
 
         if (isAirplaneModeBlockingCall(dialableNumber)) {
+            guard.fail(attemptId, "airplane_mode")
             showAirplaneModeDialog()
             return
         }
@@ -3808,10 +3790,12 @@ class MainActivity : ComponentActivity() {
 
             when {
                 simOptions.isEmpty() -> {
+                    guard.fail(attemptId, "no_sim")
                     showError("No SIM detected")
                 }
                 simOptions.size == 1 -> {
                     placeOutgoingCall(
+                        attemptId = attemptId,
                         telecomManager = telecomManager,
                         finalUri = finalUri,
                         rawPhoneNumber = rawPhoneNumber,
@@ -3822,11 +3806,17 @@ class MainActivity : ComponentActivity() {
                     )
                 }
                 else -> {
+                    // The attempt stays locked while the SIM picker is open (the picker blocks further taps itself).
+                    guard.awaitUserChoice(attemptId)
+                    simChoiceAttemptId = attemptId
                     DualSimFixes.showSimSelectionDialog(
                         activity = this,
                         options = simOptions,
                         onSelected = { selectedSim ->
+                            if (simChoiceAttemptId == attemptId) simChoiceAttemptId = null
+                            guard.userChoiceMade(attemptId)
                             placeOutgoingCall(
+                                attemptId = attemptId,
                                 telecomManager = telecomManager,
                                 finalUri = finalUri,
                                 rawPhoneNumber = rawPhoneNumber,
@@ -3837,19 +3827,24 @@ class MainActivity : ComponentActivity() {
                             )
                         },
                         onCancelled = {
+                            if (simChoiceAttemptId == attemptId) simChoiceAttemptId = null
+                            guard.fail(attemptId, "sim_choice_cancelled")
                             showError("Call cancelled")
                         }
                     )
                 }
             }
         } catch (e: SecurityException) {
+            guard.fail(attemptId, "security_exception")
             Log.w(P2P_FORENSIC_TAG, "sim_detection_failed reason=security_exception error=${e.message}")
             requestPermissions()
             showError("Phone state permission is required to detect installed SIM cards")
         } catch (e: IllegalStateException) {
+            guard.fail(attemptId, "illegal_state")
             Log.e(P2P_FORENSIC_TAG, "sim_detection_failed reason=illegal_state error=${e.message}", e)
             showError(e.message ?: "Unable to detect installed SIM cards")
         } catch (e: Exception) {
+            guard.fail(attemptId, "unexpected_error")
             Log.e(P2P_FORENSIC_TAG, "outgoing_call_failed reason=unexpected error=${e.message}", e)
             showError("Failed to start call")
         }
@@ -3857,6 +3852,7 @@ class MainActivity : ComponentActivity() {
 
     @SuppressLint("MissingPermission")
     private fun placeOutgoingCall(
+        attemptId: Long,
         telecomManager: TelecomManager,
         finalUri: Uri,
         rawPhoneNumber: String,
@@ -3890,8 +3886,6 @@ class MainActivity : ComponentActivity() {
         // cleanup (fired ~350 ms after it ended) can drop foreground / stopSelf / clear the UI just as
         // Call B is placed, and Call B arrives into a torn-down, deprioritized service.
         MyInCallService.getInstance()?.prepareForNewOutgoingCall("main_activity_place")
-        // This dial is now in flight until it reaches Telecom or the post-dial check resolves it (shouldIgnoreNewDial).
-        pendingDialDispatchedAtElapsed = android.os.SystemClock.elapsedRealtime()
         // The call screen opens when Telecom adds the call (MyInCallService.onCallAdded), not before, as in Google's
         // Dialer. A dial that never reaches Telecom leaves no "Dialling" screen behind; the system reports why.
 
@@ -3902,38 +3896,45 @@ class MainActivity : ComponentActivity() {
                 "outgoing_call_dispatch branch=hold_then_place raw=${maskP2PNumberForLog(rawPhoneNumber)} dialable=${maskP2PNumberForLog(dialableNumber)} selectedSimId=${selectedSim.subscriptionId}"
             )
             inCallService.holdCall()
+            // Same attempt, same guard: the delayed dispatch places the call only if this attempt is still current
+            // and not yet dispatched.
             Handler(Looper.getMainLooper()).postDelayed({
-                dispatchPlaceCall(telecomManager, finalUri, extras)
+                dispatchPlaceCall(attemptId, "hold_then_place", telecomManager, finalUri, extras)
             }, 200)
         } else {
             Log.w(
                 P2P_FORENSIC_TAG,
                 "outgoing_call_dispatch branch=direct_place raw=${maskP2PNumberForLog(rawPhoneNumber)} dialable=${maskP2PNumberForLog(dialableNumber)} selectedSimId=${selectedSim.subscriptionId}"
             )
-            dispatchPlaceCall(telecomManager, finalUri, extras)
+            dispatchPlaceCall(attemptId, "direct_place", telecomManager, finalUri, extras)
         }
     }
 
     @SuppressLint("MissingPermission")
     private fun dispatchPlaceCall(
+        attemptId: Long,
+        branch: String,
         telecomManager: TelecomManager,
         finalUri: Uri,
         extras: Bundle
     ) {
+        val guard = DialAttempts.guard
         try {
             if (hasCallPhonePermission()) {
                 val dispatchAtElapsed = android.os.SystemClock.elapsedRealtime()
-                val pendingDialMarker = pendingDialDispatchedAtElapsed
                 // Calls already live before this dial: anything new afterwards belongs to this dial.
                 val liveCallIdsAtDispatch = MyInCallService.getInstance()?.liveCallIds().orEmpty()
-                telecomManager.placeCall(finalUri, extras)
+                // placeCall runs only through the guard: at most once for this attempt, and not at all if the attempt
+                // is no longer current (released, cancelled, or replaced by a newer one).
+                val placed = guard.dispatch(attemptId, branch) { telecomManager.placeCall(finalUri, extras) }
+                if (!placed) {
+                    deferredKeypadClear.cancel()
+                    return
+                }
                 // Some OEMs (e.g. ColorOS) silently refuse placeCall while a previous call is still tearing down
                 // and show their own "Call not sent" with no reason, and placeCall does not throw. If no call has
                 // reached Telecom shortly after, show our own message so the user knows the dial did not start.
                 Handler(Looper.getMainLooper()).postDelayed({
-                    // This dial is resolved either way (started, or never started): new dials are judged on live
-                    // call state from here on. A newer dial in the meantime keeps its own marker.
-                    if (pendingDialDispatchedAtElapsed == pendingDialMarker) pendingDialDispatchedAtElapsed = 0L
                     // The framework may have delivered the call to our InCallService without our
                     // onCallAdded completing (seen on rapid back-to-back redials): reconcile against
                     // this.calls first, so a connected call is adopted and shown instead of being
@@ -3947,20 +3948,25 @@ class MainActivity : ComponentActivity() {
                     val telecomInCallAttributableToThisDial =
                         isTelecomInCallAttributableToDial(telecomInCall, liveCallIdsAtDispatch.size)
                     if (shouldReportCallNotSent(newCallForThisDial, callStartedAfterDispatch, telecomInCallAttributableToThisDial)) {
-                        Log.w(P2P_FORENSIC_TAG, "call_not_sent reason=no_call_created_after_place_call")
+                        // This attempt produced no call: release it so the button comes back and a retry is accepted.
+                        // (Scoped to attemptId: a newer attempt is not touched.)
+                        guard.fail(attemptId, "no_call_created_after_place_call")
+                        Log.w(P2P_FORENSIC_TAG, "call_not_sent attempt=$attemptId reason=no_call_created_after_place_call")
                         showError("Call not sent — the phone didn't start the call. Please try again in a moment.")
+                    } else {
+                        DialAttempts.revalidate(this)
                     }
                 }, 2500L)
             } else {
-                pendingDialDispatchedAtElapsed = 0L
+                guard.fail(attemptId, "no_call_permission")
                 deferredKeypadClear.cancel()
             }
         } catch (e: SecurityException) {
-            pendingDialDispatchedAtElapsed = 0L
+            guard.fail(attemptId, "security_exception")
             deferredKeypadClear.cancel()
             showError("Permission denied to place call")
         } catch (e: Exception) {
-            pendingDialDispatchedAtElapsed = 0L
+            guard.fail(attemptId, "place_call_failed")
             deferredKeypadClear.cancel()
             showError("Failed to start call")
         }
@@ -7467,6 +7473,19 @@ class MainActivity : ComponentActivity() {
         val configuration = LocalConfiguration.current
         val screenHeight = configuration.screenHeightDp
         val canRedial = phoneNumber.isEmpty() && lastRecentNumber.isNotBlank()
+        // The call button is disabled while a dial attempt is still being set up. This comes from the process-wide dial
+        // guard (not from this screen's state), so a recreated keypad shows the same attempt's real state. While it is
+        // disabled the attempt is re-checked against live call state, so a dial that failed, ended or timed out
+        // brings the button back by itself instead of leaving it stuck.
+        val dialLocked by DialAttempts.guard.locked.collectAsState()
+        LaunchedEffect(dialLocked) {
+            if (dialLocked) {
+                while (true) {
+                    delay(500L)
+                    DialAttempts.revalidate(context)
+                }
+            }
+        }
 
         val buttonSize = if (screenHeight < 700) 62.dp else 72.dp
         val rowSpacing = if (screenHeight < 700) 10.dp else 14.dp
@@ -7723,8 +7742,8 @@ class MainActivity : ComponentActivity() {
                         modifier = Modifier
                             .size(buttonSize)
                             .clip(CircleShape)
-                            .background(OneUi.CallGreen)
-                            .clickable {
+                            .background(if (dialLocked) OneUi.CallGreen.copy(alpha = 0.38f) else OneUi.CallGreen)
+                            .clickable(enabled = !dialLocked) {
                                 when (val action = keypadCallAction(phoneNumber, lastRecentNumber)) {
                                     is KeypadCallAction.Dial -> onCall(action.number)
                                     // Redial: the first tap only puts the last number on the keypad, so it can be checked
@@ -7737,8 +7756,12 @@ class MainActivity : ComponentActivity() {
                     ) {
                         Icon(
                             Icons.Default.Call,
-                            contentDescription = if (canRedial) "Redial" else "Call",
-                            tint = Color.White,
+                            contentDescription = when {
+                                dialLocked -> "Calling…"
+                                canRedial -> "Redial"
+                                else -> "Call"
+                            },
+                            tint = if (dialLocked) Color.White.copy(alpha = 0.6f) else Color.White,
                             modifier = Modifier.size(28.dp)
                         )
                     }
