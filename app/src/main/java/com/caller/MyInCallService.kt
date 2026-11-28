@@ -152,6 +152,35 @@ internal fun shouldPostIncomingQuietly(ringingCallId: String?, retractedCallId: 
 internal fun shouldRestoreIncomingBanner(retractedCallId: String?, ringingCallId: String?, screenInteractive: Boolean): Boolean =
     retractedCallId != null && retractedCallId == ringingCallId && screenInteractive
 
+/**
+ * Which answering surface a ringing call is on. [FULL_SCREEN]: the full-screen call screen is confirmed visible for
+ * this call, so its Answer/Decline notification is quiet (one surface). [BANNER]: anything else - the bubble overlay
+ * in another app, call waiting, the call screen left - where the high-priority heads-up Answer/Decline is the way to
+ * answer and must actually pop.
+ */
+internal enum class IncomingSurface { FULL_SCREEN, BANNER }
+
+internal fun incomingSurfaceFor(ringingCallId: String?, retractedCallId: String?, callScreenVisible: Boolean): IncomingSurface =
+    if (shouldPostIncomingQuietly(ringingCallId, retractedCallId, callScreenVisible)) IncomingSurface.FULL_SCREEN
+    else IncomingSurface.BANNER
+
+/**
+ * Whether a BANNER-surface post must alert again. The incoming notification shares its id with the ongoing-call
+ * notification and is posted with setOnlyAlertOnce, and Android pops an update of an already-alerted notification
+ * only if that update may alert. So once per call, each time it becomes the banner, the post must re-alert: the
+ * first post for the call (including a waiting call replacing the ongoing call's notification) and the first post
+ * after the full-screen call screen had made it quiet. [bannerAlertedCallId]: the call whose banner has already
+ * alerted since it last became the banner; repeated posts for it do not alert again (no banner every few seconds).
+ * Not while the display is off: that would fight the user silencing the call with the power key.
+ */
+internal fun shouldRealertIncomingBanner(
+    ringingCallId: String?,
+    surface: IncomingSurface,
+    bannerAlertedCallId: String?,
+    screenInteractive: Boolean
+): Boolean = surface == IncomingSurface.BANNER && ringingCallId != null &&
+    ringingCallId != bannerAlertedCallId && screenInteractive
+
 @SuppressLint("MissingPermission", "UseFullScreenIntent")
 class MyInCallService : InCallService() {
 
@@ -166,6 +195,10 @@ class MyInCallService : InCallService() {
             // resumed), i.e. whose heads-up banner has been retracted. Scoped to that one call, so it can never
             // quieten a different call; cleared when the screen leaves or the call is removed.
             @Volatile private var quietIncomingCallId: String? = null
+            // stableCallId of the ringing call whose BANNER (high-priority heads-up Answer/Decline) has alerted since it
+            // last became the banner. Cleared when the full-screen call screen makes it quiet, so the next banner post
+            // alerts again (shouldRealertIncomingBanner).
+            @Volatile private var bannerAlertedCallId: String? = null
             // Set when the call was answered from the banner in another app: the next ongoing notification pops
             // as a banner once (option A) and the floating call pill is shown (option B).
             @Volatile private var answeredFromBannerPopPending = false
@@ -3322,6 +3355,7 @@ class MyInCallService : InCallService() {
                 logCall("onCallRemoved call=${System.identityHashCode(call)} state=${call.state}")
                 // The retracted-banner state belongs to this call only; drop it with the call.
                 if (stableCallId(call) == quietIncomingCallId) quietIncomingCallId = null
+                if (stableCallId(call) == bannerAlertedCallId) bannerAlertedCallId = null
                 // Outgoing-dial guard: a call that is gone has ended for the attempt that owns it.
                 DialAttempts.guard.onCallUpdate(stableCallId(call), null)
                 android.util.Log.e("OEM_FALLBACK_TRACE", "=====================================================================")
@@ -3970,16 +4004,20 @@ class MyInCallService : InCallService() {
                     surface = if (allowFullScreen) "fullscreen_allowed" else "notification_only"
                 )
 
-                // One answering surface: while the call screen is confirmed to be showing THIS ringing call, a
-                // re-post (reposter refresh, name resolved later, ...) stays quiet instead of putting the banner
-                // back on top of the screen.
-                val quiet = isCallScreenShowingRingingCall()
+                // One answering surface. FULL_SCREEN: the call screen is confirmed to be showing THIS ringing call, so a
+                // re-post (reposter refresh, name resolved later, ...) stays quiet instead of putting the banner back on
+                // top of the screen. BANNER (bubble overlay / another app / call waiting / call screen left): high
+                // priority, and it re-alerts once per call each time it becomes the banner, so it really pops.
+                val ringingId = ringingCall()?.let { stableCallId(it) }
+                val surface = currentIncomingSurface(ringingId)
+                val quiet = surface == IncomingSurface.FULL_SCREEN
+                val realert = shouldRealertIncomingBanner(ringingId, surface, bannerAlertedCallId, isDisplayInteractive())
                 val notification = buildIncomingCallNotification(
                     phoneNumber = phoneNumber,
                     contactName = contactName,
                     quiet = quiet,
                     attachFullScreen = allowFullScreen,
-                    realert = false
+                    realert = realert
                 )
 
                 if (allowFullScreen) {
@@ -4015,6 +4053,83 @@ class MyInCallService : InCallService() {
                     UltraForensicLogger.deepest("Failed to start foreground for incoming call: ${e.message}")
                     getSystemService(NotificationManager::class.java).notify(Constants.NOTIFICATION_ID_ONGOING_CALL, notification)
                 }
+                noteIncomingPosted(ringingId, surface, realert)
+                Log.w(
+                    P2P_FORENSIC_TAG,
+                    "incoming_banner action=post surface=$surface fullScreenAllowed=$allowFullScreen realert=$realert callId=$ringingId"
+                )
+                // Bubble overlay in another app: the banner is the way to answer. Make sure it really landed.
+                if (surface == IncomingSurface.BANNER && !allowFullScreen) verifyIncomingBannerSoon(ringingId, "bubble_overlay")
+            }
+
+            private fun isDisplayInteractive(): Boolean = runCatching {
+                (getSystemService(Context.POWER_SERVICE) as PowerManager).isInteractive
+            }.getOrDefault(true)
+
+            private fun currentIncomingSurface(ringingId: String?): IncomingSurface =
+                incomingSurfaceFor(
+                    ringingCallId = ringingId,
+                    retractedCallId = quietIncomingCallId,
+                    callScreenVisible = CallBubbleOverlay.isCallActivityVisible
+                )
+
+            /** Records what the last incoming post did, for shouldRealertIncomingBanner. */
+            private fun noteIncomingPosted(ringingId: String?, surface: IncomingSurface, realert: Boolean) {
+                when {
+                    surface == IncomingSurface.FULL_SCREEN -> bannerAlertedCallId = null
+                    realert -> bannerAlertedCallId = ringingId
+                }
+            }
+
+            /**
+             * The BANNER surface must end up as the high-priority Answer/Decline notification. Android can drop a burst of
+             * rapid updates of one notification (several parts of the app re-post it when the call screen is left), so
+             * the quiet version, or the ongoing call's notification during call waiting, could stay. Shortly after a
+             * banner post, if the same call still rings off the call screen and the posted notification is not the
+             * high-priority incoming one, post it again so that it pops.
+             */
+            private fun verifyIncomingBannerSoon(ringingId: String?, source: String) {
+                if (ringingId == null) return
+                bgHandler.postDelayed({
+                    val ringing = ringingCall() ?: return@postDelayed
+                    if (stableCallId(ringing) != ringingId) return@postDelayed
+                    if (currentIncomingSurface(ringingId) != IncomingSurface.BANNER) return@postDelayed
+                    val active = runCatching {
+                        getSystemService(NotificationManager::class.java)?.activeNotifications
+                            ?.firstOrNull { it.id == Constants.NOTIFICATION_ID_ONGOING_CALL }
+                    }.getOrNull()
+                    if (active?.notification?.channelId == incomingCallChannelId) return@postDelayed
+                    Log.w(
+                        P2P_FORENSIC_TAG,
+                        "incoming_banner action=repost source=$source callId=$ringingId reason=banner_not_posted activeChannel=${active?.notification?.channelId}"
+                    )
+                    bannerAlertedCallId = null
+                    postIncomingBanner(ringing, "verify:$source")
+                }, 700L)
+            }
+
+            /** Posts the BANNER-surface Answer/Decline for [ringing] (high priority, re-alerting once per transition). */
+            private fun postIncomingBanner(ringing: Call, source: String) {
+                val ringingId = stableCallId(ringing)
+                val state = runCatching { getCurrentCallStateFromSync() }.getOrNull()?.takeIf { it.primaryState == "RINGING" }
+                val number = state?.primaryNumber ?: ringing.details?.handle?.schemeSpecificPart.orEmpty()
+                // During call waiting the primary is the active call: name the waiting (ringing) call itself.
+                val name = state?.primaryName
+                    ?: runCatching { resolveCallIdentity(ringing, "incoming_banner").second }.getOrNull()?.ifBlank { null }
+                    ?: number
+                val realert = shouldRealertIncomingBanner(ringingId, IncomingSurface.BANNER, bannerAlertedCallId, isDisplayInteractive())
+                val notification = buildIncomingCallNotification(
+                    phoneNumber = number,
+                    contactName = name,
+                    quiet = false,
+                    attachFullScreen = false,
+                    realert = realert
+                )
+                runCatching {
+                    getSystemService(NotificationManager::class.java)?.notify(Constants.NOTIFICATION_ID_ONGOING_CALL, notification)
+                }
+                noteIncomingPosted(ringingId, IncomingSurface.BANNER, realert)
+                Log.w(P2P_FORENSIC_TAG, "incoming_banner action=post surface=BANNER source=$source realert=$realert callId=$ringingId")
             }
 
             /**
@@ -4091,14 +4206,6 @@ class MyInCallService : InCallService() {
 
             private fun ringingCall(): Call? = getLiveCalls().firstOrNull { it.state == Call.STATE_RINGING }
 
-            /** True only while the call screen is visible AND was confirmed (onResume) for the call ringing now. */
-            private fun isCallScreenShowingRingingCall(): Boolean =
-                shouldPostIncomingQuietly(
-                    ringingCallId = ringingCall()?.let { stableCallId(it) },
-                    retractedCallId = quietIncomingCallId,
-                    callScreenVisible = CallBubbleOverlay.isCallActivityVisible
-                )
-
             /**
              * CallActivity has resumed, i.e. it is actually on screen. If it shows a ringing call, retract the
              * heads-up banner by re-posting the same Answer/Decline notification quietly. This happens only after
@@ -4123,6 +4230,8 @@ class MyInCallService : InCallService() {
                 runCatching {
                     getSystemService(NotificationManager::class.java)?.notify(Constants.NOTIFICATION_ID_ONGOING_CALL, notification)
                 }
+                // Quiet now: when this call becomes the banner again (bubble overlay / another app), it must pop again.
+                noteIncomingPosted(callId, IncomingSurface.FULL_SCREEN, realert = false)
                 Log.w(P2P_FORENSIC_TAG, "incoming_banner action=retract source=$source callId=$callId reason=call_screen_visible")
             }
 
@@ -4146,20 +4255,11 @@ class MyInCallService : InCallService() {
                     Log.w(P2P_FORENSIC_TAG, "incoming_banner action=keep_quiet source=$source callId=$retractedId reason=screen_off")
                     return
                 }
-                val state = runCatching { getCurrentCallStateFromSync() }.getOrNull()?.takeIf { it.primaryState == "RINGING" }
-                val number = state?.primaryNumber ?: ringing.details?.handle?.schemeSpecificPart.orEmpty()
-                val name = state?.primaryName ?: number
                 quietIncomingCallId = null
-                val notification = buildIncomingCallNotification(
-                    phoneNumber = number,
-                    contactName = name,
-                    quiet = false,
-                    attachFullScreen = false,
-                    realert = true
-                )
-                runCatching {
-                    getSystemService(NotificationManager::class.java)?.notify(Constants.NOTIFICATION_ID_ONGOING_CALL, notification)
-                }
+                // Back to the BANNER surface (bubble overlay / another app): high priority, re-alerting unless a post
+                // since the call screen left has already brought the banner back, then checked that it landed.
+                postIncomingBanner(ringing, "restore:$source")
+                verifyIncomingBannerSoon(retractedId, "restore:$source")
                 Log.w(P2P_FORENSIC_TAG, "incoming_banner action=restore source=$source callId=$retractedId")
             }
 

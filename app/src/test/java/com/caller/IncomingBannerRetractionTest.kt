@@ -1,5 +1,6 @@
 package com.caller
 
+import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
 import org.junit.Test
@@ -61,5 +62,67 @@ class IncomingBannerRetractionTest {
         assertFalse(shouldRestoreIncomingBanner(retractedCallId = "A", ringingCallId = "B", screenInteractive = true))
         assertFalse(shouldRestoreIncomingBanner(retractedCallId = "A", ringingCallId = null, screenInteractive = true))
         assertFalse(shouldRestoreIncomingBanner(retractedCallId = null, ringingCallId = "A", screenInteractive = true))
+    }
+
+    // ---- Full screen vs bubble overlay ----
+    // Full screen (call screen confirmed for the ringing call): quiet. Bubble overlay / another app / call waiting:
+    // the high-priority banner, which must actually pop.
+
+    @Test
+    fun fullScreenVisibleForRingingCall_isFullScreenSurface() {
+        assertEquals(IncomingSurface.FULL_SCREEN, incomingSurfaceFor(ringingCallId = "A", retractedCallId = "A", callScreenVisible = true))
+    }
+
+    // In another app the bubble overlay shows and the call screen is not visible: banner, never quiet.
+    @Test
+    fun bubbleOverlayInAnotherApp_isBannerSurface() {
+        assertEquals(IncomingSurface.BANNER, incomingSurfaceFor(ringingCallId = "A", retractedCallId = null, callScreenVisible = false))
+        // ...also after the full screen had made this call quiet and the user went to another app.
+        assertEquals(IncomingSurface.BANNER, incomingSurfaceFor(ringingCallId = "A", retractedCallId = "A", callScreenVisible = false))
+    }
+
+    // First banner post for a call in another app: it alerts (heads-up Answer/Decline pops).
+    @Test
+    fun bubbleOverlay_firstBannerPostForCall_alerts() {
+        assertTrue(shouldRealertIncomingBanner("A", IncomingSurface.BANNER, bannerAlertedCallId = null, screenInteractive = true))
+    }
+
+    // The bug: full screen made it quiet, then the user switched to another app (bubble overlay). The banner post is an
+    // update of an already-alerted notification posted with setOnlyAlertOnce, so it must re-alert to pop at all.
+    @Test
+    fun fullScreenThenAnotherApp_bannerReAlerts() {
+        // While the full screen showed it, the quiet post cleared the alerted marker.
+        val alertedAfterQuiet: String? = null
+        assertTrue(shouldRealertIncomingBanner("A", IncomingSurface.BANNER, alertedAfterQuiet, screenInteractive = true))
+    }
+
+    // Call waiting with the bubble overlay: the waiting call replaces the ongoing call's notification (same id) and must
+    // pop, even though the first call's notification alerted before.
+    @Test
+    fun callWaiting_waitingCallBannerAlerts() {
+        assertTrue(shouldRealertIncomingBanner("B", IncomingSurface.BANNER, bannerAlertedCallId = "A", screenInteractive = true))
+    }
+
+    // Repeated banner posts for the same call (reposter, name resolved) do not pop again every few seconds.
+    @Test
+    fun repeatedBannerPostsForSameCall_doNotReAlert() {
+        assertFalse(shouldRealertIncomingBanner("A", IncomingSurface.BANNER, bannerAlertedCallId = "A", screenInteractive = true))
+    }
+
+    // Full screen visible: never alerts (no banner on top of the call screen).
+    @Test
+    fun fullScreenSurface_neverReAlerts() {
+        assertFalse(shouldRealertIncomingBanner("A", IncomingSurface.FULL_SCREEN, bannerAlertedCallId = null, screenInteractive = true))
+    }
+
+    // Display off (power key silencing): no re-alert; it alerts once the display is on again.
+    @Test
+    fun displayOff_doesNotReAlert() {
+        assertFalse(shouldRealertIncomingBanner("A", IncomingSurface.BANNER, bannerAlertedCallId = null, screenInteractive = false))
+    }
+
+    @Test
+    fun noRingingCall_doesNotReAlert() {
+        assertFalse(shouldRealertIncomingBanner(null, IncomingSurface.BANNER, bannerAlertedCallId = null, screenInteractive = true))
     }
 }
