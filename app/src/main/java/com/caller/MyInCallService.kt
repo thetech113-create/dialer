@@ -137,12 +137,35 @@ private const val OPEN_UI_AFTER_ANSWER_EXTRA = "OPEN_UI_AFTER_ANSWER_EXTRA"
 internal fun shouldTearDownAfterDisconnect(ownLiveCallCount: Int, telecomFrameworkInCall: Boolean): Boolean =
     ownLiveCallCount == 0 && !telecomFrameworkInCall
 
+/**
+ * Whether the incoming Answer/Decline notification must be posted quietly (no heads-up banner): only while the
+ * full-screen call screen is visible AND was confirmed for the very call that is ringing now. A different call,
+ * or a screen that is not visible, always gets the normal banner.
+ */
+internal fun shouldPostIncomingQuietly(ringingCallId: String?, retractedCallId: String?, callScreenVisible: Boolean): Boolean =
+    ringingCallId != null && ringingCallId == retractedCallId && callScreenVisible
+
+/**
+ * Whether to bring the banner back after the call screen went away: only for the same call whose banner was
+ * retracted, only while it still rings, and not when the display is off (power key = the user silencing).
+ */
+internal fun shouldRestoreIncomingBanner(retractedCallId: String?, ringingCallId: String?, screenInteractive: Boolean): Boolean =
+    retractedCallId != null && retractedCallId == ringingCallId && screenInteractive
+
 @SuppressLint("MissingPermission", "UseFullScreenIntent")
 class MyInCallService : InCallService() {
 
             private val incomingCallChannelId = "call_channel_v4"
+            // Same incoming Answer/Decline notification while the full-screen call screen is already showing
+            // that ringing call: default importance (never a heads-up banner) and silent, so the user gets ONE
+            // answering surface instead of the call screen plus a banner on top of it.
+            private val incomingQuietChannelId = "incoming_call_quiet_v1"
             private val ongoingCallChannelId = "ongoing_call_channel_v5"
             private val answeredBannerChannelId = "answered_call_banner_v2"
+            // stableCallId of the ringing call whose call screen has been confirmed visible (CallActivity
+            // resumed), i.e. whose heads-up banner has been retracted. Scoped to that one call, so it can never
+            // quieten a different call; cleared when the screen leaves or the call is removed.
+            @Volatile private var quietIncomingCallId: String? = null
             // Set when the call was answered from the banner in another app: the next ongoing notification pops
             // as a banner once (option A) and the floating call pill is shown (option B).
             @Volatile private var answeredFromBannerPopPending = false
@@ -1712,6 +1735,23 @@ class MyInCallService : InCallService() {
                     }
                     notificationManager?.createNotificationChannel(ongoingChannel)
 
+                    // Incoming call while its full-screen call screen is visible: below HIGH, so Android never
+                    // shows it as a heads-up banner; silent (the ringtone is played by this service, not the
+                    // channel). Answer/Decline stays available in the notification shade.
+                    val quietIncomingChannel = NotificationChannel(
+                        incomingQuietChannelId,
+                        "Incoming Calls (call screen open)",
+                        NotificationManager.IMPORTANCE_DEFAULT
+                    ).apply {
+                        description = "Incoming call while the call screen is showing"
+                        lockscreenVisibility = Notification.VISIBILITY_PUBLIC
+                        setShowBadge(false)
+                        enableVibration(false)
+                        enableLights(false)
+                        setSound(null, null)
+                    }
+                    notificationManager?.createNotificationChannel(quietIncomingChannel)
+
                     // Used once right after answering from the banner in another app: the same banner turns
                     // into the call (name, timer, Hang up) for a few seconds. Silent, no vibration.
                     val answeredBannerChannel = NotificationChannel(
@@ -2866,13 +2906,18 @@ class MyInCallService : InCallService() {
                 syncCalls()
                 val state = getCurrentCallStateFromSync()
                 if (state.isInCall) {
-                    showOngoingCallNotification(
-                        state.primaryNumber,
-                        state.primaryName,
-                        state.isConference,
-                        state.primaryState.ifBlank { "ACTIVE" }
-                    )
-                    if (state.primaryState != "RINGING") {
+                    if (state.primaryState == "RINGING") {
+                        // A ringing call keeps its own Answer/Decline notification and incoming call screen.
+                        // showOngoingCallNotification would replace Answer/Decline with an ongoing notification and
+                        // stop the incoming ringtone, so use the incoming path (ringtone is deduped per call).
+                        showIncomingCallNotification(state.primaryNumber, state.primaryName)
+                    } else {
+                        showOngoingCallNotification(
+                            state.primaryNumber,
+                            state.primaryName,
+                            state.isConference,
+                            state.primaryState.ifBlank { "ACTIVE" }
+                        )
                         launchCallUI(
                             reason = "reconcile:$source",
                             showDialpad = false,
@@ -3247,6 +3292,8 @@ class MyInCallService : InCallService() {
 
             override fun onCallRemoved(call: Call) {
                 logCall("onCallRemoved call=${System.identityHashCode(call)} state=${call.state}")
+                // The retracted-banner state belongs to this call only; drop it with the call.
+                if (stableCallId(call) == quietIncomingCallId) quietIncomingCallId = null
                 android.util.Log.e("OEM_FALLBACK_TRACE", "=====================================================================")
         android.util.Log.e("OEM_FALLBACK_TRACE", "ULTRA SUPREME FORENSIC INFLOP PROFESSION LOGGING")
                 android.util.Log.e("OEM_FALLBACK_TRACE", "MyInCallService: onCallRemoved TRIGGERED!")
@@ -3868,45 +3915,9 @@ class MyInCallService : InCallService() {
                 Log.e("CMF_RINGTONE_DEBUG", "=== showIncomingCallNotification CALLED ===")
                 Log.e("CMF_RINGTONE_DEBUG", "Phone: ${maskP2PNumberForLog(phoneNumber)}, Name: ${maskP2PDisplayValueForLog(contactName)}")
 
-                // ROOT CAUSE #3, #4, #15 FIX: Enhanced FullScreenIntent with OEM bypass
-                val fullScreenIntent = Intent(this, CallActivity::class.java).apply {
-                    action = CALL_UI_ACTION_WAKE
-                    attachCallUiHint(phoneNumber, "RINGING", contactName, false)
-                    addFlags(
-                        Intent.FLAG_ACTIVITY_NEW_TASK or
-                        Intent.FLAG_ACTIVITY_CLEAR_TOP or
-                        Intent.FLAG_ACTIVITY_EXCLUDE_FROM_RECENTS or
-                        Intent.FLAG_ACTIVITY_NO_USER_ACTION or
-                        Intent.FLAG_FROM_BACKGROUND
-                    )
-                }
-                val fullScreenPendingIntent = PendingIntent.getActivity(this, 0, fullScreenIntent, PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE)
-                
-                // ROOT CAUSE #15: Dual-path UI guarantee - notification + direct launch
-                val callActivityIntent = Intent(this, CallActivity::class.java).apply {
-                    action = CALL_UI_ACTION_WAKE
-                    attachCallUiHint(phoneNumber, "RINGING", contactName, false)
-                    addFlags(
-                        Intent.FLAG_ACTIVITY_NEW_TASK or
-                        Intent.FLAG_ACTIVITY_CLEAR_TOP or
-                        Intent.FLAG_ACTIVITY_EXCLUDE_FROM_RECENTS
-                    )
-                }
                 // The full-screen call page is opened only below, when the policy allows it (dialer, home
                 // screen, locked or screen off). In any other app the user gets the Answer/Decline banner.
 
-                // 2. Button Intents
-                val answerIntent = Intent(this, NotificationRepostReceiver::class.java).apply {
-                    action = Constants.ACTION_ANSWER_CALL
-                    putExtra(OPEN_UI_AFTER_ANSWER_EXTRA, false)
-                    attachCallUiHint(phoneNumber, "ACTIVE", contactName, false)
-                }
-                val answerPendingIntent = PendingIntent.getBroadcast(this, 10, answerIntent, PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE)
-
-                val rejectIntent = Intent(this, NotificationRepostReceiver::class.java).apply { action = Constants.ACTION_REJECT_CALL }
-                val rejectPendingIntent = PendingIntent.getBroadcast(this, 11, rejectIntent, PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE)
-
-                val displayText = if (contactName == "Unknown") phoneNumber else contactName
                 val incomingNotificationCallKey = lastCallUiSnapshot
                     ?.takeIf { it.isInCall && it.primaryNumber == phoneNumber }
                     ?.primaryCallId
@@ -3920,13 +3931,6 @@ class MyInCallService : InCallService() {
                     windowMs = 1000L
                 )
 
-                val person = buildCallStylePerson(displayText)
-                val style = NotificationCompat.CallStyle.forIncomingCall(
-                    person,
-                    rejectPendingIntent,
-                    answerPendingIntent
-                )
-
                 val incomingDecision = resolveIncomingCallNotificationDecision()
                 val allowFullScreen = incomingDecision.policy.allowFullScreen
                 silenceMainActivityRingtone()
@@ -3936,24 +3940,22 @@ class MyInCallService : InCallService() {
                     surface = if (allowFullScreen) "fullscreen_allowed" else "notification_only"
                 )
 
-                val builder = NotificationCompat.Builder(this, incomingCallChannelId)
-                    .setSmallIcon(android.R.drawable.ic_menu_call)
-                    .setContentTitle("Incoming Call")
-                    .setContentText(displayText)
-                    .setPriority(NotificationCompat.PRIORITY_MAX)
-                    .setCategory(NotificationCompat.CATEGORY_CALL)
-                    .setVisibility(NotificationCompat.VISIBILITY_PUBLIC)
-                    .setContentIntent(fullScreenPendingIntent)
-                    .setStyle(style)
-                    .setOngoing(true)
-                    .setAutoCancel(false)
-                    .setOnlyAlertOnce(true) // CRITICAL FIX: Stops repeated floating every 3 seconds
+                // One answering surface: while the call screen is confirmed to be showing THIS ringing call, a
+                // re-post (reposter refresh, name resolved later, ...) stays quiet instead of putting the banner
+                // back on top of the screen.
+                val quiet = isCallScreenShowingRingingCall()
+                val notification = buildIncomingCallNotification(
+                    phoneNumber = phoneNumber,
+                    contactName = contactName,
+                    quiet = quiet,
+                    attachFullScreen = allowFullScreen,
+                    realert = false
+                )
 
                 if (allowFullScreen) {
-                    builder.setFullScreenIntent(fullScreenPendingIntent, true)
                     Log.w(
                         P2P_FORENSIC_TAG,
-                        "incoming_fullscreen_execution source=MyInCallService.showIncomingCallNotification action=attach reason=${incomingDecision.policy.reason} notificationSurface=fullscreen_intent_attached"
+                        "incoming_fullscreen_execution source=MyInCallService.showIncomingCallNotification action=attach reason=${incomingDecision.policy.reason} notificationSurface=${if (quiet) "quiet_call_screen_visible" else "fullscreen_intent_attached"}"
                     )
                     launchCallUI(
                         reason = "incoming_allowed:${incomingDecision.policy.reason}",
@@ -3975,7 +3977,6 @@ class MyInCallService : InCallService() {
                     showCallBubbleIfNeeded(launchFullScreenWhenOverlayUnavailable = false)
                 }
 
-                val notification = builder.build().applyLockedForegroundFlags()
                 logIncomingUiEvidence(notification, allowFullScreen, incomingDecision.policy.reason)
 
                 try {
@@ -3984,6 +3985,152 @@ class MyInCallService : InCallService() {
                     UltraForensicLogger.deepest("Failed to start foreground for incoming call: ${e.message}")
                     getSystemService(NotificationManager::class.java).notify(Constants.NOTIFICATION_ID_ONGOING_CALL, notification)
                 }
+            }
+
+            /**
+             * The incoming-call CallStyle notification (Answer / Decline).
+             *
+             * [quiet]: the full-screen call screen is already showing this ringing call. Post it on the
+             * non-heads-up channel and without a full-screen intent, so Android retracts the banner and the call
+             * screen is the single answering surface. Answer/Decline stay in the shade and it is still the
+             * foreground-service notification.
+             *
+             * [realert]: the call screen has just gone away while the call still rings. Let this one update alert
+             * again so the banner comes back (setOnlyAlertOnce would otherwise keep it hidden).
+             */
+            private fun buildIncomingCallNotification(
+                phoneNumber: String,
+                contactName: String,
+                quiet: Boolean,
+                attachFullScreen: Boolean,
+                realert: Boolean
+            ): android.app.Notification {
+                // ROOT CAUSE #3, #4, #15 FIX: Enhanced FullScreenIntent with OEM bypass
+                val fullScreenIntent = Intent(this, CallActivity::class.java).apply {
+                    action = CALL_UI_ACTION_WAKE
+                    attachCallUiHint(phoneNumber, "RINGING", contactName, false)
+                    addFlags(
+                        Intent.FLAG_ACTIVITY_NEW_TASK or
+                        Intent.FLAG_ACTIVITY_CLEAR_TOP or
+                        Intent.FLAG_ACTIVITY_EXCLUDE_FROM_RECENTS or
+                        Intent.FLAG_ACTIVITY_NO_USER_ACTION or
+                        Intent.FLAG_FROM_BACKGROUND
+                    )
+                }
+                val fullScreenPendingIntent = PendingIntent.getActivity(this, 0, fullScreenIntent, PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE)
+
+                // 2. Button Intents
+                val answerIntent = Intent(this, NotificationRepostReceiver::class.java).apply {
+                    action = Constants.ACTION_ANSWER_CALL
+                    putExtra(OPEN_UI_AFTER_ANSWER_EXTRA, false)
+                    attachCallUiHint(phoneNumber, "ACTIVE", contactName, false)
+                }
+                val answerPendingIntent = PendingIntent.getBroadcast(this, 10, answerIntent, PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE)
+
+                val rejectIntent = Intent(this, NotificationRepostReceiver::class.java).apply { action = Constants.ACTION_REJECT_CALL }
+                val rejectPendingIntent = PendingIntent.getBroadcast(this, 11, rejectIntent, PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE)
+
+                val displayText = if (contactName == "Unknown") phoneNumber else contactName
+                val person = buildCallStylePerson(displayText)
+                val style = NotificationCompat.CallStyle.forIncomingCall(
+                    person,
+                    rejectPendingIntent,
+                    answerPendingIntent
+                )
+
+                val builder = NotificationCompat.Builder(this, if (quiet) incomingQuietChannelId else incomingCallChannelId)
+                    .setSmallIcon(android.R.drawable.ic_menu_call)
+                    .setContentTitle("Incoming Call")
+                    .setContentText(displayText)
+                    .setPriority(if (quiet) NotificationCompat.PRIORITY_DEFAULT else NotificationCompat.PRIORITY_MAX)
+                    .setCategory(NotificationCompat.CATEGORY_CALL)
+                    .setVisibility(NotificationCompat.VISIBILITY_PUBLIC)
+                    .setContentIntent(fullScreenPendingIntent)
+                    .setStyle(style)
+                    .setOngoing(true)
+                    .setAutoCancel(false)
+                    // CRITICAL FIX: Stops repeated floating every 3 seconds. Lifted only for the single update that
+                    // brings the banner back after the call screen went away.
+                    .setOnlyAlertOnce(!realert)
+
+                if (attachFullScreen && !quiet) {
+                    builder.setFullScreenIntent(fullScreenPendingIntent, true)
+                }
+                return builder.build().applyLockedForegroundFlags()
+            }
+
+            private fun ringingCall(): Call? = getLiveCalls().firstOrNull { it.state == Call.STATE_RINGING }
+
+            /** True only while the call screen is visible AND was confirmed (onResume) for the call ringing now. */
+            private fun isCallScreenShowingRingingCall(): Boolean =
+                shouldPostIncomingQuietly(
+                    ringingCallId = ringingCall()?.let { stableCallId(it) },
+                    retractedCallId = quietIncomingCallId,
+                    callScreenVisible = CallBubbleOverlay.isCallActivityVisible
+                )
+
+            /**
+             * CallActivity has resumed, i.e. it is actually on screen. If it shows a ringing call, retract the
+             * heads-up banner by re-posting the same Answer/Decline notification quietly. This happens only after
+             * the screen is confirmed visible - never pre-emptively - so a blocked or failed screen launch can
+             * never leave the user with neither a call screen nor a banner.
+             */
+            fun onCallScreenShown(source: String) {
+                val ringing = ringingCall() ?: return
+                val state = runCatching { getCurrentCallStateFromSync() }.getOrNull() ?: return
+                // The call screen shows the primary call. During call waiting that can be the active call; the
+                // waiting call then keeps its banner.
+                if (!state.isInCall || state.primaryState != "RINGING") return
+                val callId = stableCallId(ringing)
+                quietIncomingCallId = callId
+                val notification = buildIncomingCallNotification(
+                    phoneNumber = state.primaryNumber,
+                    contactName = state.primaryName,
+                    quiet = true,
+                    attachFullScreen = false,
+                    realert = false
+                )
+                runCatching {
+                    getSystemService(NotificationManager::class.java)?.notify(Constants.NOTIFICATION_ID_ONGOING_CALL, notification)
+                }
+                Log.w(P2P_FORENSIC_TAG, "incoming_banner action=retract source=$source callId=$callId reason=call_screen_visible")
+            }
+
+            /**
+             * CallActivity stopped. If its ringing call's banner was retracted and that call still rings, bring the
+             * banner back so the user keeps an answering surface (Home, another app, Back). Not when the display went
+             * off (power key): re-alerting would fight the user silencing the call, and the call screen shows again
+             * over the lock screen when the display comes back on.
+             */
+            fun onCallScreenHidden(source: String) {
+                val retractedId = quietIncomingCallId ?: return
+                val ringing = ringingCall()
+                if (ringing == null || stableCallId(ringing) != retractedId) {
+                    quietIncomingCallId = null
+                    return
+                }
+                val screenInteractive = runCatching {
+                    (getSystemService(Context.POWER_SERVICE) as PowerManager).isInteractive
+                }.getOrDefault(true)
+                if (!shouldRestoreIncomingBanner(retractedId, stableCallId(ringing), screenInteractive)) {
+                    Log.w(P2P_FORENSIC_TAG, "incoming_banner action=keep_quiet source=$source callId=$retractedId reason=screen_off")
+                    return
+                }
+                val state = runCatching { getCurrentCallStateFromSync() }.getOrNull()?.takeIf { it.primaryState == "RINGING" }
+                val number = state?.primaryNumber ?: ringing.details?.handle?.schemeSpecificPart.orEmpty()
+                val name = state?.primaryName ?: number
+                quietIncomingCallId = null
+                val notification = buildIncomingCallNotification(
+                    phoneNumber = number,
+                    contactName = name,
+                    quiet = false,
+                    attachFullScreen = false,
+                    realert = true
+                )
+                runCatching {
+                    getSystemService(NotificationManager::class.java)?.notify(Constants.NOTIFICATION_ID_ONGOING_CALL, notification)
+                }
+                Log.w(P2P_FORENSIC_TAG, "incoming_banner action=restore source=$source callId=$retractedId")
             }
 
             private fun buildUnifiedOngoingCallNotification(

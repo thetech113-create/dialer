@@ -2249,6 +2249,12 @@ class CallActivity : ComponentActivity() {
         CallBubbleOverlay.hide(this)
         logCall("InCallActivity.onResume hasActiveCall=${hasLiveCall()}")
         logCallActivityLifecycle("onResume")
+        // The call screen is now really on screen: for a ringing call, retract the heads-up Answer/Decline
+        // banner so the screen is the only answering surface. Not while this screen is finishing (a finishing
+        // screen must not quieten a new call's banner).
+        if (!isFinishing && !isFinishingCallUi && !isEndCallRequested) {
+            MyInCallService.getInstance()?.onCallScreenShown("CallActivity.onResume")
+        }
         // Once this screen has been drawn, the keypad under it (this theme is translucent) can change out of sight.
         CallScreenShown.announceAfterNextDraw(window.decorView)
     }
@@ -2279,6 +2285,10 @@ class CallActivity : ComponentActivity() {
         logCall("InCallActivity.onStop hasActiveCall=${hasLiveCall()}")
         logCallActivityLifecycle("onStop")
         CallBubbleOverlay.isCallActivityVisible = false
+        // The call screen is gone: if its ringing call's banner was retracted and the call still rings, bring
+        // the banner back so the user is never left without an answering surface (also when this screen is
+        // finishing while another call rings).
+        MyInCallService.getInstance()?.onCallScreenHidden("CallActivity.onStop")
         super.onStop()
         if (!isFinishing && !isFinishingCallUi && !isEndCallRequested && hasLiveCall()) {
             keepCallTaskInRecents()
