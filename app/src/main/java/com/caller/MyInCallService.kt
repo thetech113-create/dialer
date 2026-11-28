@@ -2868,6 +2868,18 @@ class MyInCallService : InCallService() {
              * instead of one mid-teardown. This is the lifecycle fix for immediate redial; reconciliation
              * remains only as the recovery net.
              */
+            /**
+             * Outgoing calls still being set up - not yet answered, not ended. Telecom refuses a second outgoing call
+             * while one of these exists (the OEM then shows its own "Call not sent"), so the dialer must not send one.
+             * ACTIVE / HOLDING calls are not counted (hold-then-place stays possible), and ended calls are not live.
+             */
+            fun outgoingCallsBeingSetUpCount(): Int = getLiveCalls().count {
+                it.state == Call.STATE_NEW ||
+                    it.state == Call.STATE_CONNECTING ||
+                    it.state == Call.STATE_DIALING ||
+                    it.state == Call.STATE_SELECT_PHONE_ACCOUNT
+            }
+
             fun prepareForNewOutgoingCall(source: String) {
                 cancelPendingDisconnectCleanup("new_outgoing_call:$source")
                 cancelTransientCallGapRecovery("new_outgoing_call:$source")

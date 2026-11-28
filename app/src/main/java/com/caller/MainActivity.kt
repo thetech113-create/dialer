@@ -910,6 +910,27 @@ internal fun shouldReportCallNotSent(
     telecomInCall: Boolean
 ): Boolean = !reconciledLiveCall && !callStartedAfterDispatch && !telecomInCall
 
+/**
+ * Whether a new outgoing dial must be ignored because an earlier dial is still being set up. Telecom refuses a
+ * second outgoing call while one is dialling and the OEM shows its own "Call not sent" for it (seen when the green
+ * button was pressed again before the call screen had appeared, since the number stays on the keypad until then).
+ *
+ * [lastDialDispatchedAt]: elapsedRealtime of the last dial this screen sent, 0 once it has been resolved.
+ * [lastCallAddedAt]: elapsedRealtime of the last onCallAdded. A dial newer than that has not reached Telecom yet.
+ * [outgoingCallsBeingSetUp]: live calls still NEW / CONNECTING / DIALING / SELECT_PHONE_ACCOUNT.
+ *
+ * An ACTIVE or HOLDING call does not block (hold-then-place still works) and an ended call is not live, so an
+ * immediate redial after a call ends is never blocked.
+ */
+internal fun shouldIgnoreNewDial(
+    lastDialDispatchedAt: Long,
+    lastCallAddedAt: Long,
+    outgoingCallsBeingSetUp: Int
+): Boolean {
+    val dialNotYetInTelecom = lastDialDispatchedAt > 0L && lastCallAddedAt < lastDialDispatchedAt
+    return dialNotYetInTelecom || outgoingCallsBeingSetUp > 0
+}
+
 @OptIn(ExperimentalFoundationApi::class, ExperimentalMaterial3Api::class)
 @Suppress("HandlerLeak")
 class MainActivity : ComponentActivity() {
@@ -966,6 +987,10 @@ class MainActivity : ComponentActivity() {
     private var activeMergedContactEntry by mutableStateOf<ContactDisplayEntry?>(null)
     private var isMainActivityVisible = false
     private val deferredKeypadClear = DeferredKeypadClear()
+    // elapsedRealtime of the last outgoing dial this screen sent; 0 once that dial is resolved (it reached Telecom,
+    // or the post-dial check found it never started). Used with shouldIgnoreNewDial to drop a second dial while the
+    // first is still being set up.
+    private var pendingDialDispatchedAtElapsed = 0L
     private val callScreenDrawnListener: () -> Unit = { applyDeferredKeypadClear("call_screen_drawn") }
     private var inCallStateListenerRef: ((UnifiedCallState) -> Unit)? = null
     private var showBatteryOptimizationPrompt by mutableStateOf(false)
@@ -3731,6 +3756,18 @@ class MainActivity : ComponentActivity() {
             }
             DialCode.Call -> Unit
         }
+        // A dial is already being set up (sent but not yet in Telecom, or still dialling): Telecom would refuse this
+        // one and the OEM would show its own "Call not sent" while the first call goes on normally. Drop it; the
+        // first call's screen is on its way. Ended calls are not live, so an immediate redial is never blocked.
+        if (shouldIgnoreNewDial(
+                lastDialDispatchedAt = pendingDialDispatchedAtElapsed,
+                lastCallAddedAt = MyInCallService.lastCallAddedElapsedRealtime,
+                outgoingCallsBeingSetUp = MyInCallService.getInstance()?.outgoingCallsBeingSetUpCount() ?: 0
+            )
+        ) {
+            Log.w(P2P_FORENSIC_TAG, "outgoing_call_ignored reason=previous_dial_still_being_set_up")
+            return
+        }
         if (!hasCallPhonePermission()) {
             showError("Call permission is required to place calls")
             return
@@ -3844,6 +3881,8 @@ class MainActivity : ComponentActivity() {
         // cleanup (fired ~350 ms after it ended) can drop foreground / stopSelf / clear the UI just as
         // Call B is placed, and Call B arrives into a torn-down, deprioritized service.
         MyInCallService.getInstance()?.prepareForNewOutgoingCall("main_activity_place")
+        // This dial is now in flight until it reaches Telecom or the post-dial check resolves it (shouldIgnoreNewDial).
+        pendingDialDispatchedAtElapsed = android.os.SystemClock.elapsedRealtime()
         // The call screen opens when Telecom adds the call (MyInCallService.onCallAdded), not before, as in Google's
         // Dialer. A dial that never reaches Telecom leaves no "Dialling" screen behind; the system reports why.
 
@@ -3875,11 +3914,15 @@ class MainActivity : ComponentActivity() {
         try {
             if (hasCallPhonePermission()) {
                 val dispatchAtElapsed = android.os.SystemClock.elapsedRealtime()
+                val pendingDialMarker = pendingDialDispatchedAtElapsed
                 telecomManager.placeCall(finalUri, extras)
                 // Some OEMs (e.g. ColorOS) silently refuse placeCall while a previous call is still tearing down
                 // and show their own "Call not sent" with no reason, and placeCall does not throw. If no call has
                 // reached Telecom shortly after, show our own message so the user knows the dial did not start.
                 Handler(Looper.getMainLooper()).postDelayed({
+                    // This dial is resolved either way (started, or never started): new dials are judged on live
+                    // call state from here on. A newer dial in the meantime keeps its own marker.
+                    if (pendingDialDispatchedAtElapsed == pendingDialMarker) pendingDialDispatchedAtElapsed = 0L
                     // The framework may have delivered the call to our InCallService without our
                     // onCallAdded completing (seen on rapid back-to-back redials): reconcile against
                     // this.calls first, so a connected call is adopted and shown instead of being
@@ -3895,12 +3938,15 @@ class MainActivity : ComponentActivity() {
                     }
                 }, 2500L)
             } else {
+                pendingDialDispatchedAtElapsed = 0L
                 deferredKeypadClear.cancel()
             }
         } catch (e: SecurityException) {
+            pendingDialDispatchedAtElapsed = 0L
             deferredKeypadClear.cancel()
             showError("Permission denied to place call")
         } catch (e: Exception) {
+            pendingDialDispatchedAtElapsed = 0L
             deferredKeypadClear.cancel()
             showError("Failed to start call")
         }
