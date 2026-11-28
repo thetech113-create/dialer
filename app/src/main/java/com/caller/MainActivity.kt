@@ -966,6 +966,15 @@ class MainActivity : ComponentActivity() {
     private val accountHistoryListener: () -> Unit = {
         if (isMainActivityVisible && hasReadCallLogPermission()) refreshRecentCalls(withDelay = false)
     }
+    // Android writes a finished call to the call log on its own schedule, often after the one delayed reload that
+    // follows the end of a call. Without watching the log, Recents (and the keypad's redial number) kept showing the
+    // previous call until something else reloaded it. Watched only while this screen is on screen.
+    private var callLogObserver: ContentObserver? = null
+    // The keypad's redial number, read the way Google Phone reads it: the newest OUTGOING call, straight from the call
+    // log (not the Recents list, which can lag behind the log and also holds incoming and missed calls). Re-read when
+    // the app comes to the front and whenever the call log changes.
+    private var lastOutgoingCallNumber by mutableStateOf("")
+    private val lastOutgoingCallReadGeneration = java.util.concurrent.atomic.AtomicLong()
     private var contactMergeDecisions by mutableStateOf<Map<String, String>>(emptyMap())
     private var pendingDuplicateCandidate by mutableStateOf<DuplicateContactCandidate?>(null)
     // The check opens from the Contacts "duplicates" button, which shows only while a duplicate is unanswered.
@@ -1312,6 +1321,8 @@ class MainActivity : ComponentActivity() {
         }
 
         if (hasReadCallLogPermission()) {
+            registerCallLogObserver()
+            refreshLastOutgoingCallNumber()
             refreshRecentCalls(withDelay = false)
         }
         if (hasReadContactsPermission()) {
@@ -2126,6 +2137,7 @@ class MainActivity : ComponentActivity() {
         pendingOemFallbackProbe = null
         recentCallsRefreshJob?.cancel()
         recentCallsRefreshJob = null
+        unregisterCallLogObserver()
         if (isGoogleSyncObserverRegistered) {
             try {
                 googleSyncObserver?.let { contentResolver.unregisterContentObserver(it) }
@@ -2137,9 +2149,47 @@ class MainActivity : ComponentActivity() {
         try { unregisterReceiver(callStateReceiver) } catch (e: Exception) {}
     }
 
+    private fun registerCallLogObserver() {
+        if (callLogObserver != null) return
+        val observer = object : ContentObserver(Handler(Looper.getMainLooper())) {
+            override fun onChange(selfChange: Boolean) {
+                Log.w(P2P_FORENSIC_TAG, "recent_calls_refresh trigger=call_log_changed")
+                refreshLastOutgoingCallNumber()
+                refreshRecentCalls(withDelay = false)
+            }
+        }
+        try {
+            contentResolver.registerContentObserver(android.provider.CallLog.Calls.CONTENT_URI, true, observer)
+            callLogObserver = observer
+        } catch (_: Exception) {
+        }
+    }
+
+    private fun refreshLastOutgoingCallNumber() {
+        if (!hasReadCallLogPermission()) return
+        val generation = lastOutgoingCallReadGeneration.incrementAndGet()
+        CoroutineScope(Dispatchers.IO).launch {
+            val number = try {
+                android.provider.CallLog.Calls.getLastOutgoingCall(this@MainActivity).orEmpty()
+            } catch (_: Exception) {
+                return@launch
+            }
+            withContext(Dispatchers.Main) {
+                // A slower, older read must not overwrite a newer one.
+                if (generation == lastOutgoingCallReadGeneration.get()) lastOutgoingCallNumber = number
+            }
+        }
+    }
+
+    private fun unregisterCallLogObserver() {
+        callLogObserver?.let { try { contentResolver.unregisterContentObserver(it) } catch (_: Exception) {} }
+        callLogObserver = null
+    }
+
     override fun onStop() {
         super.onStop()
         isMainActivityVisible = false
+        unregisterCallLogObserver()
         incomingUiGateMainVisible = false
         // Fallback: if the call screen never announced itself, the keypad is out of sight now anyway.
         applyDeferredKeypadClear("onStop")
@@ -4810,7 +4860,7 @@ class MainActivity : ComponentActivity() {
                             digitQuery = digitQuery,
                             matchedContacts = digitMatchedContacts,
                             matchedRecentCalls = digitMatchedRecentCalls,
-                            lastRecentNumber = groupedRecentCalls.firstOrNull { it.sourceDeviceName.isBlank() }?.phoneNumber.orEmpty(),
+                            lastRecentNumber = lastOutgoingCallNumber,
                             contacts = contacts,
                             listState = recentListState,
                             onRecentDialpadDigitsChange = onRecentDialpadDigitsChange,
