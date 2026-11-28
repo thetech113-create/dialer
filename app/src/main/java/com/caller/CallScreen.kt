@@ -232,6 +232,14 @@ private fun secondaryCallBannerTitle(callState: CallState): String {
     }
 }
 
+/**
+ * The held-call card's button: "Swap & answer" for a ringing second call, otherwise "Swap", shown only when a swap can
+ * work (one call active, the other on hold; see MyInCallService.swapCalls). While the new call is still dialling it
+ * is hidden, because Android cannot put a dialling call on hold, so the tap would do nothing.
+ */
+internal fun showSecondaryCallAction(primaryState: String?, secondaryState: String?): Boolean =
+    secondaryState == "RINGING" || setOf(primaryState, secondaryState) == setOf("ACTIVE", "HOLDING")
+
 private fun secondaryCallActionText(secondaryState: String?): String {
     return if (secondaryState == "RINGING") "Swap & answer" else "Swap"
 }
@@ -1225,7 +1233,7 @@ private fun ModernCallingScreenLayout(
                                     )
                                 }
                             }
-                            Button(
+                            if (showSecondaryCallAction(callState.primaryState, callState.secondaryState)) Button(
                                 onClick = {
                                     if (callState.secondaryState == "RINGING") {
                                         if (!isProximityNear) {
