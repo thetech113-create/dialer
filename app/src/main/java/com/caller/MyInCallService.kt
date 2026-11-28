@@ -122,7 +122,10 @@ import kotlinx.coroutines.flow.MutableStateFlow
             val policy: IncomingCallUiDecision,
             val foregroundPackage: String,
             val defaultDialerPackage: String,
-            val launcherPackage: String
+            val launcherPackage: String,
+            val deviceLocked: Boolean = false,
+            val screenInteractive: Boolean = true,
+            val fullScreenIntentUsable: Boolean = true
         )
 
 private const val OPEN_UI_AFTER_ANSWER_EXTRA = "OPEN_UI_AFTER_ANSWER_EXTRA"
@@ -138,31 +141,138 @@ internal fun shouldTearDownAfterDisconnect(ownLiveCallCount: Int, telecomFramewo
     ownLiveCallCount == 0 && !telecomFrameworkInCall
 
 /**
- * Whether the incoming Answer/Decline notification must be posted quietly (no heads-up banner): only while the
- * full-screen call screen is visible AND was confirmed for the very call that is ringing now. A different call,
- * or a screen that is not visible, always gets the normal banner.
- */
-internal fun shouldPostIncomingQuietly(ringingCallId: String?, retractedCallId: String?, callScreenVisible: Boolean): Boolean =
-    ringingCallId != null && ringingCallId == retractedCallId && callScreenVisible
-
-/**
  * Whether to bring the banner back after the call screen went away: only for the same call whose banner was
  * retracted, only while it still rings, and not when the display is off (power key = the user silencing).
  */
 internal fun shouldRestoreIncomingBanner(retractedCallId: String?, ringingCallId: String?, screenInteractive: Boolean): Boolean =
     retractedCallId != null && retractedCallId == ringingCallId && screenInteractive
 
-/**
- * Which answering surface a ringing call is on. [FULL_SCREEN]: the full-screen call screen is confirmed visible for
- * this call, so its Answer/Decline notification is quiet (one surface). [BANNER]: anything else - the bubble overlay
- * in another app, call waiting, the call screen left - where the high-priority heads-up Answer/Decline is the way to
- * answer and must actually pop.
- */
+/** Kind of post for the incoming Answer/Decline notification: the high-priority banner, or quiet (full screen). */
 internal enum class IncomingSurface { FULL_SCREEN, BANNER }
 
-internal fun incomingSurfaceFor(ringingCallId: String?, retractedCallId: String?, callScreenVisible: Boolean): IncomingSurface =
-    if (shouldPostIncomingQuietly(ringingCallId, retractedCallId, callScreenVisible)) IncomingSurface.FULL_SCREEN
-    else IncomingSurface.BANNER
+/**
+ * The one answering surface of a ringing call - strict: the banner and the full screen never show together, and a
+ * banner is never followed by a full screen that the user did not open.
+ *
+ * - [BANNER]: another app is in front (with the bubble overlay), call waiting, or the call is on the banner for good
+ *   (the user left its call screen, or its full screen could not be opened). High-priority Answer/Decline that pops;
+ *   no full screen is opened.
+ * - [FULL_SCREEN_OPENING]: home screen / this app / locked / display off, and the call screen is not up yet. The
+ *   notification is quiet from the very first post (no banner at all, even if the call screen is slow), and the app
+ *   opens the call screen itself.
+ * - [FULL_SCREEN_SHOWN]: the call screen is up for this call. Quiet; nothing else.
+ */
+internal enum class IncomingMode { BANNER, FULL_SCREEN_OPENING, FULL_SCREEN_SHOWN }
+
+internal fun decideIncomingMode(
+    anotherAppInFront: Boolean,
+    otherLiveCalls: Int,
+    callScreenShowingThisCall: Boolean,
+    bannerOnlyForThisCall: Boolean
+): IncomingMode = when {
+    // Call waiting: the call screen shows the active call; the waiting call's banner is the way to answer.
+    otherLiveCalls > 0 -> IncomingMode.BANNER
+    // The call screen is up for this call: it is the surface, whatever a (possibly stale or unavailable) foreground
+    // reading says, and also when the user opened it from the banner.
+    callScreenShowingThisCall -> IncomingMode.FULL_SCREEN_SHOWN
+    anotherAppInFront -> IncomingMode.BANNER
+    bannerOnlyForThisCall -> IncomingMode.BANNER
+    else -> IncomingMode.FULL_SCREEN_OPENING
+}
+
+/**
+ * The call screen counts as showing [ringingCallId] when it was confirmed for that call (onResume) and is still started
+ * - also while paused (notification shade pulled down) - or the display is off (power key: it is back on wake).
+ */
+internal fun isCallScreenShowingCall(
+    ringingCallId: String?,
+    confirmedCallId: String?,
+    callScreenStarted: Boolean,
+    displayInteractive: Boolean
+): Boolean = ringingCallId != null && ringingCallId == confirmedCallId && (callScreenStarted || !displayInteractive)
+
+/**
+ * A call is on the banner for good (the user left its call screen, its full screen could not be opened, or the user
+ * went to another app while it opened) until the display is next switched on: waking the phone (lock screen) gives the
+ * full screen another chance. [screenOnEpoch] counts display-on events.
+ */
+internal data class BannerOnlyMark(val callId: String, val screenOnEpoch: Int)
+
+internal fun isBannerOnly(mark: BannerOnlyMark?, ringingCallId: String?, screenOnEpoch: Int): Boolean =
+    mark != null && ringingCallId != null && mark.callId == ringingCallId && mark.screenOnEpoch == screenOnEpoch
+
+/**
+ * Whether the opening full screen may also carry a full-screen intent: only where Android opens it without a banner
+ * (locked or display off) and only if the app may use one (Android 14+ canUseFullScreenIntent). On the user's phone it
+ * may not (canUseFullScreenIntent=false: such a notification is only a banner), so the notification stays quiet and
+ * the app opens the call screen itself.
+ */
+internal fun fullScreenIntentOpensWithoutBanner(fullScreenIntentUsable: Boolean, deviceLocked: Boolean, screenInteractive: Boolean): Boolean =
+    fullScreenIntentUsable && (deviceLocked || !screenInteractive)
+
+internal enum class StrictFullScreenStep {
+    /** The call screen is up for the call: it is the single answering surface. */
+    CONFIRMED,
+    /** Not up yet and still time: open it again. */
+    RETRY,
+    /** Still not up at the deadline: the banner (in full) is the way to answer from now on. */
+    FALL_BACK,
+    /** The call no longer rings (answered, declined, ended) or another call rings: nothing to do. */
+    STOP
+}
+
+/**
+ * Checkpoints after the call screen is opened (retry, retry, final) and the deadline at which the banner takes over.
+ * The call screen can take a while to start from the background on ColorOS; a late full screen is fine, a banner that
+ * is then covered by a full screen is not - so the deadline leaves a long gap after the last start request.
+ */
+internal val STRICT_FULL_SCREEN_CHECKS_MS = listOf(1_000L, 2_500L, 6_000L)
+internal const val STRICT_FULL_SCREEN_DEADLINE_MS = 6_000L
+
+/** While the call screen opens, how often to check whether the user has gone to another app. */
+internal const val STRICT_FULL_SCREEN_FOREGROUND_POLL_MS = 400L
+
+/** How far back the opening poll reads usage events: a switch to another app during the call is recent by definition. */
+internal const val OPENING_FOREGROUND_LOOKBACK_MS = 30 * 60 * 1000L
+
+internal fun strictFullScreenStep(stillRingingSameCall: Boolean, callScreenUp: Boolean, elapsedMs: Long): StrictFullScreenStep =
+    when {
+        !stillRingingSameCall -> StrictFullScreenStep.STOP
+        callScreenUp -> StrictFullScreenStep.CONFIRMED
+        elapsedMs >= STRICT_FULL_SCREEN_DEADLINE_MS -> StrictFullScreenStep.FALL_BACK
+        else -> StrictFullScreenStep.RETRY
+    }
+
+/** A call screen resumed by one of the app's own automatic full-screen starts (not by the user). */
+internal fun isAutomaticFullScreenStart(launchReason: String?): Boolean =
+    launchReason?.startsWith("incoming_strict_full_screen") == true
+
+/**
+ * A call screen opened automatically for a call that has meanwhile gone to the banner for good (the start request
+ * arrived late, or the user went to another app) must step back: it would cover the banner - "banner, then full screen".
+ */
+internal fun shouldRejectLateCallScreen(
+    launchReason: String?,
+    bannerOnlyForThisCall: Boolean,
+    userOpenedCallScreenForThisCall: Boolean
+): Boolean = isAutomaticFullScreenStart(launchReason) && bannerOnlyForThisCall && !userOpenedCallScreenForThisCall
+
+/**
+ * Only a clear "another app is in front" reading moves an opening full screen to the banner. An empty or unknown reading
+ * (UsageStats unavailable or late) is not evidence that the user went elsewhere.
+ */
+internal fun isAnotherAppReading(policyReason: String): Boolean = policyReason == "third_party_foreground"
+
+/** Readings in a row needed before the opening full screen gives way to another app (one bad reading is not enough). */
+internal const val ANOTHER_APP_READINGS_TO_SWITCH = 2
+
+/**
+ * The user pressed the power key after the call screen started opening: no further start (it would turn the display
+ * back on against the user silencing the call). The display being off when the call arrived is different: then the
+ * starts are what wakes the phone.
+ */
+internal fun displayWentOffDuringOpening(lastScreenOffAtElapsed: Long, openingStartedAtElapsed: Long): Boolean =
+    lastScreenOffAtElapsed > openingStartedAtElapsed
 
 /**
  * Whether a BANNER-surface post must alert again. The incoming notification shares its id with the ongoing-call
@@ -199,6 +309,19 @@ class MyInCallService : InCallService() {
             // last became the banner. Cleared when the full-screen call screen makes it quiet, so the next banner post
             // alerts again (shouldRealertIncomingBanner).
             @Volatile private var bannerAlertedCallId: String? = null
+            // FULL_SCREEN_OPENING (IncomingMode): the call whose call screen the app is opening. The generation token makes
+            // sure delayed checks of an earlier opening can never act on a later one.
+            // All of this runs on the main thread (Telecom callbacks, CallActivity hooks, and bgHandler, which is on the
+            // main looper), so the session is created and checked without races.
+            private data class OpeningSession(val callId: String, val generation: Long, val startedAtElapsed: Long)
+            @Volatile private var openingSession: OpeningSession? = null
+            private var openingGeneration = 0L
+            // The ringing call that is on the banner for good (BannerOnlyMark), until the display is next switched on.
+            @Volatile private var bannerOnlyMark: BannerOnlyMark? = null
+            // Display-on events onto the lock screen (ACTION_SCREEN_ON while locked).
+            @Volatile private var screenOnEpoch = 0
+            // The banner-only call whose call screen the user opened themselves (banner / bubble tap): kept, never sent back.
+            @Volatile private var userOpenedCallScreenCallId: String? = null
             // Set when the call was answered from the banner in another app: the next ongoing notification pops
             // as a banner once (option A) and the floating call pill is shown (option B).
             @Volatile private var answeredFromBannerPopPending = false
@@ -255,6 +378,14 @@ class MyInCallService : InCallService() {
         }
         super.onBringToForeground(showDialpad)
         logOemDialerFallbackServiceEvent("onBringToForeground", showDialpad)
+        // A ringing call whose call screen the app is already opening is not opened a second time from here.
+        ringingCall()?.let { ringing ->
+            val ringingId = stableCallId(ringing)
+            if (!showDialpad && openingSession?.callId == ringingId) {
+                Log.w(P2P_FORENSIC_TAG, "onBringToForeground skipped callId=$ringingId reason=call_screen_already_opening")
+                return
+            }
+        }
         val currentState = runCatching { getCurrentCallStateFromSync() }.getOrNull()
         Log.w(
             P2P_FORENSIC_TAG,
@@ -524,10 +655,28 @@ class MyInCallService : InCallService() {
              * Invoked when the user leaves CallActivity or MainActivity via Back, Home, or Recents gesture
              * while a call is active. Keeps the service independent and surfaces the floating call bubble.
              */
-            fun onActivityLeftDuringCall(source: String) {
+            fun onActivityLeftDuringCall(source: String, callScreenSessionId: String = "") {
                 if (!hasLiveOrStickyCallSession()) return
                 Log.w(P2P_FORENSIC_TAG, "incall_activity_left source=$source liveCalls=${getLiveCalls().size}")
                 CallBubbleOverlay.isCallActivityVisible = false
+                // The user left the call screen that was showing (or opening for) the ringing call: from now on that call
+                // is on the banner (set before the re-post below, so it cannot re-open the full screen after the banner).
+                // Not for the power key / lock (userNavigatedAway), and not when another call-screen instance is still up
+                // (an old instance stopping after a new one started).
+                // Only the call screen of THIS call's session (an old call's screen being backgrounded is not the user).
+                val ownSession = callScreenSessionId.isBlank() || callScreenSessionId == callUiSessionId
+                val userLeftCallScreen = ownSession && (
+                    source == "CallActivity.onUserLeaveHint" ||
+                        (source.startsWith("CallActivity") && !isCallScreenStartedForCurrentCall())
+                    )
+                if (userLeftCallScreen && userNavigatedAway()) {
+                    ringingCall()?.let { ringing ->
+                        val ringingId = stableCallId(ringing)
+                        if (ringingId == quietIncomingCallId || ringingId == openingSession?.callId) {
+                            markBannerOnly(ringingId, "user_left_call_screen:$source")
+                        }
+                    }
+                }
                 // CallActivity clears the suppression itself before its direct pill attempt.
                 if (source == "MainActivity.onUserLeaveHint") CallBubbleOverlay.onUserLeftToHome()
                 ensureServiceExplicitlyStarted(getLiveCalls().firstOrNull())
@@ -1844,6 +1993,14 @@ class MyInCallService : InCallService() {
                                     P2P_FORENSIC_TAG,
                                     "power_end_probe action=screen_on activeCalls=${getLiveCalls().size} sinceScreenOffMs=${if (lastScreenOffAtElapsedMs > 0L) SystemClock.elapsedRealtime() - lastScreenOffAtElapsedMs else -1L}"
                                 )
+                                // Waking the phone onto the lock screen ends a banner-only mark: there the full screen
+                                // is the surface again. Without a lock screen the phone returns to where it was, and a
+                                // call already on the banner stays on it.
+                                val keyguardLocked = runCatching {
+                                    (getSystemService(Context.KEYGUARD_SERVICE) as? android.app.KeyguardManager)?.isKeyguardLocked == true
+                                }.getOrDefault(false)
+                                if (keyguardLocked) screenOnEpoch++
+                                if (ringingCall() != null) startNotificationRepost(forceRefresh = true)
                             }
                         }
                     }
@@ -3356,6 +3513,9 @@ class MyInCallService : InCallService() {
                 // The retracted-banner state belongs to this call only; drop it with the call.
                 if (stableCallId(call) == quietIncomingCallId) quietIncomingCallId = null
                 if (stableCallId(call) == bannerAlertedCallId) bannerAlertedCallId = null
+                if (stableCallId(call) == openingSession?.callId) openingSession = null
+                if (stableCallId(call) == bannerOnlyMark?.callId) bannerOnlyMark = null
+                if (stableCallId(call) == userOpenedCallScreenCallId) userOpenedCallScreenCallId = null
                 // Outgoing-dial guard: a call that is gone has ended for the attempt that owns it.
                 DialAttempts.guard.onCallUpdate(stableCallId(call), null)
                 android.util.Log.e("OEM_FALLBACK_TRACE", "=====================================================================")
@@ -3871,14 +4031,14 @@ class MyInCallService : InCallService() {
                 }
             }
 
-            private fun getForegroundPackageName(): String {
+            private fun getForegroundPackageName(lookbackMs: Long = 6 * 60 * 60 * 1000L): String {
                 var currentApp = ""
                 try {
                     if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.LOLLIPOP) {
                         val usageStatsManager = getSystemService(USAGE_STATS_SERVICE) as? android.app.usage.UsageStatsManager
                         if (usageStatsManager != null) {
                             val time = System.currentTimeMillis()
-                            val events = usageStatsManager.queryEvents(time - 6 * 60 * 60 * 1000L, time)
+                            val events = usageStatsManager.queryEvents(time - lookbackMs, time)
                             val event = android.app.usage.UsageEvents.Event()
                             @Suppress("DEPRECATION")
                             val resumedType = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
@@ -3903,8 +4063,10 @@ class MyInCallService : InCallService() {
                 return currentApp.takeUnless { it.equals("UNKNOWN", ignoreCase = true) }.orEmpty()
             }
 
-            private fun resolveIncomingCallNotificationDecision(): IncomingCallNotificationDecision {
-                val foregroundPackage = getForegroundPackageName()
+            private fun resolveIncomingCallNotificationDecision(
+                foregroundLookbackMs: Long = 6 * 60 * 60 * 1000L
+            ): IncomingCallNotificationDecision {
+                val foregroundPackage = getForegroundPackageName(foregroundLookbackMs)
                 val launcherPackage = getDefaultLauncherPackage()
                 val defaultDialerPackage = try {
                     resolveDefaultDialerPackage(this@MyInCallService)
@@ -3942,7 +4104,10 @@ class MyInCallService : InCallService() {
                     policy = policy,
                     foregroundPackage = foregroundPackage,
                     defaultDialerPackage = defaultDialerPackage,
-                    launcherPackage = launcherPackage
+                    launcherPackage = launcherPackage,
+                    deviceLocked = isDeviceLocked,
+                    screenInteractive = isScreenInteractive,
+                    fullScreenIntentUsable = canUseFullScreenIntentNow()
                 )
             }
 
@@ -4004,74 +4169,245 @@ class MyInCallService : InCallService() {
                     surface = if (allowFullScreen) "fullscreen_allowed" else "notification_only"
                 )
 
-                // One answering surface. FULL_SCREEN: the call screen is confirmed to be showing THIS ringing call, so a
-                // re-post (reposter refresh, name resolved later, ...) stays quiet instead of putting the banner back on
-                // top of the screen. BANNER (bubble overlay / another app / call waiting / call screen left): high
-                // priority, and it re-alerts once per call each time it becomes the banner, so it really pops.
-                val ringingId = ringingCall()?.let { stableCallId(it) }
-                val surface = currentIncomingSurface(ringingId)
-                val quiet = surface == IncomingSurface.FULL_SCREEN
+                // One answering surface, strictly (IncomingMode): BANNER (another app / call waiting / banner for good) pops in
+                // full; FULL_SCREEN_OPENING and FULL_SCREEN_SHOWN are quiet from the very first post - no banner at all,
+                // even while a slow call screen is still opening.
+                val ringing = ringingCall()
+                val ringingId = ringing?.let { stableCallId(it) }
+                val mode = incomingModeFor(ringingId, incomingDecision)
+                // Another app came to the front (or call waiting) while the call screen was opening: stop opening it;
+                // after another app, the call is on the banner for good (no full screen over what the user went to).
+                if (mode == IncomingMode.BANNER && ringingId != null && openingSession?.callId == ringingId) {
+                    openingSession = null
+                }
+                // A banner the user can see (display on) stays this call's surface: no full screen is opened after it if
+                // the user then goes to the home screen, or the other call of call waiting ends. Waking a locked phone
+                // gives the full screen another chance (screenOnEpoch).
+                if (mode == IncomingMode.BANNER && ringingId != null && isDisplayInteractive() &&
+                    !isBannerOnly(bannerOnlyMark, ringingId, screenOnEpoch)
+                ) {
+                    markBannerOnly(ringingId, "banner_shown:${incomingDecision.policy.reason}")
+                }
+                val fullScreenIntent = mode == IncomingMode.FULL_SCREEN_OPENING && fullScreenIntentOpensWithoutBanner(
+                    fullScreenIntentUsable = incomingDecision.fullScreenIntentUsable,
+                    deviceLocked = incomingDecision.deviceLocked,
+                    screenInteractive = incomingDecision.screenInteractive
+                )
+                val surface = if (mode == IncomingMode.BANNER) IncomingSurface.BANNER else IncomingSurface.FULL_SCREEN
                 val realert = shouldRealertIncomingBanner(ringingId, surface, bannerAlertedCallId, isDisplayInteractive())
                 val notification = buildIncomingCallNotification(
                     phoneNumber = phoneNumber,
                     contactName = contactName,
-                    quiet = quiet,
-                    attachFullScreen = allowFullScreen,
+                    // Quiet unless it is the banner, or a full-screen intent that Android opens without a banner.
+                    quiet = mode != IncomingMode.BANNER && !fullScreenIntent,
+                    attachFullScreen = fullScreenIntent,
                     realert = realert
                 )
 
-                if (allowFullScreen) {
-                    Log.w(
+                when (mode) {
+                    IncomingMode.BANNER -> {
+                        Log.w(
+                            P2P_FORENSIC_TAG,
+                            "incoming_fullscreen_execution source=MyInCallService.showIncomingCallNotification action=withhold reason=${incomingDecision.policy.reason} mode=$mode notificationSurface=notification_with_answer_decline ringtoneOwner=MyInCallService"
+                        )
+                        // When another app is in front, keep it in front. In particular, Redmi 13C
+                        // (MIUI/HyperOS) can turn a normal incoming-call surface into a full-screen
+                        // activity. Give the user the compact overlay instead, while retaining the
+                        // CallStyle notification as the permission-denied fallback.
+                        if (!allowFullScreen) showCallBubbleIfNeeded(launchFullScreenWhenOverlayUnavailable = false)
+                    }
+                    IncomingMode.FULL_SCREEN_SHOWN -> Log.w(
                         P2P_FORENSIC_TAG,
-                        "incoming_fullscreen_execution source=MyInCallService.showIncomingCallNotification action=attach reason=${incomingDecision.policy.reason} notificationSurface=${if (quiet) "quiet_call_screen_visible" else "fullscreen_intent_attached"}"
+                        "incoming_fullscreen_execution source=MyInCallService.showIncomingCallNotification action=shown reason=${incomingDecision.policy.reason} mode=$mode notificationSurface=quiet"
                     )
-                    launchCallUI(
-                        reason = "incoming_allowed:${incomingDecision.policy.reason}",
-                        showDialpad = false,
-                        rawNumber = phoneNumber,
-                        initialStateHint = "RINGING",
-                        initialNameHint = contactName,
-                        isConferenceHint = false
-                    )
-                } else {
-                    Log.w(
-                        P2P_FORENSIC_TAG,
-                        "incoming_fullscreen_execution source=MyInCallService.showIncomingCallNotification action=withhold reason=${incomingDecision.policy.reason} notificationSurface=notification_with_answer_decline ringtoneOwner=MyInCallService"
-                    )
-                    // When another app is in front, keep it in front. In particular, Redmi 13C
-                    // (MIUI/HyperOS) can turn a normal incoming-call surface into a full-screen
-                    // activity. Give the user the compact overlay instead, while retaining the
-                    // CallStyle notification as the permission-denied fallback.
-                    showCallBubbleIfNeeded(launchFullScreenWhenOverlayUnavailable = false)
+                    IncomingMode.FULL_SCREEN_OPENING -> {
+                        Log.w(
+                            P2P_FORENSIC_TAG,
+                            "incoming_fullscreen_execution source=MyInCallService.showIncomingCallNotification action=open reason=${incomingDecision.policy.reason} mode=$mode fullScreenIntent=$fullScreenIntent fullScreenIntentUsable=${incomingDecision.fullScreenIntentUsable} notificationSurface=${if (fullScreenIntent) "fullscreen_intent_attached" else "quiet"}"
+                        )
+                        when {
+                            ringingId == null -> launchCallUI(
+                                reason = "incoming_allowed:${incomingDecision.policy.reason}",
+                                showDialpad = false,
+                                rawNumber = phoneNumber,
+                                initialStateHint = "RINGING",
+                                initialNameHint = contactName,
+                                isConferenceHint = false
+                            )
+                            openingSession?.callId != ringingId -> startOpeningCallScreen(ringingId, phoneNumber, contactName)
+                        }
+                    }
                 }
 
-                logIncomingUiEvidence(notification, allowFullScreen, incomingDecision.policy.reason)
+                logIncomingUiEvidence(notification, mode != IncomingMode.BANNER, incomingDecision.policy.reason)
 
                 try {
                     startCallForeground(notification)
                 } catch (e: Exception) {
                     UltraForensicLogger.deepest("Failed to start foreground for incoming call: ${e.message}")
-                    getSystemService(NotificationManager::class.java).notify(Constants.NOTIFICATION_ID_ONGOING_CALL, notification)
+                    // A CallStyle notification that is neither a foreground service nor has a full-screen intent is
+                    // rejected by Android; never let that take the in-call service down.
+                    runCatching {
+                        getSystemService(NotificationManager::class.java).notify(Constants.NOTIFICATION_ID_ONGOING_CALL, notification)
+                    }.onFailure { Log.e(P2P_FORENSIC_TAG, "incoming_notification_post_failed error=${it.message}") }
                 }
                 noteIncomingPosted(ringingId, surface, realert)
                 Log.w(
                     P2P_FORENSIC_TAG,
-                    "incoming_banner action=post surface=$surface fullScreenAllowed=$allowFullScreen realert=$realert callId=$ringingId"
+                    "incoming_banner action=post mode=$mode realert=$realert callId=$ringingId"
                 )
-                // Bubble overlay in another app: the banner is the way to answer. Make sure it really landed.
-                if (surface == IncomingSurface.BANNER && !allowFullScreen) verifyIncomingBannerSoon(ringingId, "bubble_overlay")
+                // The banner is the way to answer: make sure it really landed.
+                if (mode == IncomingMode.BANNER) verifyIncomingBannerSoon(ringingId, "banner")
             }
 
             private fun isDisplayInteractive(): Boolean = runCatching {
                 (getSystemService(Context.POWER_SERVICE) as PowerManager).isInteractive
             }.getOrDefault(true)
 
-            private fun currentIncomingSurface(ringingId: String?): IncomingSurface =
-                incomingSurfaceFor(
+            /** The answering surface of the ringing call [ringingId] right now (IncomingMode), from live state. */
+            private fun incomingModeFor(
+                ringingId: String?,
+                decision: IncomingCallNotificationDecision = resolveIncomingCallNotificationDecision()
+            ): IncomingMode = decideIncomingMode(
+                anotherAppInFront = !decision.policy.allowFullScreen,
+                otherLiveCalls = getLiveCalls().count { stableCallId(it) != ringingId },
+                callScreenShowingThisCall = isCallScreenShowingCall(
                     ringingCallId = ringingId,
-                    retractedCallId = quietIncomingCallId,
-                    callScreenVisible = CallBubbleOverlay.isCallActivityVisible
+                    confirmedCallId = quietIncomingCallId,
+                    callScreenStarted = isCallScreenStartedForCurrentCall(),
+                    displayInteractive = isDisplayInteractive()
+                ),
+                bannerOnlyForThisCall = isBannerOnly(bannerOnlyMark, ringingId, screenOnEpoch)
+            )
+
+            /** A call screen instance is started (possibly paused) for the current call session - not an old call's screen. */
+            private fun isCallScreenStartedForCurrentCall(): Boolean =
+                CallBubbleOverlay.isCallScreenStartedFor(callUiSessionId)
+
+            private fun markBannerOnly(callId: String, reason: String) {
+                if (openingSession?.callId == callId) openingSession = null
+                if (userOpenedCallScreenCallId == callId) userOpenedCallScreenCallId = null
+                bannerOnlyMark = BannerOnlyMark(callId, screenOnEpoch)
+                Log.w(P2P_FORENSIC_TAG, "incoming_fullscreen_strict action=banner_only callId=$callId reason=$reason")
+            }
+
+            /**
+             * [callId] goes to the banner for good: posted in full (it pops), with the bubble overlay when another app is
+             * in front; no full screen is opened for it any more.
+             */
+            private fun switchRingingCallToBanner(callId: String, reason: String, anotherAppInFront: Boolean) {
+                markBannerOnly(callId, reason)
+                val ringing = ringingCall()?.takeIf { stableCallId(it) == callId } ?: return
+                postIncomingBanner(ringing, reason)
+                if (anotherAppInFront) showCallBubbleIfNeeded(launchFullScreenWhenOverlayUnavailable = false)
+                verifyIncomingBannerSoon(callId, reason)
+            }
+
+            /**
+             * FULL_SCREEN_OPENING for [callId]: its notification is already quiet. Opens the call screen, then:
+             * - every STRICT_FULL_SCREEN_FOREGROUND_POLL_MS: another app came to the front -> the banner (+ bubble), never
+             *   the full screen over that app;
+             * - at STRICT_FULL_SCREEN_CHECKS_MS: up -> done; not yet -> open it again; still not up at the deadline -> the
+             *   banner in full, and no full screen for this call any more (a late one is sent back, see
+             *   shouldRejectLateCallScreen), so the banner is never followed by a full screen.
+             * Every delayed step carries this session's generation: an earlier session's steps never act on a later one.
+             */
+            private fun startOpeningCallScreen(callId: String, phoneNumber: String, contactName: String) {
+                val generation = ++openingGeneration
+                openingSession = OpeningSession(callId, generation, SystemClock.elapsedRealtime())
+                Log.w(P2P_FORENSIC_TAG, "incoming_fullscreen_strict action=open attempt=1 callId=$callId generation=$generation")
+                launchCallUI(
+                    reason = "incoming_strict_full_screen",
+                    showDialpad = false,
+                    rawNumber = phoneNumber,
+                    initialStateHint = "RINGING",
+                    initialNameHint = contactName,
+                    isConferenceHint = false
                 )
+                STRICT_FULL_SCREEN_CHECKS_MS.forEachIndexed { index, atMs ->
+                    bgHandler.postDelayed({ onOpeningCheckpoint(generation, callId, atMs, index, phoneNumber, contactName) }, atMs)
+                }
+                scheduleOpeningForegroundPoll(generation, callId, STRICT_FULL_SCREEN_FOREGROUND_POLL_MS, anotherAppReadings = 0)
+            }
+
+            private fun isOpeningSession(generation: Long, callId: String): Boolean {
+                val session = openingSession ?: return false
+                return session.generation == generation && session.callId == callId
+            }
+
+            private fun ringingCallIs(callId: String): Boolean = ringingCall()?.let { stableCallId(it) == callId } == true
+
+            private fun onOpeningCheckpoint(generation: Long, callId: String, atMs: Long, index: Int, phoneNumber: String, contactName: String) {
+                if (!isOpeningSession(generation, callId)) return
+                val session = openingSession ?: return
+                // Up = a call screen of THIS call's session is started (an old call's screen does not count).
+                when (strictFullScreenStep(ringingCallIs(callId), isCallScreenStartedForCurrentCall(), atMs)) {
+                    StrictFullScreenStep.STOP -> openingSession = null
+                    StrictFullScreenStep.CONFIRMED -> {
+                        // Up (its onResume confirmation may have raced): it is the single answering surface.
+                        openingSession = null
+                        quietIncomingCallId = callId
+                        Log.w(P2P_FORENSIC_TAG, "incoming_fullscreen_strict action=confirmed callId=$callId afterMs=$atMs generation=$generation")
+                    }
+                    StrictFullScreenStep.RETRY -> {
+                        if (displayWentOffDuringOpening(lastScreenOffAtElapsedMs, session.startedAtElapsed)) {
+                            // Power key while it opened: no start that would turn the display back on. Waking the phone
+                            // onto the lock screen decides the surface again.
+                            openingSession = null
+                            Log.w(P2P_FORENSIC_TAG, "incoming_fullscreen_strict action=stop callId=$callId afterMs=$atMs generation=$generation reason=display_turned_off")
+                            return
+                        }
+                        val decision = runCatching { resolveIncomingCallNotificationDecision() }.getOrNull()
+                        if (decision != null && isAnotherAppReading(decision.policy.reason)) {
+                            switchRingingCallToBanner(callId, "foreground_${decision.policy.reason}", anotherAppInFront = true)
+                            return
+                        }
+                        Log.w(P2P_FORENSIC_TAG, "incoming_fullscreen_strict action=open attempt=${index + 2} callId=$callId afterMs=$atMs generation=$generation reason=call_screen_not_up_yet")
+                        launchCallUI(
+                            reason = "incoming_strict_full_screen_retry",
+                            showDialpad = false,
+                            rawNumber = phoneNumber,
+                            initialStateHint = "RINGING",
+                            initialNameHint = contactName,
+                            isConferenceHint = false
+                        )
+                    }
+                    StrictFullScreenStep.FALL_BACK -> {
+                        val decision = runCatching { resolveIncomingCallNotificationDecision() }.getOrNull()
+                        Log.w(P2P_FORENSIC_TAG, "incoming_fullscreen_strict action=fallback_to_banner callId=$callId afterMs=$atMs generation=$generation reason=call_screen_not_up")
+                        switchRingingCallToBanner(
+                            callId,
+                            "call_screen_not_up_after_${atMs}ms",
+                            anotherAppInFront = decision != null && isAnotherAppReading(decision.policy.reason)
+                        )
+                    }
+                }
+            }
+
+            /**
+             * While the call screen opens: once another app is clearly in front (ANOTHER_APP_READINGS_TO_SWITCH readings in a
+             * row), the call goes to the banner (+ bubble) - never a full screen over that app. Looks back only a short
+             * while in the usage events, so polling stays cheap.
+             */
+            private fun scheduleOpeningForegroundPoll(generation: Long, callId: String, delayMs: Long, anotherAppReadings: Int) {
+                bgHandler.postDelayed({
+                    if (!isOpeningSession(generation, callId)) return@postDelayed
+                    if (!ringingCallIs(callId)) {
+                        openingSession = null
+                        return@postDelayed
+                    }
+                    if (isCallScreenStartedForCurrentCall()) return@postDelayed
+                    val decision = runCatching {
+                        resolveIncomingCallNotificationDecision(foregroundLookbackMs = OPENING_FOREGROUND_LOOKBACK_MS)
+                    }.getOrNull()
+                    val readings = if (decision != null && isAnotherAppReading(decision.policy.reason)) anotherAppReadings + 1 else 0
+                    if (readings >= ANOTHER_APP_READINGS_TO_SWITCH) {
+                        switchRingingCallToBanner(callId, "foreground_${decision?.policy?.reason}", anotherAppInFront = true)
+                        return@postDelayed
+                    }
+                    scheduleOpeningForegroundPoll(generation, callId, STRICT_FULL_SCREEN_FOREGROUND_POLL_MS, readings)
+                }, delayMs)
+            }
 
             /** Records what the last incoming post did, for shouldRealertIncomingBanner. */
             private fun noteIncomingPosted(ringingId: String?, surface: IncomingSurface, realert: Boolean) {
@@ -4093,7 +4429,7 @@ class MyInCallService : InCallService() {
                 bgHandler.postDelayed({
                     val ringing = ringingCall() ?: return@postDelayed
                     if (stableCallId(ringing) != ringingId) return@postDelayed
-                    if (currentIncomingSurface(ringingId) != IncomingSurface.BANNER) return@postDelayed
+                    if (incomingModeFor(ringingId) != IncomingMode.BANNER) return@postDelayed
                     val active = runCatching {
                         getSystemService(NotificationManager::class.java)?.activeNotifications
                             ?.firstOrNull { it.id == Constants.NOTIFICATION_ID_ONGOING_CALL }
@@ -4204,22 +4540,59 @@ class MyInCallService : InCallService() {
                 return builder.build().applyLockedForegroundFlags()
             }
 
-            private fun ringingCall(): Call? = getLiveCalls().firstOrNull { it.state == Call.STATE_RINGING }
+            /** The incoming call that is ringing: STATE_RINGING, or an incoming call Telecom still reports as NEW. */
+            private fun ringingCall(): Call? {
+                val live = getLiveCalls()
+                return live.firstOrNull { it.state == Call.STATE_RINGING }
+                    ?: live.firstOrNull { it.state == Call.STATE_NEW && isIncomingDirection(it) }
+            }
+
+            private fun isIncomingDirection(call: Call): Boolean =
+                Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q &&
+                    call.details?.callDirection == Call.Details.DIRECTION_INCOMING
+
+            /** NotificationManager.canUseFullScreenIntent (Android 14+); a full-screen intent is always usable before. */
+            private fun canUseFullScreenIntentNow(): Boolean =
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE) {
+                    runCatching { getSystemService(NotificationManager::class.java)?.canUseFullScreenIntent() }.getOrNull() ?: true
+                } else {
+                    true
+                }
+
+            /** The display is on and not locked: the user moved on themselves (not the power key). */
+            private fun userNavigatedAway(): Boolean {
+                val locked = runCatching {
+                    (getSystemService(Context.KEYGUARD_SERVICE) as? android.app.KeyguardManager)?.isKeyguardLocked == true
+                }.getOrDefault(false)
+                return isDisplayInteractive() && !locked
+            }
 
             /**
-             * CallActivity has resumed, i.e. it is actually on screen. If it shows a ringing call, retract the
-             * heads-up banner by re-posting the same Answer/Decline notification quietly. This happens only after
-             * the screen is confirmed visible - never pre-emptively - so a blocked or failed screen launch can
-             * never leave the user with neither a call screen nor a banner.
+             * CallActivity has resumed, i.e. it is actually on screen. If it shows a ringing call, it is that call's single
+             * answering surface: the notification is posted quietly (any banner retracted). Returns false when this screen
+             * must step back instead: it was opened by one of the app's own automatic starts for a call that has meanwhile
+             * gone to the banner for good (a late start request, or the user went to another app) - it would cover the
+             * banner, i.e. "banner, then full screen". A screen the user opened (banner, bubble, Recents) is always kept.
              */
-            fun onCallScreenShown(source: String) {
-                val ringing = ringingCall() ?: return
-                val state = runCatching { getCurrentCallStateFromSync() }.getOrNull() ?: return
+            fun onCallScreenShown(source: String, launchReason: String? = null): Boolean {
+                val ringing = ringingCall() ?: return true
+                val callId = stableCallId(ringing)
+                val bannerOnly = isBannerOnly(bannerOnlyMark, callId, screenOnEpoch)
+                if (shouldRejectLateCallScreen(launchReason, bannerOnly, userOpenedCallScreenCallId == callId)) {
+                    Log.w(P2P_FORENSIC_TAG, "incoming_fullscreen_strict action=late_call_screen_sent_back callId=$callId source=$source launchReason=$launchReason")
+                    return false
+                }
+                // Opened by the user from the banner / bubble: theirs - a late automatic start must never push it back.
+                if (bannerOnly && !isAutomaticFullScreenStart(launchReason)) userOpenedCallScreenCallId = callId
+                val state = runCatching { getCurrentCallStateFromSync() }.getOrNull() ?: return true
                 // The call screen shows the primary call. During call waiting that can be the active call; the
                 // waiting call then keeps its banner.
-                if (!state.isInCall || state.primaryState != "RINGING") return
-                val callId = stableCallId(ringing)
+                if (!state.isInCall || state.primaryState != "RINGING") return true
                 quietIncomingCallId = callId
+                if (openingSession?.callId == callId) {
+                    openingSession = null
+                    Log.w(P2P_FORENSIC_TAG, "incoming_fullscreen_strict action=confirmed callId=$callId source=$source")
+                }
                 val notification = buildIncomingCallNotification(
                     phoneNumber = state.primaryNumber,
                     contactName = state.primaryName,
@@ -4233,31 +4606,39 @@ class MyInCallService : InCallService() {
                 // Quiet now: when this call becomes the banner again (bubble overlay / another app), it must pop again.
                 noteIncomingPosted(callId, IncomingSurface.FULL_SCREEN, realert = false)
                 Log.w(P2P_FORENSIC_TAG, "incoming_banner action=retract source=$source callId=$callId reason=call_screen_visible")
+                return true
             }
 
             /**
-             * CallActivity stopped. If its ringing call's banner was retracted and that call still rings, bring the
-             * banner back so the user keeps an answering surface (Home, another app, Back). Not when the display went
-             * off (power key): re-alerting would fight the user silencing the call, and the call screen shows again
-             * over the lock screen when the display comes back on.
+             * CallActivity stopped.
+             * - Another call-screen instance is still started (an old one stopping after a new one started): nothing.
+             * - Display off (power key): stays quiet - re-alerting would fight the user silencing the call; the call
+             *   screen is back over the lock screen when the display comes on.
+             * - The user moved on (Home, another app, Back; unlocked): the call goes to the banner for good, posted in
+             *   full, so the user keeps an answering surface and no full screen re-opens over what they went to.
+             * - Screen on but locked: the full screen is opened again quietly (lock screen keeps the full screen).
              */
-            fun onCallScreenHidden(source: String) {
+            fun onCallScreenHidden(source: String, callScreenSessionId: String = "") {
+                // An old call's screen stopping, or another instance of this call's screen is still up: not the user leaving.
+                if (callScreenSessionId.isNotBlank() && callScreenSessionId != callUiSessionId) return
+                if (isCallScreenStartedForCurrentCall()) return
                 val retractedId = quietIncomingCallId ?: return
                 val ringing = ringingCall()
                 if (ringing == null || stableCallId(ringing) != retractedId) {
                     quietIncomingCallId = null
                     return
                 }
-                val screenInteractive = runCatching {
-                    (getSystemService(Context.POWER_SERVICE) as PowerManager).isInteractive
-                }.getOrDefault(true)
-                if (!shouldRestoreIncomingBanner(retractedId, stableCallId(ringing), screenInteractive)) {
+                if (!shouldRestoreIncomingBanner(retractedId, stableCallId(ringing), isDisplayInteractive())) {
                     Log.w(P2P_FORENSIC_TAG, "incoming_banner action=keep_quiet source=$source callId=$retractedId reason=screen_off")
                     return
                 }
                 quietIncomingCallId = null
-                // Back to the BANNER surface (bubble overlay / another app): high priority, re-alerting unless a post
-                // since the call screen left has already brought the banner back, then checked that it landed.
+                if (!userNavigatedAway()) {
+                    Log.w(P2P_FORENSIC_TAG, "incoming_banner action=reopen_full_screen source=$source callId=$retractedId reason=locked")
+                    startNotificationRepost(forceRefresh = true)
+                    return
+                }
+                markBannerOnly(retractedId, "user_left_call_screen:$source")
                 postIncomingBanner(ringing, "restore:$source")
                 verifyIncomingBannerSoon(retractedId, "restore:$source")
                 Log.w(P2P_FORENSIC_TAG, "incoming_banner action=restore source=$source callId=$retractedId")

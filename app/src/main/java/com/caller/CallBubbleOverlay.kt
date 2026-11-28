@@ -45,6 +45,18 @@ object CallBubbleOverlay {
             if (value) recentsOpenedSinceCallUi = false
         }
 
+    /**
+     * CallActivity instances between onStart and onStop (visible, possibly paused - e.g. the notification shade is down),
+     * each with the call session it shows. Per instance and per session rather than one boolean: an old call's screen
+     * that is still up, or stops after a new one started, must not count as (or clear) the current call's screen.
+     */
+    private val startedCallScreens = java.util.concurrent.ConcurrentHashMap<Int, String>()
+    fun onCallScreenStarted(instance: Int, sessionId: String) { startedCallScreens[instance] = sessionId }
+    fun onCallScreenSessionChanged(instance: Int, sessionId: String) { startedCallScreens.computeIfPresent(instance) { _, _ -> sessionId } }
+    fun onCallScreenStopped(instance: Int) { startedCallScreens.remove(instance) }
+    fun isCallScreenStartedFor(sessionId: String): Boolean =
+        sessionId.isNotBlank() && startedCallScreens.values.any { it == sessionId }
+
     private var triggerDot: View? = null
 
     private const val AUTO_COLLAPSE_DELAY_MS = 5000L

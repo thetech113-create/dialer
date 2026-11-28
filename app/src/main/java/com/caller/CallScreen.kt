@@ -1729,7 +1729,7 @@ class CallActivity : ComponentActivity() {
         CallBubbleOverlay.isCallActivityVisible = false
         keepCallTaskInRecents()
         CallBubbleOverlay.showFromCallActivityExit(this)
-        MyInCallService.getInstance()?.onActivityLeftDuringCall("CallActivity.$reason")
+        MyInCallService.getInstance()?.onActivityLeftDuringCall("CallActivity.$reason", ownSessionId)
         runCatching { moveTaskToBack(true) }
     }
 
@@ -1862,6 +1862,8 @@ class CallActivity : ComponentActivity() {
             isEndCallRequested = false
         }
         if (ownSessionId.isBlank() || newSession) ownSessionId = incomingSessionId
+        // This (started) screen now shows that call session.
+        CallBubbleOverlay.onCallScreenSessionChanged(System.identityHashCode(this), ownSessionId)
         // Update activity's intent so action checks in CallingScreen work
         setIntent(intent)
         updateSeededCallState(intent)
@@ -2237,6 +2239,7 @@ class CallActivity : ComponentActivity() {
 
     override fun onStart() {
         super.onStart()
+        CallBubbleOverlay.onCallScreenStarted(System.identityHashCode(this), ownSessionId)
         keepCallTaskInRecents()
         logCall("InCallActivity.onStart hasActiveCall=${hasLiveCall()}")
         logCallActivityLifecycle("onStart")
@@ -2253,7 +2256,15 @@ class CallActivity : ComponentActivity() {
         // banner so the screen is the only answering surface. Not while this screen is finishing (a finishing
         // screen must not quieten a new call's banner).
         if (!isFinishing && !isFinishingCallUi && !isEndCallRequested) {
-            MyInCallService.getInstance()?.onCallScreenShown("CallActivity.onResume")
+            // Why this screen was opened; consumed here, so a later resume (Recents, coming back) counts as the user's.
+            val launchReason = intent?.getStringExtra("WAKE_REASON")
+            intent?.removeExtra("WAKE_REASON")
+            val keep = MyInCallService.getInstance()?.onCallScreenShown("CallActivity.onResume", launchReason) ?: true
+            if (!keep) {
+                // An automatic start that arrived after its call went to the banner: step back, the banner stays the
+                // single answering surface (tapping it opens this screen again).
+                runCatching { moveTaskToBack(true) }
+            }
         }
         // Once this screen has been drawn, the keypad under it (this theme is translucent) can change out of sight.
         CallScreenShown.announceAfterNextDraw(window.decorView)
@@ -2277,7 +2288,7 @@ class CallActivity : ComponentActivity() {
             CallBubbleOverlay.onUserLeftToHome()
             keepCallTaskInRecents()
             CallBubbleOverlay.showFromCallActivityExit(this)
-            MyInCallService.getInstance()?.onActivityLeftDuringCall("CallActivity.onUserLeaveHint")
+            MyInCallService.getInstance()?.onActivityLeftDuringCall("CallActivity.onUserLeaveHint", ownSessionId)
         }
     }
 
@@ -2285,15 +2296,16 @@ class CallActivity : ComponentActivity() {
         logCall("InCallActivity.onStop hasActiveCall=${hasLiveCall()}")
         logCallActivityLifecycle("onStop")
         CallBubbleOverlay.isCallActivityVisible = false
+        CallBubbleOverlay.onCallScreenStopped(System.identityHashCode(this))
         // The call screen is gone: if its ringing call's banner was retracted and the call still rings, bring
         // the banner back so the user is never left without an answering surface (also when this screen is
         // finishing while another call rings).
-        MyInCallService.getInstance()?.onCallScreenHidden("CallActivity.onStop")
+        MyInCallService.getInstance()?.onCallScreenHidden("CallActivity.onStop", ownSessionId)
         super.onStop()
         if (!isFinishing && !isFinishingCallUi && !isEndCallRequested && hasLiveCall()) {
             keepCallTaskInRecents()
             CallBubbleOverlay.showFromCallActivityExit(this)
-            MyInCallService.getInstance()?.onActivityLeftDuringCall("CallActivity.onStop")
+            MyInCallService.getInstance()?.onActivityLeftDuringCall("CallActivity.onStop", ownSessionId)
         }
     }
 
