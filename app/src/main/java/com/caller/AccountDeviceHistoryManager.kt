@@ -126,16 +126,28 @@ data class SyncedCallRecord(
 )
 
 /**
- * How often linked devices are synced in the background while the phone is in use. It was every 45 s, day and night,
- * whether or not any device was linked: a network request, a call-log read and a Recents reload each time (battery).
+ * How often linked devices are synced while the phone is in use (display on): as quick as before. What drained the
+ * battery was the same sync running all day and night - display off, and with no device linked at all (a network request,
+ * a call-log read and Recents reloads every 45 s for nothing).
  */
-internal const val PERIODIC_SYNC_INTERVAL_MS = 5 * 60 * 1000L
+internal const val PERIODIC_SYNC_INTERVAL_MS = 45_000L
 
 /**
- * Whether the periodic background sync runs now: only with a linked device to sync with, and only while the display is
- * on. Syncs still run right away when the app starts, after every call, from the sync button and when a device links.
+ * Whether the periodic sync runs now: only with a linked device to sync with, and only while the display is on. While
+ * the display is off nothing polls; the linked phone still pushes its new calls straight to this one when it can reach
+ * it, and the moment the display comes on (or the app is opened) a sync runs at once (shouldSyncOnEvent).
  */
 internal fun shouldRunPeriodicSync(hasLinkedDevice: Boolean, displayOn: Boolean): Boolean = hasLinkedDevice && displayOn
+
+/** Event syncs (display on, app opened) closer together than this are merged: one sync, not a burst. */
+internal const val EVENT_SYNC_MIN_GAP_MS = 15_000L
+
+/**
+ * Whether an event (display switched on, app opened) syncs right away, so the user sees the linked phone's latest calls
+ * the moment they look: with a linked device, unless a sync ran less than EVENT_SYNC_MIN_GAP_MS ago.
+ */
+internal fun shouldSyncOnEvent(hasLinkedDevice: Boolean, msSinceLastSyncStart: Long): Boolean =
+    hasLinkedDevice && msSinceLastSyncStart >= EVENT_SYNC_MIN_GAP_MS
 
 object AccountDeviceHistoryManager {
     private const val TAG = "AccountDeviceHistory"
@@ -1195,6 +1207,39 @@ object AccountDeviceHistoryManager {
                 }
             }
         }
+
+        // Instant when the user looks: the display coming on syncs at once (with a linked device).
+        registerDisplayOnSync(appCtx)
+    }
+
+    private var displayOnSyncReceiver: android.content.BroadcastReceiver? = null
+
+    private fun registerDisplayOnSync(appCtx: Context) {
+        if (displayOnSyncReceiver != null) return
+        val receiver = object : android.content.BroadcastReceiver() {
+            override fun onReceive(context: Context?, intent: android.content.Intent?) {
+                syncOnEvent(appCtx, "display_on")
+            }
+        }
+        runCatching {
+            appCtx.registerReceiver(receiver, android.content.IntentFilter(android.content.Intent.ACTION_SCREEN_ON))
+            displayOnSyncReceiver = receiver
+        }.onFailure { Log.w(TAG, "display-on sync receiver not registered: ${it.message}") }
+    }
+
+    // elapsedRealtime of the last sync start (event syncs close together are merged).
+    @Volatile private var lastSyncStartedAtElapsed = 0L
+
+    /**
+     * An event the user will look at the result of (display on, app opened): sync right away with the linked devices,
+     * so their newest calls are there instantly. Does nothing without a linked device or right after another sync.
+     */
+    fun syncOnEvent(context: Context, reason: String) {
+        val appCtx = context.applicationContext
+        val sinceLast = android.os.SystemClock.elapsedRealtime() - lastSyncStartedAtElapsed
+        if (!shouldSyncOnEvent(hasLinkedDevice(appCtx), sinceLast)) return
+        Log.i(TAG, "Event sync: $reason")
+        syncAccountNow(appCtx, showToast = false)
     }
 
     /** A phone is linked to this one (directly or through a shared account): there is something to sync with. */
@@ -1232,6 +1277,7 @@ object AccountDeviceHistoryManager {
             if (showToast) toast(appCtx, "Account sync in progress...")
             return
         }
+        lastSyncStartedAtElapsed = android.os.SystemClock.elapsedRealtime()
         if (showToast) {
             toast(appCtx, "Syncing account ${formatPhoneNumberForDisplay(getAccountId(appCtx))}...")
         }

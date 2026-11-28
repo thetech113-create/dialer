@@ -1282,6 +1282,8 @@ class MainActivity : ComponentActivity() {
         // Back in front: the keypad's call button reflects the real state of the current dial attempt (released if it
         // was established, ended or timed out while the app was in the background).
         DialAttempts.revalidate(this)
+        // Opening the app syncs at once with linked phones, so their newest calls are in Recents straight away.
+        AccountDeviceHistoryManager.syncOnEvent(this, "app_opened")
         // Android does not restart the PC link after a force stop or an update. If the user left it on, bring it back
         // whenever the app comes to the front, so the PC Link switch matches what the user chose.
         if (LinkPrefs(this).autoStart && !LinkState.running) LinkService.start(this)
