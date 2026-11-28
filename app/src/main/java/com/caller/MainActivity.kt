@@ -961,8 +961,10 @@ class MainActivity : ComponentActivity() {
     private var recentCallsRefreshJob: Job? = null
     private var pendingRecentCallsRefresh = false
     private var pendingRecentCallsRefreshDelay = false
+    // Synced calls from linked devices show in Recents. Reloaded only while this screen is on screen: each reload reads the
+    // call log and regroups everything (seconds of work), and onResume reloads anyway (battery).
     private val accountHistoryListener: () -> Unit = {
-        if (hasReadCallLogPermission()) refreshRecentCalls(withDelay = false)
+        if (isMainActivityVisible && hasReadCallLogPermission()) refreshRecentCalls(withDelay = false)
     }
     private var contactMergeDecisions by mutableStateOf<Map<String, String>>(emptyMap())
     private var pendingDuplicateCandidate by mutableStateOf<DuplicateContactCandidate?>(null)

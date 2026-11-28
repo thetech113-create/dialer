@@ -91,9 +91,13 @@ object AppLogRecorder {
             var size = current.length()
             var writer = FileWriter(current, true)
             try {
-                process.inputStream.bufferedReader().forEachLine { line ->
+                val reader = process.inputStream.bufferedReader()
+                while (true) {
+                    val line = reader.readLine() ?: break
                     writer.append(line).append('\n')
-                    writer.flush()
+                    // Written in batches: flushed when no more lines are waiting (the next read would block), not once
+                    // per line - the app logs thousands of lines during a call (battery / storage writes).
+                    if (!reader.ready()) writer.flush()
                     size += line.length + 1
                     if (size > MAX_FILE_BYTES) {
                         writer.close()

@@ -212,7 +212,9 @@ object InCallServiceEnhancements {
                 "CallerApp:ProcessWarmup"
             ).apply {
                 setReferenceCounted(false)
-                acquire(10 * 60 * 1000L) // 10 minutes max
+                // Long enough for Telecom to bind the in-call service for a call that is starting; it was 10 minutes,
+                // also at every boot and phone-state change, which kept the phone awake for nothing (battery).
+                acquire(60 * 1000L)
             }
             Log.w(TAG, "Process wake lock acquired")
         } catch (e: Exception) {

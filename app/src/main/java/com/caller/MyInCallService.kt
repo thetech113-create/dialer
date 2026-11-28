@@ -137,6 +137,17 @@ private const val OPEN_UI_AFTER_ANSWER_EXTRA = "OPEN_UI_AFTER_ANSWER_EXTRA"
  * protects an immediate redial - Call B may already be live in Telecom before it is delivered into this
  * service's list, and the previous call's cleanup must not drop the service out from under it.
  */
+/**
+ * The in-call wake lock keeps the CPU awake (up to 4 hours) only while a call needs it. It is released once no call is
+ * live in this service and Telecom reports none, seen at [idleChecks] watchdog checks in a row - so a dial that never
+ * became a call, or a cleanup path that did not run, can no longer hold the phone awake for hours (battery drain).
+ */
+internal fun shouldReleaseIdleCallWakeLock(ownLiveCallCount: Int, telecomFrameworkInCall: Boolean, idleChecks: Int): Boolean =
+    ownLiveCallCount == 0 && !telecomFrameworkInCall && idleChecks >= CALL_WAKE_LOCK_IDLE_CHECKS_TO_RELEASE
+
+internal const val CALL_WAKE_LOCK_IDLE_CHECKS_TO_RELEASE = 2
+internal const val CALL_WAKE_LOCK_WATCHDOG_MS = 60_000L
+
 internal fun shouldTearDownAfterDisconnect(ownLiveCallCount: Int, telecomFrameworkInCall: Boolean): Boolean =
     ownLiveCallCount == 0 && !telecomFrameworkInCall
 
@@ -604,8 +615,34 @@ class MyInCallService : InCallService() {
                     if (transitionWakeLock?.isHeld == false) {
                         transitionWakeLock?.acquire(4 * 60 * 60 * 1000L)
                     }
+                    startCallWakeLockWatchdog()
                     InCallServiceEnhancements.warmUpProcess(this)
                 }
+            }
+
+            private var callWakeLockIdleChecks = 0
+            private val callWakeLockWatchdog = object : Runnable {
+                override fun run() {
+                    val lock = transitionWakeLock
+                    if (lock?.isHeld != true) return
+                    val live = getLiveCalls().size
+                    val framework = isTelecomFrameworkInCall()
+                    callWakeLockIdleChecks = if (live == 0 && !framework) callWakeLockIdleChecks + 1 else 0
+                    if (shouldReleaseIdleCallWakeLock(live, framework, callWakeLockIdleChecks)) {
+                        runCatching { lock.release() }
+                        Log.w(P2P_FORENSIC_TAG, "call_wake_lock action=release reason=no_call_for_${callWakeLockIdleChecks}_checks")
+                        return
+                    }
+                    bgHandler.postDelayed(this, CALL_WAKE_LOCK_WATCHDOG_MS)
+                }
+            }
+
+            /** While the in-call wake lock is held, check every minute that a call still needs it (battery). */
+            private fun startCallWakeLockWatchdog() {
+                if (!::bgHandler.isInitialized) return
+                callWakeLockIdleChecks = 0
+                bgHandler.removeCallbacks(callWakeLockWatchdog)
+                bgHandler.postDelayed(callWakeLockWatchdog, CALL_WAKE_LOCK_WATCHDOG_MS)
             }
 
             /**
@@ -3226,6 +3263,7 @@ class MyInCallService : InCallService() {
                     transitionWakeLock?.acquire(4 * 60 * 60 * 1000L) // 4-hour timeout for long calls
                     android.util.Log.e("OEM_FALLBACK_TRACE", "MyInCallService: PARTIAL_WAKE_LOCK acquired. Process freeze blocked.")
                 }
+                startCallWakeLockWatchdog()
 
                 // AUDIO FOCUS: Request for call to get maximum volume treatment
                 try {

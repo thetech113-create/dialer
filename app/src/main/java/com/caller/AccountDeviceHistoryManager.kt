@@ -125,6 +125,18 @@ data class SyncedCallRecord(
     val sourceDeviceName: String
 )
 
+/**
+ * How often linked devices are synced in the background while the phone is in use. It was every 45 s, day and night,
+ * whether or not any device was linked: a network request, a call-log read and a Recents reload each time (battery).
+ */
+internal const val PERIODIC_SYNC_INTERVAL_MS = 5 * 60 * 1000L
+
+/**
+ * Whether the periodic background sync runs now: only with a linked device to sync with, and only while the display is
+ * on. Syncs still run right away when the app starts, after every call, from the sync button and when a device links.
+ */
+internal fun shouldRunPeriodicSync(hasLinkedDevice: Boolean, displayOn: Boolean): Boolean = hasLinkedDevice && displayOn
+
 object AccountDeviceHistoryManager {
     private const val TAG = "AccountDeviceHistory"
     private const val PREFS_NAME = "account_device_history_prefs"
@@ -1174,12 +1186,24 @@ object AccountDeviceHistoryManager {
         }
 
         scope.launch {
+            // Once when the engine starts (the app was opened), then only while it is worth it (shouldRunPeriodicSync).
+            syncAccountNow(appCtx, showToast = false)
             while (engineRunning.get()) {
-                syncAccountNow(appCtx, showToast = false)
-                delay(45_000L)
+                delay(PERIODIC_SYNC_INTERVAL_MS)
+                if (shouldRunPeriodicSync(hasLinkedDevice(appCtx), isDisplayOn(appCtx))) {
+                    syncAccountNow(appCtx, showToast = false)
+                }
             }
         }
     }
+
+    /** A phone is linked to this one (directly or through a shared account): there is something to sync with. */
+    private fun hasLinkedDevice(context: Context): Boolean =
+        runCatching { getPeerDevices(context).isNotEmpty() || getLinkAccountIds(context).isNotEmpty() }.getOrDefault(true)
+
+    private fun isDisplayOn(context: Context): Boolean = runCatching {
+        (context.getSystemService(Context.POWER_SERVICE) as android.os.PowerManager).isInteractive
+    }.getOrDefault(true)
 
     private fun recordDirectSync(deviceId: String) {
         lastDirectSyncMs[deviceId.trim().ifBlank { UNKNOWN_PEER_KEY }] = System.currentTimeMillis()
