@@ -24,8 +24,9 @@ class IncomingBannerRetractionTest {
         anotherAppInFront: Boolean = false,
         otherLiveCalls: Int = 0,
         callScreenShowingThisCall: Boolean = false,
-        bannerOnlyForThisCall: Boolean = false
-    ) = decideIncomingMode(anotherAppInFront, otherLiveCalls, callScreenShowingThisCall, bannerOnlyForThisCall)
+        bannerOnlyForThisCall: Boolean = false,
+        silencedByPowerKey: Boolean = false
+    ) = decideIncomingMode(anotherAppInFront, otherLiveCalls, callScreenShowingThisCall, bannerOnlyForThisCall, silencedByPowerKey)
 
     // ---- Full screen: no banner at all ----
 
@@ -143,6 +144,13 @@ class IncomingBannerRetractionTest {
         assertFalse(isAnotherAppReading("default_launcher"))
         assertFalse(isAnotherAppReading("own_dialer"))
         assertTrue(ANOTHER_APP_READINGS_TO_SWITCH >= 2)
+    }
+
+    // Power key while the call screen was opening: quiet and nothing opened (no display turned back on, no banner).
+    @Test
+    fun silencedByPowerKey_quietAndNothingOpened() {
+        assertEquals(IncomingMode.FULL_SCREEN_SHOWN, mode(silencedByPowerKey = true))
+        assertFalse(shouldRealertIncomingBanner("A", IncomingSurface.FULL_SCREEN, bannerAlertedCallId = null, screenInteractive = false))
     }
 
     // Power key after the opening started: no more starts (they would turn the display back on). Display already off
