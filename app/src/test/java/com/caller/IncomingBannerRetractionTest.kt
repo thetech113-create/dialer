@@ -125,4 +125,64 @@ class IncomingBannerRetractionTest {
     fun noRingingCall_doesNotReAlert() {
         assertFalse(shouldRealertIncomingBanner(null, IncomingSurface.BANNER, bannerAlertedCallId = null, screenInteractive = true))
     }
+
+    // ---- Full screen opening: no banner flash before the call screen ----
+
+    // Home screen / this app, unlocked: Android would show the full-screen notification as a banner for a moment
+    // before the call screen covers it. Open it quietly instead.
+    @Test
+    fun unlockedPhoneInUse_fullScreenOpensQuietly() {
+        assertTrue(shouldOpenFullScreenQuietly("A", allowFullScreen = true, deviceLocked = false, screenInteractive = true, otherLiveCalls = 0, alreadyTriedForCallId = null))
+    }
+
+    // While it opens, the call is on the full-screen surface: re-posts stay quiet and never re-alert.
+    @Test
+    fun whileFullScreenOpens_surfaceIsFullScreen_noAlert() {
+        val surface = incomingSurfaceFor("A", retractedCallId = null, callScreenVisible = false, openingFullScreenCallId = "A")
+        assertEquals(IncomingSurface.FULL_SCREEN, surface)
+        assertFalse(shouldRealertIncomingBanner("A", surface, bannerAlertedCallId = null, screenInteractive = true))
+    }
+
+    // Locked or display off: Android launches the full-screen intent itself (no banner) - keep that path.
+    @Test
+    fun lockedOrDisplayOff_keepsFullScreenIntentPath() {
+        assertFalse(shouldOpenFullScreenQuietly("A", allowFullScreen = true, deviceLocked = true, screenInteractive = true, otherLiveCalls = 0, alreadyTriedForCallId = null))
+        assertFalse(shouldOpenFullScreenQuietly("A", allowFullScreen = true, deviceLocked = false, screenInteractive = false, otherLiveCalls = 0, alreadyTriedForCallId = null))
+    }
+
+    // Another app in front (bubble overlay): no full screen, so the banner - never quiet.
+    @Test
+    fun bubbleOverlay_neverOpensQuietly() {
+        assertFalse(shouldOpenFullScreenQuietly("A", allowFullScreen = false, deviceLocked = false, screenInteractive = true, otherLiveCalls = 0, alreadyTriedForCallId = null))
+        assertEquals(IncomingSurface.BANNER, incomingSurfaceFor("A", retractedCallId = null, callScreenVisible = false, openingFullScreenCallId = null))
+    }
+
+    // Call waiting: the call screen shows the active call, the waiting call's banner is the way to answer.
+    @Test
+    fun callWaiting_neverOpensQuietly() {
+        assertFalse(shouldOpenFullScreenQuietly("B", allowFullScreen = true, deviceLocked = false, screenInteractive = true, otherLiveCalls = 1, alreadyTriedForCallId = null))
+    }
+
+    // Only once per call: after the call screen did not appear (or was left), the banner path stays.
+    @Test
+    fun quietOpenOnlyOncePerCall() {
+        assertFalse(shouldOpenFullScreenQuietly("A", allowFullScreen = true, deviceLocked = false, screenInteractive = true, otherLiveCalls = 0, alreadyTriedForCallId = "A"))
+        assertTrue(shouldOpenFullScreenQuietly("B", allowFullScreen = true, deviceLocked = false, screenInteractive = true, otherLiveCalls = 0, alreadyTriedForCallId = "A"))
+    }
+
+    // The call screen never appeared: the banner comes back (and pops), so the call can always be answered.
+    @Test
+    fun callScreenNotShown_fallsBackToBanner_andItPops() {
+        assertTrue(shouldFallBackToBanner(ringingCallId = "A", openingCallId = "A", callScreenVisible = false))
+        val surfaceAfterFallback = incomingSurfaceFor("A", retractedCallId = null, callScreenVisible = false, openingFullScreenCallId = null)
+        assertEquals(IncomingSurface.BANNER, surfaceAfterFallback)
+        assertTrue(shouldRealertIncomingBanner("A", surfaceAfterFallback, bannerAlertedCallId = null, screenInteractive = true))
+    }
+
+    @Test
+    fun callScreenShown_noFallback() {
+        assertFalse(shouldFallBackToBanner(ringingCallId = "A", openingCallId = "A", callScreenVisible = true))
+        assertFalse(shouldFallBackToBanner(ringingCallId = "B", openingCallId = "A", callScreenVisible = false))
+        assertFalse(shouldFallBackToBanner(ringingCallId = null, openingCallId = "A", callScreenVisible = false))
+    }
 }
