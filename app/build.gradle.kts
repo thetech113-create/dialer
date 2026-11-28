@@ -15,8 +15,8 @@ android {
         applicationId = "com.caller"
         minSdk = 26
         targetSdk = 35
-        versionCode = 253
-        versionName = "8.10.115"
+        versionCode = 254
+        versionName = "8.10.116"
     }
 
     // Release signing key. Play Protect treats a sensitive app (SMS / call log / contacts /

@@ -968,7 +968,9 @@ class MainActivity : ComponentActivity() {
     }
     // Android writes a finished call to the call log on its own schedule, often after the one delayed reload that
     // follows the end of a call. Without watching the log, Recents (and the keypad's redial number) kept showing the
-    // previous call until something else reloaded it. Watched only while this screen is on screen.
+    // previous call until something else reloaded it. Watched for as long as this screen exists, also while it is in
+    // the background (as Google Phone keeps its call-log observer for the life of its process), so Recents is already
+    // current when the app is opened instead of showing the old list and then reloading in front of the user.
     private var callLogObserver: ContentObserver? = null
     // The keypad's redial number, read the way Google Phone reads it: the newest OUTGOING call, straight from the call
     // log (not the Recents list, which can lag behind the log and also holds incoming and missed calls). Re-read when
@@ -2189,7 +2191,6 @@ class MainActivity : ComponentActivity() {
     override fun onStop() {
         super.onStop()
         isMainActivityVisible = false
-        unregisterCallLogObserver()
         incomingUiGateMainVisible = false
         // Fallback: if the call screen never announced itself, the keypad is out of sight now anyway.
         applyDeferredKeypadClear("onStop")
