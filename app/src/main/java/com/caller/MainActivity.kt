@@ -898,17 +898,26 @@ internal fun buildRecentCallsSnapshot(context: Context, contacts: List<Contact>)
 }
 
 /**
- * Whether the dialer should show its own "Call not sent" after dialing. It must stay silent whenever a
- * call is actually up: reconcileFrameworkCall adopted a live call (reconciledLiveCall), our InCallService
- * saw onCallAdded (callStartedAfterDispatch), or Telecom reports any live call (telecomInCall). Both
- * rapid-retry scenarios (same and different number) connect, so telecomInCall is true and this returns
- * false — no false "Call not sent" after a successful connection.
+ * Whether the dialer should show its own "Call not sent" for THIS dial: only when this dial produced no call.
+ *
+ * [newCallForThisDial]: a call is live in our service that was not live when the dial was sent.
+ * [callStartedAfterDispatch]: our InCallService saw onCallAdded after the dial was sent.
+ * [telecomInCallAttributableToThisDial]: Telecom reports a live call AND no call was live before this dial, so that
+ * call can only be this one (even if our service never received it). When a call was already up before the dial,
+ * Telecom being "in call" says nothing about this dial - the old rule used the global flag and therefore stayed
+ * silent whenever any call was live, while the system showed its own "Call not sent".
+ *
+ * A connected call (including the immediate-redial cases) has a new call or onCallAdded, so no false message.
  */
 internal fun shouldReportCallNotSent(
-    reconciledLiveCall: Boolean,
+    newCallForThisDial: Boolean,
     callStartedAfterDispatch: Boolean,
-    telecomInCall: Boolean
-): Boolean = !reconciledLiveCall && !callStartedAfterDispatch && !telecomInCall
+    telecomInCallAttributableToThisDial: Boolean
+): Boolean = !newCallForThisDial && !callStartedAfterDispatch && !telecomInCallAttributableToThisDial
+
+/** Telecom's global "in call" can be credited to a dial only when no call was live before that dial. */
+internal fun isTelecomInCallAttributableToDial(telecomInCall: Boolean, callsLiveBeforeDial: Int): Boolean =
+    telecomInCall && callsLiveBeforeDial == 0
 
 /**
  * Whether a new outgoing dial must be ignored because an earlier dial is still being set up. Telecom refuses a
@@ -3915,6 +3924,8 @@ class MainActivity : ComponentActivity() {
             if (hasCallPhonePermission()) {
                 val dispatchAtElapsed = android.os.SystemClock.elapsedRealtime()
                 val pendingDialMarker = pendingDialDispatchedAtElapsed
+                // Calls already live before this dial: anything new afterwards belongs to this dial.
+                val liveCallIdsAtDispatch = MyInCallService.getInstance()?.liveCallIds().orEmpty()
                 telecomManager.placeCall(finalUri, extras)
                 // Some OEMs (e.g. ColorOS) silently refuse placeCall while a previous call is still tearing down
                 // and show their own "Call not sent" with no reason, and placeCall does not throw. If no call has
@@ -3927,12 +3938,15 @@ class MainActivity : ComponentActivity() {
                     // onCallAdded completing (seen on rapid back-to-back redials): reconcile against
                     // this.calls first, so a connected call is adopted and shown instead of being
                     // mistaken for "not sent".
-                    val reconciledLiveCall =
-                        MyInCallService.getInstance()?.reconcileFrameworkCall("post_place_call") ?: false
+                    MyInCallService.getInstance()?.reconcileFrameworkCall("post_place_call")
+                    val liveCallIdsNow = MyInCallService.getInstance()?.liveCallIds().orEmpty()
+                    val newCallForThisDial = (liveCallIdsNow - liveCallIdsAtDispatch).isNotEmpty()
                     val callStartedAfterDispatch =
                         MyInCallService.lastCallAddedElapsedRealtime >= dispatchAtElapsed
-                    val telecomBusy = runCatching { telecomManager.isInCall }.getOrDefault(false)
-                    if (shouldReportCallNotSent(reconciledLiveCall, callStartedAfterDispatch, telecomBusy)) {
+                    val telecomInCall = runCatching { telecomManager.isInCall }.getOrDefault(false)
+                    val telecomInCallAttributableToThisDial =
+                        isTelecomInCallAttributableToDial(telecomInCall, liveCallIdsAtDispatch.size)
+                    if (shouldReportCallNotSent(newCallForThisDial, callStartedAfterDispatch, telecomInCallAttributableToThisDial)) {
                         Log.w(P2P_FORENSIC_TAG, "call_not_sent reason=no_call_created_after_place_call")
                         showError("Call not sent — the phone didn't start the call. Please try again in a moment.")
                     }

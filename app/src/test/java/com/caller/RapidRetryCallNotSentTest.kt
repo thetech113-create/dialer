@@ -5,72 +5,92 @@ import org.junit.Assert.assertTrue
 import org.junit.Test
 
 /**
- * Rapid-retry regression (app log 2026-11-25 12:11, ColorOS): a first outgoing call ends, an immediate
- * redial connects (audio present), but the framework delivered the call to our InCallService without our
- * onCallAdded completing, so the app showed no call UI/bubble/notification and wrongly displayed
- * "Call not sent".
+ * The app's own "Call not sent", decided per dial: it appears only when THIS dial produced no call.
  *
- * reconcileFrameworkCall() re-adopts the call from the authoritative this.calls list; shouldReportCallNotSent()
- * then guarantees the dialer never claims "Call not sent" while a call is actually up. These tests pin that
- * decision for both reproduction scenarios (same number and different number).
+ * Rapid-retry regression (app log 2026-11-25 12:11, ColorOS): a redial connected but was not adopted by the app;
+ * it must never be reported "Call not sent". App log 2026-11-28 08:04: a second dial was refused while another
+ * call was live; the old rule used the global "Telecom in call" flag, so the app stayed silent and only the
+ * system's own "Call not sent" appeared.
  */
 class RapidRetryCallNotSentTest {
 
-    // Scenario A (same number) and Scenario B (different number): the retry connects, so Telecom reports a
-    // live call. No false "Call not sent" may appear after a successful connection.
+    // Redial from idle connects but our service never received it: Telecom's live call can only be this dial.
     @Test
-    fun connectedRetryNeverReportsCallNotSent_viaTelecomInCall() {
+    fun connectedRetryFromIdle_neverReportsCallNotSent() {
         assertFalse(
             shouldReportCallNotSent(
-                reconciledLiveCall = false,
+                newCallForThisDial = false,
                 callStartedAfterDispatch = false,
-                telecomInCall = true
+                telecomInCallAttributableToThisDial = true
             )
         )
     }
 
-    // The reconcile adopted the framework-live call that the missed callback dropped: not "not sent".
+    // Reconciliation adopted the dial's call into this.calls (a new call id): not "not sent".
     @Test
-    fun reconciledLiveCallNeverReportsCallNotSent() {
+    fun newCallForThisDial_neverReportsCallNotSent() {
         assertFalse(
             shouldReportCallNotSent(
-                reconciledLiveCall = true,
+                newCallForThisDial = true,
                 callStartedAfterDispatch = false,
-                telecomInCall = false
+                telecomInCallAttributableToThisDial = false
             )
         )
     }
 
-    // Our own onCallAdded ran for the dialed call: not "not sent".
+    // Our onCallAdded ran for the dialed call: not "not sent".
     @Test
-    fun ownCallAddedNeverReportsCallNotSent() {
+    fun ownCallAdded_neverReportsCallNotSent() {
         assertFalse(
             shouldReportCallNotSent(
-                reconciledLiveCall = false,
+                newCallForThisDial = false,
                 callStartedAfterDispatch = true,
-                telecomInCall = false
+                telecomInCallAttributableToThisDial = false
             )
         )
     }
 
-    // The genuine failure: the dial produced no call anywhere (the OEM silently refused placeCall). Only
-    // here does the dialer show its own "Call not sent".
+    // The dial produced no call anywhere (the OEM silently refused placeCall): report.
     @Test
-    fun noCallAnywhereReportsCallNotSent() {
+    fun noCallAnywhere_reportsCallNotSent() {
         assertTrue(
             shouldReportCallNotSent(
-                reconciledLiveCall = false,
+                newCallForThisDial = false,
                 callStartedAfterDispatch = false,
-                telecomInCall = false
+                telecomInCallAttributableToThisDial = false
             )
         )
     }
 
-    // Any single signal of a live call is enough to stay silent.
+    // A call was already up before this dial (e.g. hold-then-place) and the new dial was refused: Telecom being
+    // "in call" belongs to the other call, so it is not attributable -> the app now reports it (it used to stay
+    // silent while only the system's "Call not sent" appeared).
     @Test
-    fun anyLiveSignalSuppressesCallNotSent() {
-        assertFalse(shouldReportCallNotSent(reconciledLiveCall = true, callStartedAfterDispatch = true, telecomInCall = true))
-        assertFalse(shouldReportCallNotSent(reconciledLiveCall = true, callStartedAfterDispatch = false, telecomInCall = true))
-        assertFalse(shouldReportCallNotSent(reconciledLiveCall = false, callStartedAfterDispatch = true, telecomInCall = true))
+    fun refusedDialWhileAnotherCallIsLive_reportsCallNotSent() {
+        // Telecom is in call (the other call), but one call was live before this dial.
+        val attributable = isTelecomInCallAttributableToDial(telecomInCall = true, callsLiveBeforeDial = 1)
+        assertFalse(attributable)
+        assertTrue(
+            shouldReportCallNotSent(
+                newCallForThisDial = false,
+                callStartedAfterDispatch = false,
+                telecomInCallAttributableToThisDial = attributable
+            )
+        )
+    }
+
+    // From idle, Telecom's live call can only be this dial's: credited to it, so no "not sent".
+    @Test
+    fun telecomInCallFromIdle_isAttributedToTheDial() {
+        assertTrue(isTelecomInCallAttributableToDial(telecomInCall = true, callsLiveBeforeDial = 0))
+        assertFalse(isTelecomInCallAttributableToDial(telecomInCall = false, callsLiveBeforeDial = 0))
+    }
+
+    // Any single signal that this dial produced a call is enough to stay silent.
+    @Test
+    fun anySignalOfThisDialsCall_suppressesCallNotSent() {
+        assertFalse(shouldReportCallNotSent(newCallForThisDial = true, callStartedAfterDispatch = true, telecomInCallAttributableToThisDial = true))
+        assertFalse(shouldReportCallNotSent(newCallForThisDial = true, callStartedAfterDispatch = false, telecomInCallAttributableToThisDial = true))
+        assertFalse(shouldReportCallNotSent(newCallForThisDial = false, callStartedAfterDispatch = true, telecomInCallAttributableToThisDial = true))
     }
 }

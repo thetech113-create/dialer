@@ -2859,15 +2859,9 @@ class MyInCallService : InCallService() {
                 }
             }
 
-            /**
-             * The user is placing a NEW outgoing call. Scope the previous call's cleanup to that call so
-             * it cannot affect this one: cancel its pending disconnect cleanup / transient-gap recovery
-             * (which would otherwise drop foreground, stopSelf and clear notifications/UI ~350 ms after
-             * the previous call ended), clear the termination-suppress flag, and re-assert the service as
-             * explicitly started so the new call is delivered into a live, prioritized InCallService
-             * instead of one mid-teardown. This is the lifecycle fix for immediate redial; reconciliation
-             * remains only as the recovery net.
-             */
+            /** Identities (stableCallId) of the calls live in this service now - used to tell whether a dial added a call. */
+            fun liveCallIds(): Set<String> = getLiveCalls().map { stableCallId(it) }.toSet()
+
             /**
              * Outgoing calls still being set up - not yet answered, not ended. Telecom refuses a second outgoing call
              * while one of these exists (the OEM then shows its own "Call not sent"), so the dialer must not send one.
@@ -2880,6 +2874,15 @@ class MyInCallService : InCallService() {
                     it.state == Call.STATE_SELECT_PHONE_ACCOUNT
             }
 
+            /**
+             * The user is placing a NEW outgoing call. Scope the previous call's cleanup to that call so
+             * it cannot affect this one: cancel its pending disconnect cleanup / transient-gap recovery
+             * (which would otherwise drop foreground, stopSelf and clear notifications/UI ~350 ms after
+             * the previous call ended), clear the termination-suppress flag, and re-assert the service as
+             * explicitly started so the new call is delivered into a live, prioritized InCallService
+             * instead of one mid-teardown. This is the lifecycle fix for immediate redial; reconciliation
+             * remains only as the recovery net.
+             */
             fun prepareForNewOutgoingCall(source: String) {
                 cancelPendingDisconnectCleanup("new_outgoing_call:$source")
                 cancelTransientCallGapRecovery("new_outgoing_call:$source")
