@@ -2877,7 +2877,7 @@ class MyInCallService : InCallService() {
             }
 
             /** The calls live in this service now (ended / disconnecting ones excluded), for the outgoing-dial guard. */
-            fun dialGuardCallPhases(): Map<String, LiveCallPhase> =
+            internal fun dialGuardCallPhases(): Map<String, LiveCallPhase> =
                 getLiveCalls().associate { stableCallId(it) to dialGuardPhase(it) }
 
             /**
