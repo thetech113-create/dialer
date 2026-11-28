@@ -240,6 +240,16 @@ private fun secondaryCallBannerTitle(callState: CallState): String {
 internal fun showSecondaryCallAction(primaryState: String?, secondaryState: String?): Boolean =
     secondaryState == "RINGING" || setOf(primaryState, secondaryState) == setOf("ACTIVE", "HOLDING")
 
+/**
+ * A launch that asks for an incoming (ringing) call screen while the phone has no call is a leftover, never a call:
+ * incoming screens are only opened after the phone has the ringing call. On 2026-11-28 a leftover launch carrying an
+ * earlier call's "RINGING, SAKET" opened a ringing screen and announced the caller with no call on the phone.
+ * Dialling launches are not judged here: the widget opens the screen right after placeCall, before the phone may
+ * report the call.
+ */
+internal fun isStaleIncomingLaunch(stateHint: String?, phoneHasLiveCall: Boolean): Boolean =
+    stateHint == "RINGING" && !phoneHasLiveCall
+
 private fun secondaryCallActionText(secondaryState: String?): String {
     return if (secondaryState == "RINGING") "Swap & answer" else "Swap"
 }
@@ -1898,6 +1908,11 @@ class CallActivity : ComponentActivity() {
         if (isTerminalHint(intent) && !hasLiveCall()) {
             Log.w(CALL_UI_FORENSIC_TAG, "onCreate blocked: terminal hint and no live call")
             finishCallUiAfterCall("onCreate_terminal_no_live_call")
+            return
+        }
+        if (isStaleIncomingLaunch(intent?.getStringExtra(CALL_UI_EXTRA_STATE_HINT), hasLiveCall())) {
+            Log.w(CALL_UI_FORENSIC_TAG, "onCreate blocked: ringing launch but the phone has no call (leftover launch)")
+            finishCallUiAfterCall("onCreate_stale_incoming_no_live_call")
             return
         }
         isFinishingCallUi = false
